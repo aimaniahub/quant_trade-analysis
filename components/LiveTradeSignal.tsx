@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { api } from '../lib/api';
+import { useApiQuery } from '../lib/hooks/useApiQuery';
 
 interface TradeRecommendation {
     action: string;
@@ -52,34 +53,19 @@ interface LiveTradeSignalProps {
 }
 
 export default function LiveTradeSignal({ symbol, autoRefresh = true, refreshInterval = 30000 }: LiveTradeSignalProps) {
-    const [data, setData] = useState<TradeSignalData | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-    const fetchSignal = async () => {
-        try {
-            setError(null);
-            const response = await api.market.getLiveTradeSignal(symbol);
-            setData(response);
-            setLastUpdated(new Date());
-        } catch (err: any) {
-            setError(err.response?.data?.detail || err.message || 'Failed to fetch signal');
-        } finally {
-            setLoading(false);
-        }
-    };
+    const { data, isLoading, error } = useApiQuery<TradeSignalData>(
+        ['market', 'live-trade-signal', symbol],
+        () => api.market.getLiveTradeSignal(symbol) as Promise<TradeSignalData>,
+        {
+            enabled: Boolean(symbol),
+            refetchInterval: autoRefresh ? refreshInterval : false,
+            onSuccess: () => setLastUpdated(new Date()),
+        },
+    );
 
-    useEffect(() => {
-        fetchSignal();
-
-        if (autoRefresh) {
-            const interval = setInterval(fetchSignal, refreshInterval);
-            return () => clearInterval(interval);
-        }
-    }, [symbol, autoRefresh, refreshInterval]);
-
-    if (loading) {
+    if (isLoading && !data) {
         return (
             <div className="p-6 bg-zinc-900 rounded-2xl border border-zinc-800 animate-pulse">
                 <div className="h-6 bg-zinc-800 rounded w-1/3 mb-4" />
@@ -92,7 +78,7 @@ export default function LiveTradeSignal({ symbol, autoRefresh = true, refreshInt
     if (error) {
         return (
             <div className="p-6 bg-rose-500/10 rounded-2xl border border-rose-500/30">
-                <p className="text-rose-400 text-sm">{error}</p>
+                <p className="text-rose-400 text-sm">{error.message}</p>
             </div>
         );
     }

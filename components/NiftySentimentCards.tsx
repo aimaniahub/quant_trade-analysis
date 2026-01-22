@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { api } from '../lib/api';
+import { useApiQuery } from '../lib/hooks/useApiQuery';
 
 interface VixData {
     value: number | null;
@@ -71,30 +72,16 @@ interface NiftySentimentCardsProps {
 }
 
 export default function NiftySentimentCards({ autoRefresh = true, refreshInterval = 30000 }: NiftySentimentCardsProps) {
-    const [data, setData] = useState<SentimentData | null>(null);
-    const [loading, setLoading] = useState(true);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-    const fetchSentiment = async () => {
-        try {
-            const response = await api.market.getNiftySentiment();
-            setData(response);
-            setLastUpdated(new Date());
-        } catch (error) {
-            console.error('Failed to fetch sentiment:', error);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        fetchSentiment();
-
-        if (autoRefresh) {
-            const interval = setInterval(fetchSentiment, refreshInterval);
-            return () => clearInterval(interval);
-        }
-    }, [autoRefresh, refreshInterval]);
+    const { data, isLoading, error } = useApiQuery<SentimentData>(
+        ['market', 'nifty-sentiment'],
+        () => api.market.getNiftySentiment() as Promise<SentimentData>,
+        {
+            refetchInterval: autoRefresh ? refreshInterval : false,
+            onSuccess: () => setLastUpdated(new Date()),
+        },
+    );
 
     const getColorClass = (color: string) => {
         switch (color) {
@@ -113,7 +100,7 @@ export default function NiftySentimentCards({ autoRefresh = true, refreshInterva
         return '–';
     };
 
-    if (loading) {
+    if (isLoading && !data) {
         return (
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 animate-pulse">
                 {[...Array(5)].map((_, i) => (
@@ -123,7 +110,7 @@ export default function NiftySentimentCards({ autoRefresh = true, refreshInterva
         );
     }
 
-    if (!data) {
+    if (!data || error) {
         return (
             <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400">
                 Failed to load sentiment data

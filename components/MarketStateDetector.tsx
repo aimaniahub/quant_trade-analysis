@@ -1,7 +1,7 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { api } from "../lib/api";
+import { useApiQuery } from "../lib/hooks/useApiQuery";
 
 interface MarketStateData {
     symbol: string;
@@ -33,28 +33,15 @@ interface MarketStateData {
 }
 
 export default function MarketStateDetector() {
-    const [state, setState] = useState<MarketStateData | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
+    const { data, isLoading } = useApiQuery<MarketStateData>(
+        ["market", "state"],
+        () => api.market.getMarketState() as Promise<MarketStateData>,
+        {
+            refetchInterval: 30000,
+        },
+    );
 
-    useEffect(() => {
-        const fetchState = async () => {
-            try {
-                const data = await api.market.getMarketState();
-                setState(data);
-                setError(null);
-            } catch (err: any) {
-                setError(err.message || 'Failed to fetch market state');
-            } finally {
-                setLoading(false);
-            }
-        };
-
-        fetchState();
-        // Refresh every 30 seconds
-        const interval = setInterval(fetchState, 30000);
-        return () => clearInterval(interval);
-    }, []);
+    const state = data ?? null;
 
     const stateColors: Record<string, string> = {
         'TREND': 'bg-blue-500 text-white',
@@ -76,7 +63,7 @@ export default function MarketStateDetector() {
     const currentState = state?.state || 'NO-TRADE';
     const timeWindow = state?.time_window || 'post_market';
 
-    if (loading) {
+    if (isLoading && !state) {
         return (
             <div className="p-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-sm animate-pulse">
                 <div className="flex items-center gap-3">

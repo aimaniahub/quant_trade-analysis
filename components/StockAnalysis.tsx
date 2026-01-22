@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import { useApiQuery } from '../lib/hooks/useApiQuery';
 
 interface StockAnalysis {
     symbol: string;
@@ -60,29 +61,32 @@ interface StockAnalysisProps {
 }
 
 export default function StockAnalysis({ onBack }: StockAnalysisProps) {
-    const [data, setData] = useState<ScanResponse | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [filter, setFilter] = useState<FilterType>('all');
-    const [refreshing, setRefreshing] = useState(false);
+    const [progress, setProgress] = useState(0);
 
-    const fetchData = async () => {
-        try {
-            setRefreshing(true);
-            const result = await api.market.scanStocks(20, false);
-            setData(result);
-            setError(null);
-        } catch (err: any) {
-            setError(err.message || 'Failed to scan stocks');
-        } finally {
-            setLoading(false);
-            setRefreshing(false);
-        }
-    };
+    const { data, isLoading, error, isFetching, refetch } = useApiQuery<ScanResponse>(
+        ['market', 'stocks-scan'],
+        () => api.market.scanStocks(20, false) as Promise<ScanResponse>,
+    );
 
+    // Simulated progress indicator while scanning for stocks
     useEffect(() => {
-        fetchData();
-    }, []);
+        const active = isLoading || isFetching;
+
+        if (active) {
+            setProgress(0);
+            const id = setInterval(() => {
+                setProgress(prev => {
+                    if (prev >= 90) return prev;
+                    return prev + 2;
+                });
+            }, 100);
+            return () => clearInterval(id);
+        }
+
+        setProgress(100);
+        return undefined;
+    }, [isLoading, isFetching]);
 
     const stateColors: Record<string, string> = {
         'TREND': 'bg-blue-500',
@@ -108,7 +112,7 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
         return symbol.replace('NSE:', '').replace('-EQ', '');
     };
 
-    if (loading) {
+    if (isLoading && !data) {
         return (
             <div className="min-h-screen bg-zinc-50 dark:bg-black text-zinc-900 dark:text-zinc-100 p-4 md:p-8">
                 <div className="max-w-7xl mx-auto">
@@ -159,12 +163,17 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                     </div>
                     <div className="flex items-center gap-3">
                         <button
-                            onClick={fetchData}
-                            disabled={refreshing}
+                            onClick={() => refetch()}
+                            disabled={isFetching}
                             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-colors disabled:opacity-50"
                         >
-                            {refreshing ? 'Scanning...' : '🔄 Refresh'}
+                            {isFetching ? 'Scanning...' : '🔄 Refresh'}
                         </button>
+                        {(isLoading || isFetching) && (
+                            <span className="text-[10px] text-zinc-500">
+                                Scanning F&O universe: {progress}%
+                            </span>
+                        )}
                     </div>
                 </header>
 
@@ -192,7 +201,7 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                 {/* Error State */}
                 {error && (
                     <div className="p-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-xl mb-6">
-                        <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>
+                        <p className="text-sm text-rose-600 dark:text-rose-400">{error.message}</p>
                     </div>
                 )}
 
@@ -310,7 +319,7 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                 </div>
 
                 {/* Empty State */}
-                {filteredStocks.length === 0 && !loading && (
+                {filteredStocks.length === 0 && !isLoading && (
                     <div className="text-center py-12">
                         <p className="text-zinc-500">No stocks match the current filter.</p>
                         <button

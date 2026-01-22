@@ -1,7 +1,8 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { useState } from "react";
+import { api } from "../lib/api";
+import { useApiQuery } from "../lib/hooks/useApiQuery";
 
 const INDEX_SYMBOLS = [
     'NSE:NIFTY50-INDEX',
@@ -25,43 +26,35 @@ interface IndexData {
 }
 
 export default function MarketIndices() {
-    const [indicesData, setIndicesData] = useState<Record<string, IndexData>>({});
-    const [loading, setLoading] = useState(true);
     const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
 
-    const fetchIndices = async () => {
-        try {
-            const response = await api.market.getIndices();
-            if (response.success && response.data) {
-                const parsed: Record<string, IndexData> = {};
-                for (const quote of response.data) {
-                    const symbol = quote.n;
-                    const v = quote.v || {};
-                    parsed[symbol] = {
-                        ltp: v.lp || v.ltp || 0,
-                        ch: v.ch || 0,
-                        chp: v.chp || 0,
-                        open: v.open_price || 0,
-                        high: v.high_price || 0,
-                        low: v.low_price || 0
-                    };
-                }
-                setIndicesData(parsed);
+    const { data, isLoading, error } = useApiQuery(
+        ["market", "indices"],
+        () => api.market.getIndices(),
+        {
+            refetchInterval: 10000,
+            onSuccess: () => {
                 setLastUpdate(new Date());
-            }
-        } catch (err) {
-            console.error('Failed to fetch indices:', err);
-        } finally {
-            setLoading(false);
-        }
-    };
+            },
+        },
+    );
 
-    useEffect(() => {
-        fetchIndices();
-        // Refresh every 10 seconds
-        const interval = setInterval(fetchIndices, 10000);
-        return () => clearInterval(interval);
-    }, []);
+    const indicesData: Record<string, IndexData> = {};
+
+    if (data && (data as any).success && (data as any).data) {
+        for (const quote of (data as any).data as any[]) {
+            const symbol = quote.n;
+            const v = quote.v || {};
+            indicesData[symbol] = {
+                ltp: v.lp || v.ltp || 0,
+                ch: v.ch || 0,
+                chp: v.chp || 0,
+                open: v.open_price || 0,
+                high: v.high_price || 0,
+                low: v.low_price || 0,
+            };
+        }
+    }
 
     const hasData = Object.keys(indicesData).length > 0;
 
@@ -83,8 +76,8 @@ export default function MarketIndices() {
                             <span className="text-sm font-semibold text-zinc-500 dark:text-zinc-400">
                                 {INDEX_LABELS[symbol]}
                             </span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${hasData && ltp > 0 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800'}`}>
-                                {loading ? 'LOADING' : (hasData && ltp > 0 ? 'LIVE' : 'CLOSED')}
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${hasData && ltp > 0 ? "bg-emerald-500/10 text-emerald-500" : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"}`}>
+                                {isLoading ? "LOADING" : hasData && ltp > 0 ? "LIVE" : "CLOSED"}
                             </span>
                         </div>
                         <div className="flex items-baseline gap-2">
@@ -102,6 +95,11 @@ export default function MarketIndices() {
                     </div>
                 );
             })}
+            {error && (
+                <div className="mt-2 text-[10px] text-rose-500">
+                    Failed to load indices. Data may be delayed.
+                </div>
+            )}
         </div>
     );
 }

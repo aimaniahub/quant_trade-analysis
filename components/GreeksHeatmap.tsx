@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { api } from '../lib/api';
+import { useApiQuery } from '../lib/hooks/useApiQuery';
 
 interface HeatmapRow {
     strike: number;
@@ -41,31 +42,16 @@ interface GreeksHeatmapProps {
 }
 
 export default function GreeksHeatmap({ symbol, strikeCount = 15, autoRefresh = true, refreshInterval = 60000 }: GreeksHeatmapProps) {
-    const [data, setData] = useState<HeatmapData | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [viewMode, setViewMode] = useState<'delta' | 'gamma' | 'theta' | 'oi'>('delta');
 
-    const fetchHeatmap = async () => {
-        try {
-            setError(null);
-            const response = await api.market.getGreeksHeatmap(symbol, strikeCount);
-            setData(response);
-        } catch (err: any) {
-            setError(err.response?.data?.detail || err.message || 'Failed to fetch heatmap');
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        fetchHeatmap();
-
-        if (autoRefresh) {
-            const interval = setInterval(fetchHeatmap, refreshInterval);
-            return () => clearInterval(interval);
-        }
-    }, [symbol, strikeCount, autoRefresh, refreshInterval]);
+    const { data, isLoading, error } = useApiQuery<HeatmapData>(
+        ['market', 'greeks-heatmap', symbol, strikeCount],
+        () => api.market.getGreeksHeatmap(symbol, strikeCount) as Promise<HeatmapData>,
+        {
+            enabled: Boolean(symbol),
+            refetchInterval: autoRefresh ? refreshInterval : false,
+        },
+    );
 
     // Color intensity based on value
     const getHeatColor = (value: number, max: number, isPositive: boolean = true) => {
@@ -84,7 +70,7 @@ export default function GreeksHeatmap({ symbol, strikeCount = 15, autoRefresh = 
         return num.toFixed(decimals);
     };
 
-    if (loading) {
+    if (isLoading && !data) {
         return (
             <div className="p-6 bg-zinc-900 rounded-2xl border border-zinc-800 animate-pulse">
                 <div className="h-6 bg-zinc-800 rounded w-1/4 mb-4" />
@@ -100,7 +86,7 @@ export default function GreeksHeatmap({ symbol, strikeCount = 15, autoRefresh = 
     if (error) {
         return (
             <div className="p-6 bg-rose-500/10 rounded-2xl border border-rose-500/30">
-                <p className="text-rose-400 text-sm">{error}</p>
+                <p className="text-rose-400 text-sm">{error.message}</p>
             </div>
         );
     }

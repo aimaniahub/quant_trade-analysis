@@ -1,38 +1,23 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { api } from "../lib/api";
+import { useApiQuery } from "../lib/hooks/useApiQuery";
 
 interface OptionChainProps {
     symbol?: string;
 }
 
 export default function OptionChainTable({ symbol = 'NSE:NIFTY50-INDEX' }: OptionChainProps) {
-    const [chain, setChain] = useState<any>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
+    const { data: chain, isLoading, error, refetch } = useApiQuery<any>(
+        ["options", "chain", symbol],
+        () => api.options.getChain(symbol),
+        {
+            refetchInterval: 30000,
+            enabled: Boolean(symbol),
+        },
+    );
 
-    useEffect(() => {
-        const fetchChain = async () => {
-            try {
-                setLoading(true);
-                const data = await api.options.getChain(symbol);
-                setChain(data);
-                setError(null);
-            } catch (err: any) {
-                setError(err.message || 'Failed to fetch option chain');
-            } finally {
-                setLoading(false);
-            }
-        };
-
-        fetchChain();
-        // Refresh every 30 seconds for non-websocket updates
-        const interval = setInterval(fetchChain, 30000);
-        return () => clearInterval(interval);
-    }, [symbol]);
-
-    if (loading && !chain) {
+    if (isLoading && !chain) {
         return (
             <div className="w-full h-64 flex items-center justify-center bg-white dark:bg-zinc-900 border rounded-xl animate-pulse">
                 <span className="text-zinc-400">Loading Option Chain...</span>
@@ -43,9 +28,9 @@ export default function OptionChainTable({ symbol = 'NSE:NIFTY50-INDEX' }: Optio
     if (error) {
         return (
             <div className="w-full p-8 text-center bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-800 rounded-xl">
-                <p className="text-rose-500 font-medium">{error}</p>
+                <p className="text-rose-500 font-medium">{error.message}</p>
                 <button
-                    onClick={() => window.location.reload()}
+                    onClick={() => refetch()}
                     className="mt-4 px-4 py-2 bg-rose-500 text-white rounded-md text-sm hover:bg-rose-600 transition-colors"
                 >
                     Retry
