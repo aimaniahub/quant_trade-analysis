@@ -1,0 +1,34 @@
+# FastAPI and ASGI server
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# WebSocket support
+websockets>=14.0
+
+# HTTP client for external APIs
+httpx>=0.28.0
+aiohttp>=3.11.0
+
+# Data processing (Python 3.13 compatible)
+pandas>=2.2.0
+numpy>=2.0.0
+scipy>=1.12.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Pydantic for data validation (Python 3.13 compatible)
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# Async support
+asyncio-throttle>=1.0.2
+
+# Fyers API (for market data)
+fyers-apiv3>=3.0.4
+
+# CORS middleware
+python-multipart>=0.0.19
+
+# TOTP for automated login
+pyotp>=2.9.0

@@ -1,0 +1,40 @@
+# Root .gitignore for consolidated project
+
+# Python (Backend)
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+backend/*.py[cod]
+backend/*$py.class
+backend/*.so
+backend/dist/
+backend/build/
+backend/*.egg-info/
+backend/.pytest_cache/
+backend/.coverage
+backend/htmlcov/
+backend/*.log
+
+# Node.js (Frontend)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.vercel/
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.pnpm-debug.log*
+
+# General
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.pem
+.idea/
+.vscode/
+*.swp
+*.swo
