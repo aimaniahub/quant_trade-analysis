@@ -69,10 +69,11 @@ export const api = {
             }),
 
         // Quant Dashboard methods
-        getNiftySentiment: () => api.fetch('/market/nifty-sentiment'),
         getLiveTradeSignal: (symbol: string) => api.fetch(`/market/live-trade-signal/${symbol}`),
         getGreeksHeatmap: (symbol: string, strikeCount = 15) =>
             api.fetch(`/market/greeks-heatmap/${symbol}?strike_count=${strikeCount}`),
+        // VAT Strategy
+        scanVAT: (symbol = "NSE:NIFTY50-INDEX") => api.fetch(`/strategies/vat/scan?symbol=${symbol}`),
     },
 
     /**

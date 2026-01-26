@@ -45,6 +45,10 @@ def create_app() -> FastAPI:
     app.include_router(websocket.router, prefix=settings.api_prefix, tags=["WebSocket"])
     app.include_router(mcp.router, prefix=settings.api_prefix, tags=["Agentic AI (MCP)"])
     
+    # Strategies
+    from app.routes import strategies
+    app.include_router(strategies.router, prefix=settings.api_prefix, tags=["Strategies"])
+    
     return app
 
 

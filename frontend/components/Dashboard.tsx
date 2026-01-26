@@ -9,8 +9,9 @@ import ActiveStrategy from './ActiveStrategy';
 import RealTimeAlerts from './RealTimeAlerts';
 import StockAnalysis from './StockAnalysis';
 import QuantDashboard from './QuantDashboard';
+import VATScanner from './VATScanner';
 
-type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard';
+type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner';
 
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState<ViewType>('dashboard');
@@ -20,9 +21,13 @@ export default function Dashboard() {
         return <StockAnalysis onBack={() => setCurrentView('dashboard')} />;
     }
 
-    // Show Quant Dashboard page
     if (currentView === 'quantDashboard') {
         return <QuantDashboard onBack={() => setCurrentView('dashboard')} />;
+    }
+
+    // Show VAT Scanner page
+    if (currentView === 'vatScanner') {
+        return <VATScanner onBack={() => setCurrentView('dashboard')} />;
     }
 
     return (
@@ -48,6 +53,12 @@ export default function Dashboard() {
                         className="px-4 py-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         📊 Stocks Option
+                    </button>
+                    <button
+                        onClick={() => setCurrentView('vatScanner')}
+                        className="px-4 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-700 hover:to-rose-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
+                    >
+                        ⚡ VAT Scanner
                     </button>
                     <AuthButton />
                 </div>
