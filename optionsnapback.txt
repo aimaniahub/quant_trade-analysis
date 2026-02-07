@@ -1,0 +1,114 @@
+This playbook outlines a high-probability, short-duration scalping strategy designed to capitalize on temporary option premium mispricing following a sharp liquidity shock in the underlying index. The core premise is not directional prediction but exploitation of market microstructure: panic-induced option selling creates a premium collapse, and the subsequent mandatory hedging (gamma rebalancing) by market makers forces a rapid repricing when the underlying index retraces.
+
+Instrument: Nifty Weekly Index Options (ATM) | Window: 9:25 AM - 10:30 AM | Holding Period: 2 to 8 minutes | Style: Reactive, rules-based scalp.
+
+1. Theoretical Foundation: The "Why" Behind the Setup
+1.1 Core Market Mechanism
+Liquidity Shock: A sharp, impulsive move in Nifty (≥ 0.8%) triggers panic selling in options, creating a severe order-flow imbalance.
+
+Premium Distortion: Option prices collapse (55-70%) beyond what implied volatility (IV) or delta would justify. This is a liquidity gap, not a fair value reassessment.
+
+Dealer Rebalancing: Market makers, obligated to provide liquidity, absorb the sell flow. Their resulting short/long gamma position forces them to continuously hedge their delta in the futures market.
+
+The Scalp Opportunity: When Nifty's momentum stalls and makes a minor retracement (often just 0.2-0.3%), the market makers' hedging activity in the opposite direction causes option premiums to snap back rapidly. The strategy captures this mechanical repricing.
+
+1.2 Critical Greek: Gamma
+Gamma (Γ) measures the rate of change of an option's delta. It is highest for At-The-Money (ATM) options with short time to expiry (weekly options). High gamma amplifies the effect of small index moves on the option's price and delta, creating the explosive re-pricing this strategy targets.
+
+2. The Complete Setup: Criteria & Conditions
+2.1 Prerequisites (Must All Be True)
+Trading Day: Normal volatility day. Avoid: Major news events (RBI policy, Budget), scheduled data releases, or weekly expiry (Thursday) after 11:00 AM.
+
+Time Window: 9:25 AM to 10:30 AM IST. This captures the post-opening volatility surge and peak dealer hedging activity.
+
+Underlying Action: Nifty must print a single, strong impulsive candle (1-min or 2-min) on significantly elevated volume. The candle should have a large body with small wicks.
+
+2.2 Signal & Entry Checklist
+Monitor the following sequence. All conditions should align within minutes.
+
+Step	What to Watch For	Visual/Data Cue
+1. Impulse Move	Nifty makes a sharp, high-volume move down (for targeting CALLs) or up (for PUTs).	1-min candle > 0.8% move. Volume > 1.5x 10-period average.
+2. Premium Collapse	ATM option premium plummets.	Premium drop of 55-70% from its pre-impulse level.
+3. Momentum Stall	Index momentum dissipates immediately.	Next 1-2 candles show a small range, a doji, or a hammer. The low of the impulse candle is not broken.
+4. Divergence Signal	Index makes a lower high or consolidates, but the option premium stops falling and begins to base.	This is the critical entry trigger. It indicates selling exhaustion and the start of dealer repricing.
+5. Entry Confirmation	Index shows a minor retracement (e.g., breaks above a 1-min resistance).	Place a LIMIT order to buy the option at or slightly above the current ask.
+Strike Selection: Only ATM or ±1 strike. Delta at entry should be between 0.30 and 0.55.
+
+3. Execution Protocol: Entry, Exit & Risk
+3.1 Entry Execution
+Order Type: Use a Limit Order. Avoid market orders to prevent slippage.
+
+Position Size: Risk per trade capped at 0.5% - 1% of total capital.
+
+Mindset: Enter only if the divergence (Step 4) is clear. If the setup is messy, WAIT. No trade is better than a forced bad trade.
+
+3.2 Exit Rules (Profit & Loss)
+Profit Target: 25% to 40% of the option's entry premium.
+
+Secondary Exit: If the index retraces 0.382 to 0.5 Fibonacci level of the original impulsive candle.
+
+Stop Loss (ABSOLUTE):
+
+Option Premium makes a new low below the entry bar.
+Nifty breaks and sustains below the low of the original impulsive candle.
+Time Stop: If the trade is not working within 3-4 minutes, consider an early scratch, even if stops are not hit.
+
+3.3 Risk Management Commandments
+No Averaging Down. Ever.
+
+No Widening Stops. Ever.
+
+Respect the Time Window. Do not trade this setup after 10:45 AM.
+
+One Setup Per Day. If you miss the clean entry, do not chase. If you take a loss, stop trading this strategy for the day.
+
+4. Example Scenarios
+Scenario 1: The Textbook Scalp (Successful Trade)
+Time: 9:32 AM
+
+Action: Nifty, trading at 22,500, drops 100 points (~0.45%) in one large red candle on high volume.
+
+Option Impact: The ATM 22,500 CALL premium collapses from ₹120 to ₹50 (-58%).
+
+Stall: The next two candles are small and do not break the low.
+
+Divergence & Entry: Nifty ticks up 15 points. The CALL premium, instead of falling further, holds at ₹50 and then jumps to ₹52. ENTER LONG CALL at ₹52.
+
+Exit: Over the next 4 minutes, Nifty retraces 40 points of its fall. The CALL premium rallies to ₹68. EXIT at ₹68 (a 30% gain from entry).
+
+Scenario 2: Failed Setup (Trend Day)
+Time: 9:28 AM
+
+Action: Nifty gaps down 150 points on negative global cues and continues selling in a series of strong red candles.
+
+Why It Fails: This is a sustained trend move, not a single impulsive candle. The premium will keep falling in tandem with the index. The "divergence" signal never appears. Market makers are not forced to reverse hedge aggressively.
+
+Trader Action: DO NOT ENTER. The setup is invalid. Recognize it as a strong trend day and stay out.
+
+5. Tools & Mindset
+5.1 Required Toolkit
+Charting Platform: With real-time 1-min candles, volume, and simple drawing tools for Fibonacci retracement.
+
+Option Chain Scanner: To monitor premium decay/rebound in real-time (e.g., Sensibull, NSE website option chain).
+
+Fast Brokerage Terminal: Direct market access (DMA) or a very fast retail platform is crucial to minimize slippage.
+
+5.2 The Trader Mindset
+You are a sniper, not a machine gunner. Patience is the primary skill.
+
+You are trading liquidity and dealer mechanics, not the index direction.
+
+Process Over Outcome: Adherence to this strict protocol is the only measure of success. A stopped-out trade that followed all rules is a "good trade."
+
+Appendix: Daily Preparation Checklist
+Pre-9:20 AM: Check for major scheduled news. If present, shelf the strategy.
+
+9:20 - 9:25 AM: Identify key support/resistance levels on the 5-min chart. Note the ATM strike.
+
+9:25 - 10:30 AM: Actively monitor for the Impulse → Collapse → Stall sequence.
+
+Upon Entry: Immediately set:
+
+Limit order for profit target.
+
+Mental or automated stop-loss.
