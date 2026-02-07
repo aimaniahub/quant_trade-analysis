@@ -54,6 +54,17 @@ async def refresh_token():
     return {"is_valid": is_valid, "message": message}
 
 
+@router.post("/reload-settings")
+async def reload_settings_endpoint():
+    """
+    Force reload settings from .env file.
+    """
+    from app.core.config import reload_settings
+    new_settings = reload_settings()
+    auth_service.settings = new_settings
+    return {"status": "success", "message": "Settings reloaded from .env"}
+
+
 @router.post("/auto-login")
 async def auto_login():
     """

@@ -172,13 +172,15 @@ class FyersAuthService:
         if not self.settings.fyers_access_token:
             return None
         
-        if self._fyers is None:
+        # Re-initialize if token changed or model doesn't exist
+        if self._fyers is None or getattr(self, "_last_token", None) != self.settings.fyers_access_token:
             self._fyers = fyersModel.FyersModel(
                 token=self.settings.fyers_access_token,
                 is_async=False,
                 client_id=self.settings.fyers_app_id,
                 log_path=""
             )
+            self._last_token = self.settings.fyers_access_token
         
         return self._fyers
     
