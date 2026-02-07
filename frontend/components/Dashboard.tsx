@@ -10,8 +10,9 @@ import RealTimeAlerts from './RealTimeAlerts';
 import StockAnalysis from './StockAnalysis';
 import QuantDashboard from './QuantDashboard';
 import VATScanner from './VATScanner';
+import MCPTradingPanel from './MCPTradingPanel';
 
-type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner';
+type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner' | 'mcpTrading';
 
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState<ViewType>('dashboard');
@@ -28,6 +29,11 @@ export default function Dashboard() {
     // Show VAT Scanner page
     if (currentView === 'vatScanner') {
         return <VATScanner onBack={() => setCurrentView('dashboard')} />;
+    }
+
+    // Show MCP Trading Panel
+    if (currentView === 'mcpTrading') {
+        return <MCPTradingPanel onBack={() => setCurrentView('dashboard')} />;
     }
 
     return (
@@ -59,6 +65,12 @@ export default function Dashboard() {
                         className="px-4 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-700 hover:to-rose-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         ⚡ VAT Scanner
+                    </button>
+                    <button
+                        onClick={() => setCurrentView('mcpTrading')}
+                        className="px-4 py-2 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
+                    >
+                        💹 Trading
                     </button>
                     <AuthButton />
                 </div>

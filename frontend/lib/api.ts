@@ -85,6 +85,25 @@ export const api = {
         analyze: (symbol: string) => api.fetch(`/options/analysis/${symbol}`),
         getAdjustments: (symbol: string) => api.fetch(`/options/adjustments/${symbol}`),
     },
+
+    /**
+     * MCP (Model Context Protocol) methods
+     */
+    mcp: {
+        getStatus: () => api.fetch('/mcp/status'),
+        listTools: () => api.fetch('/mcp/tools'),
+        callTool: (name: string, args: any = {}) =>
+            api.fetch('/mcp/call', {
+                method: 'POST',
+                body: JSON.stringify({ name, arguments: args }),
+            }),
+        batchCall: (calls: { name: string; arguments?: any }[]) =>
+            api.fetch('/mcp/batch', {
+                method: 'POST',
+                body: JSON.stringify({ calls }),
+            }),
+        getConfig: () => api.fetch('/mcp/config'),
+    },
 };
 
 /**
