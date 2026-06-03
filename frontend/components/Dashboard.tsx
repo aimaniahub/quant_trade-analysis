@@ -11,8 +11,9 @@ import StockAnalysis from './StockAnalysis';
 import QuantDashboard from './QuantDashboard';
 import VATScanner from './VATScanner';
 import MCPTradingPanel from './MCPTradingPanel';
+import MACrossoverDashboard from './MACrossoverDashboard';
 
-type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner' | 'mcpTrading';
+type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner' | 'mcpTrading' | 'maCrossover';
 
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState<ViewType>('dashboard');
@@ -34,6 +35,11 @@ export default function Dashboard() {
     // Show MCP Trading Panel
     if (currentView === 'mcpTrading') {
         return <MCPTradingPanel onBack={() => setCurrentView('dashboard')} />;
+    }
+
+    // Show MA Crossover Dashboard
+    if (currentView === 'maCrossover') {
+        return <MACrossoverDashboard onBack={() => setCurrentView('dashboard')} />;
     }
 
     return (
@@ -71,6 +77,12 @@ export default function Dashboard() {
                         className="px-4 py-2 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         💹 Trading
+                    </button>
+                    <button
+                        onClick={() => setCurrentView('maCrossover')}
+                        className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
+                    >
+                        📈 MA Crossover
                     </button>
                     <AuthButton />
                 </div>

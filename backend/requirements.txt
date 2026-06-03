@@ -1,13 +1,13 @@
 # FastAPI and ASGI server
 fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
+uvicorn>=0.32.0
 
 # WebSocket support
 websockets>=14.0
 
 # HTTP client for external APIs
 httpx>=0.28.0
-aiohttp>=3.11.0
+# aiohttp version managed by fyers-apiv3 dependency
 
 # Data processing (Python 3.13 compatible)
 pandas>=2.2.0
@@ -32,3 +32,7 @@ python-multipart>=0.0.19
 
 # TOTP for automated login
 pyotp>=2.9.0
+
+# Timezone conversions
+pytz
+

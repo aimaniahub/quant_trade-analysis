@@ -41,9 +41,15 @@ export const api = {
      */
     auth: {
         getLoginUrl: () => api.fetch<{ login_url: string }>('/auth/login'),
-        getStatus: () => api.fetch<{ authenticated: boolean; has_token: boolean; is_valid: boolean; user_info: any }>('/auth/status'),
+        getStatus: () => api.fetch<{ authenticated: boolean; has_token: boolean; is_valid: boolean; user_info: any; app_id: string | null }>('/auth/status'),
         autoLogin: () => api.fetch('/auth/auto-login', { method: 'POST' }),
         refreshToken: () => api.fetch('/auth/refresh', { method: 'POST' }),
+        submitAuthCode: (authCode: string) =>
+            api.fetch<{ status: string; message: string; info: string }>('/auth/token', {
+                method: 'POST',
+                body: JSON.stringify({ auth_code: authCode }),
+            }),
+        reloadSettings: () => api.fetch('/auth/reload-settings', { method: 'POST' }),
     },
 
     /**
@@ -72,6 +78,8 @@ export const api = {
         getLiveTradeSignal: (symbol: string) => api.fetch(`/market/live-trade-signal/${symbol}`),
         getGreeksHeatmap: (symbol: string, strikeCount = 15) =>
             api.fetch(`/market/greeks-heatmap/${symbol}?strike_count=${strikeCount}`),
+        // Nifty sentiment
+        getNiftySentiment: () => api.fetch('/market/nifty-sentiment'),
         // VAT Strategy
         scanVAT: (symbol = "NSE:NIFTY50-INDEX") => api.fetch(`/strategies/vat/scan?symbol=${symbol}`),
     },

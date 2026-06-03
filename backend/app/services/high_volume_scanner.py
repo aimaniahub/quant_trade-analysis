@@ -471,55 +471,64 @@ class HighVolumeScannerService:
         intel_analysis: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Generate actionable trade recommendation based on analysis.
+        Generate actionable trade recommendation based on institutional analysis.
         
         Returns:
-            Dict with trade type (CE/PE), strike, entry, stop-loss, target
+            Dict with action, expert_note, and suggested trades mapped from F&O Intelligence.
         """
         if not intel_analysis.get("tradable"):
             return {
                 "action": "NO_TRADE",
-                "reason": intel_analysis.get("message", "Market conditions not favorable")
+                "reason": intel_analysis.get("message", "Market conditions not favorable"),
+                "trades": []
             }
         
-        delta_bias = greeks_analysis.get("analysis", {}).get("delta_bias", "NEUTRAL")
+        guidance = intel_analysis.get("strike_guidance", {})
+        if not guidance.get("suggested"):
+            return {
+                "action": "WAIT",
+                "reason": intel_analysis.get("message", "No clear directional bias"),
+                "suggestion": guidance.get("expert_note", "Consider ATM straddle if expecting volatility"),
+                "trades": []
+            }
+        
+        bias = guidance.get("bias", "NEUTRAL")
+        raw_trades = guidance.get("trades", [])
+        
         support = oi_analysis.get("support")
         resistance = oi_analysis.get("resistance")
         
-        # Determine trade direction based on delta bias and OI
-        if delta_bias == "BULLISH" and support:
-            # Buy CE near support
-            strike = atm_strike  # ATM or slightly OTM
-            option_type = "CE"
-            entry_zone = f"Near ₹{spot_price:.0f}"
-            stop_loss = support
-            target = resistance if resistance else atm_strike * 1.02
-            confidence = "HIGH" if greeks_analysis.get("score", 0) > 50 else "MEDIUM"
-        elif delta_bias == "BEARISH" and resistance:
-            # Buy PE near resistance
-            strike = atm_strike
-            option_type = "PE"
-            entry_zone = f"Near ₹{spot_price:.0f}"
-            stop_loss = resistance
-            target = support if support else atm_strike * 0.98
-            confidence = "HIGH" if greeks_analysis.get("score", 0) > 50 else "MEDIUM"
-        else:
-            # Neutral - suggest straddle or wait
-            return {
-                "action": "WAIT",
-                "reason": "No clear directional bias",
-                "suggestion": "Consider ATM straddle if expecting volatility"
-            }
-        
+        formatted_trades = []
+        for trade in raw_trades:
+            option_type = trade.get("instrument")
+            strike = trade.get("strike")
+            
+            # Smart Stop Loss & Target projection based on OI Support/Resistance
+            if option_type == "CE":
+                stop_loss = support if support else (atm_strike * 0.98)
+                target = resistance if resistance else (atm_strike * 1.02)
+            else:
+                stop_loss = resistance if resistance else (atm_strike * 1.02)
+                target = support if support else (atm_strike * 0.98)
+                
+            formatted_trades.append({
+                "action": "BUY",
+                "type": trade.get("type", ""),
+                "option_type": option_type,
+                "strike": strike,
+                "entry_zone": f"Near ₹{spot_price:.0f}",
+                "stop_loss": round(stop_loss, 2) if stop_loss else 0,
+                "target": round(target, 2) if target else 0,
+                "confidence": "HIGH" if intel_analysis.get("confidence", 0) > 70 else "MEDIUM",
+                "reason": trade.get("rationale", "")
+            })
+            
         return {
-            "action": "BUY",
-            "option_type": option_type,
-            "strike": strike,
-            "entry_zone": entry_zone,
-            "stop_loss": stop_loss,
-            "target": target,
-            "confidence": confidence,
-            "reason": f"{delta_bias} bias with strong OI {'support' if option_type == 'CE' else 'resistance'}"
+            "action": "ACTIONABLE",
+            "bias": bias,
+            "expert_note": guidance.get("expert_note", ""),
+            "trades": formatted_trades,
+            "reason": f"Institutional bias: {bias}"
         }
     
     async def bulk_option_chain_analysis(

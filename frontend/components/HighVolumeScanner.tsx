@@ -138,7 +138,7 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
 
             // Deduplicate stocks by symbol
             if (result && result.top_stocks) {
-                const uniqueStocks = result.top_stocks.reduce((acc: HighVolumeStock[], current) => {
+                const uniqueStocks = result.top_stocks.reduce((acc: HighVolumeStock[], current: HighVolumeStock) => {
                     const x = acc.find(item => item.symbol === current.symbol);
                     if (!x) {
                         return acc.concat([current]);

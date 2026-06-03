@@ -1,9 +1,12 @@
 'use client';
 
+import { useState } from 'react';
 import { useAuth } from '../lib/hooks/useAuth';
+import AuthTokenModal from './AuthTokenModal';
 
 export default function AuthButton() {
-    const { status, loading, error, login, autoLogin } = useAuth();
+    const { status, loading, error, login, submitAuthCode } = useAuth();
+    const [showModal, setShowModal] = useState(false);
 
     if (loading) {
         return (
@@ -35,16 +38,23 @@ export default function AuthButton() {
     return (
         <div className="flex flex-col gap-2">
             <button
-                onClick={login}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors text-sm font-medium flex items-center gap-2"
+                onClick={() => setShowModal(true)}
+                className="px-4 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 text-white rounded-lg transition-all text-xs font-bold uppercase tracking-wider flex items-center gap-2 shadow-lg hover:shadow-xl"
             >
-                Login with Fyers
+                🔑 Generate Token
             </button>
             {error && (
                 <span className="text-xs text-red-500 max-w-[200px] leading-tight text-right">
                     {error}
                 </span>
             )}
+
+            <AuthTokenModal
+                isOpen={showModal}
+                onClose={() => setShowModal(false)}
+                onLogin={login}
+                onSubmitCode={submitAuthCode}
+            />
         </div>
     );
 }

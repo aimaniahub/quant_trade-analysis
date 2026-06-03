@@ -4,6 +4,10 @@ from contextlib import asynccontextmanager
 
 from app.core.config import get_settings
 from app.routes import health, market_data, option_chain, websocket, auth, mcp
+from app.routes import ma_crossover as ma_crossover_routes
+from app.services.candle_aggregator import get_candle_aggregator
+from app.services.strategies.ma_crossover import get_ma_crossover_service
+from app.services.fyers_websocket import get_websocket_manager
 
 
 settings = get_settings()
@@ -12,11 +16,29 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
-    # Startup
-    print(f"🚀 Starting {settings.app_name} v{settings.app_version}")
+    # ── Startup ────────────────────────────────────────────────────────
+    print(f"[START] Starting {settings.app_name} v{settings.app_version}")
+
+    # Start candle aggregator and hook it into the Fyers tick stream
+    aggregator = get_candle_aggregator()
+    ma_svc = get_ma_crossover_service()
+    aggregator.register_callback(ma_svc.on_candle_closed)
+    aggregator.start()
+
+    ws_mgr = get_websocket_manager()
+    ws_mgr.add_subscriber("market_data", aggregator.on_tick)
+
+    # Auto-start MA scanner
+    import asyncio as _asyncio
+    _asyncio.create_task(ma_svc.start())
+
     yield
-    # Shutdown
-    print(f"👋 Shutting down {settings.app_name}")
+
+    # ── Shutdown ───────────────────────────────────────────────────────
+    print(f"[STOP] Shutting down {settings.app_name}")
+    await ma_svc.stop()
+    aggregator.stop()
+    ws_mgr.remove_subscriber("market_data", aggregator.on_tick)
 
 
 def create_app() -> FastAPI:
@@ -43,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(market_data.router, prefix=settings.api_prefix, tags=["Market Data"])
     app.include_router(option_chain.router, prefix=settings.api_prefix, tags=["Option Chain"])
     app.include_router(websocket.router, prefix=settings.api_prefix, tags=["WebSocket"])
+    app.include_router(ma_crossover_routes.router, prefix=settings.api_prefix, tags=["MA Crossover"])
     app.include_router(mcp.router, prefix=settings.api_prefix, tags=["Agentic AI (MCP)"])
     
     # Strategies

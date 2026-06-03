@@ -4,6 +4,18 @@ import { useState } from 'react';
 import { api } from '../lib/api';
 import { useApiQuery } from '../lib/hooks/useApiQuery';
 
+interface TradeDetail {
+    action: string;
+    type: string;
+    option_type: string;
+    strike: number;
+    entry_zone: string;
+    stop_loss: number;
+    target: number;
+    confidence: string;
+    reason: string;
+}
+
 interface TradeRecommendation {
     action: string;
     option_type?: string;
@@ -14,6 +26,9 @@ interface TradeRecommendation {
     confidence?: string;
     reason?: string;
     suggestion?: string;
+    bias?: string;
+    expert_note?: string;
+    trades?: TradeDetail[];
 }
 
 interface OiAnalysis {
@@ -110,7 +125,60 @@ export default function LiveTradeSignal({ symbol, autoRefresh = true, refreshInt
             </div>
 
             {/* Trade Signal */}
-            {isBuy ? (
+            {rec.action === 'ACTIONABLE' && rec.trades && rec.trades.length > 0 ? (
+                <div className="space-y-4">
+                    {rec.expert_note && (
+                        <div className="p-3 bg-zinc-800/50 border border-zinc-700 rounded-xl text-sm text-zinc-300">
+                            <span className="text-amber-500 mr-2">💡 Expert Note:</span>
+                            {rec.expert_note}
+                        </div>
+                    )}
+                    {rec.trades.map((trade, idx) => {
+                        const isCE = trade.option_type === 'CE';
+                        return (
+                            <div key={idx} className={`p-5 rounded-xl border-2 ${isCE ? 'bg-emerald-500/10 border-emerald-500' : 'bg-rose-500/10 border-rose-500'}`}>
+                                <div className="flex items-center justify-between mb-4">
+                                    <div className="flex items-center gap-3">
+                                        <span className={`text-2xl font-black ${isCE ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                            BUY {trade.option_type}
+                                        </span>
+                                        <span className="text-xl font-black text-white">
+                                            {trade.strike}
+                                        </span>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <span className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-zinc-800 text-zinc-300">
+                                            {trade.type.replace('_', ' ')}
+                                        </span>
+                                        <span className={`px-2 py-1 text-[10px] font-bold uppercase rounded ${trade.confidence === 'HIGH' ? 'bg-emerald-500/30 text-emerald-400' : 'bg-amber-500/30 text-amber-400'}`}>
+                                            {trade.confidence}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-3 gap-4">
+                                    <div>
+                                        <p className="text-[10px] font-bold uppercase text-zinc-500 mb-1">Entry</p>
+                                        <p className="text-base font-bold text-white">{trade.entry_zone}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-[10px] font-bold uppercase text-zinc-500 mb-1">SL</p>
+                                        <p className="text-base font-bold text-rose-500">₹{trade.stop_loss}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-[10px] font-bold uppercase text-zinc-500 mb-1">Target</p>
+                                        <p className="text-base font-bold text-emerald-500">
+                                            ₹{typeof trade.target === 'number' ? trade.target.toFixed(0) : trade.target}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <p className="mt-3 text-sm text-zinc-400 border-t border-zinc-800/50 pt-3">{trade.reason}</p>
+                            </div>
+                        );
+                    })}
+                </div>
+            ) : isBuy ? (
                 <div className={`p-5 rounded-xl border-2 ${isCE ? 'bg-emerald-500/10 border-emerald-500' : 'bg-rose-500/10 border-rose-500'
                     }`}>
                     <div className="flex items-center gap-3 mb-4">
@@ -158,7 +226,7 @@ export default function LiveTradeSignal({ symbol, autoRefresh = true, refreshInt
                 </div>
             ) : (
                 <div className="p-5 rounded-xl bg-zinc-800 border border-zinc-700">
-                    <p className="text-lg font-bold text-zinc-400">NO TRADE</p>
+                    <p className="text-lg font-bold text-zinc-400">{rec.action === 'NO_TRADE' ? 'NO TRADE' : rec.action}</p>
                     <p className="text-sm text-zinc-500 mt-1">{rec.reason}</p>
                 </div>
             )}

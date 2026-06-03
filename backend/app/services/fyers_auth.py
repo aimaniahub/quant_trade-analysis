@@ -174,8 +174,14 @@ class FyersAuthService:
         
         # Re-initialize if token changed or model doesn't exist
         if self._fyers is None or getattr(self, "_last_token", None) != self.settings.fyers_access_token:
+            token_to_use = self.settings.fyers_access_token
+            # FyersModel internally prepends client_id: to the token for the API header.
+            # So we ensure we pass ONLY the raw auth token, stripping any 'APP_ID:' prefix.
+            if token_to_use and ":" in token_to_use:
+                token_to_use = token_to_use.split(":", 1)[1]
+                
             self._fyers = fyersModel.FyersModel(
-                token=self.settings.fyers_access_token,
+                token=token_to_use,
                 is_async=False,
                 client_id=self.settings.fyers_app_id,
                 log_path=""

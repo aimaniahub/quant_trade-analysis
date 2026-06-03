@@ -34,7 +34,7 @@ export function useAuth() {
         try {
             const { login_url } = await api.auth.getLoginUrl();
             if (login_url) {
-                window.location.href = login_url;
+                window.open(login_url, '_blank');
             }
         } catch (err: any) {
             setError(err.message || 'Failed to get login URL');
@@ -53,6 +53,23 @@ export function useAuth() {
         }
     }, [checkStatus]);
 
+    const submitAuthCode = useCallback(async (code: string) => {
+        try {
+            setLoading(true);
+            setError(null);
+            const result = await api.auth.submitAuthCode(code);
+            // Token saved & settings reloaded on backend, now refresh status
+            await checkStatus();
+            return result;
+        } catch (err: any) {
+            const msg = err.message || 'Failed to generate token';
+            setError(msg);
+            throw new Error(msg);
+        } finally {
+            setLoading(false);
+        }
+    }, [checkStatus]);
+
     useEffect(() => {
         checkStatus();
     }, [checkStatus]);
@@ -63,6 +80,7 @@ export function useAuth() {
         error,
         login,
         autoLogin,
+        submitAuthCode,
         refresh: checkStatus
     };
 }
