@@ -5,9 +5,12 @@ from contextlib import asynccontextmanager
 from app.core.config import get_settings
 from app.routes import health, market_data, option_chain, websocket, auth, mcp
 from app.routes import ma_crossover as ma_crossover_routes
+from app.routes import option_flow_radar as radar_routes
+from app.routes import confluence as confluence_routes
 from app.services.candle_aggregator import get_candle_aggregator
 from app.services.strategies.ma_crossover import get_ma_crossover_service
 from app.services.fyers_websocket import get_websocket_manager
+from app.services.radar_scheduler import get_radar_scheduler
 
 
 settings = get_settings()
@@ -28,17 +31,24 @@ async def lifespan(app: FastAPI):
     ws_mgr = get_websocket_manager()
     ws_mgr.add_subscriber("market_data", aggregator.on_tick)
 
-    # Auto-start MA scanner
+    # Auto-start MA scanner + radar scheduler
     import asyncio as _asyncio
+    radar_sched = get_radar_scheduler()
     _asyncio.create_task(ma_svc.start())
+    _asyncio.create_task(radar_sched.start())
 
     yield
 
     # ── Shutdown ───────────────────────────────────────────────────────
     print(f"[STOP] Shutting down {settings.app_name}")
+    await radar_sched.stop()
     await ma_svc.stop()
     aggregator.stop()
     ws_mgr.remove_subscriber("market_data", aggregator.on_tick)
+    try:
+        ws_mgr.stop_all()
+    except Exception:
+        pass
 
 
 def create_app() -> FastAPI:
@@ -66,6 +76,8 @@ def create_app() -> FastAPI:
     app.include_router(option_chain.router, prefix=settings.api_prefix, tags=["Option Chain"])
     app.include_router(websocket.router, prefix=settings.api_prefix, tags=["WebSocket"])
     app.include_router(ma_crossover_routes.router, prefix=settings.api_prefix, tags=["MA Crossover"])
+    app.include_router(radar_routes.router, prefix=settings.api_prefix, tags=["Option Flow Radar"])
+    app.include_router(confluence_routes.router, prefix=settings.api_prefix, tags=["Confluence"])
     app.include_router(mcp.router, prefix=settings.api_prefix, tags=["Agentic AI (MCP)"])
     
     # Strategies

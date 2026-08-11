@@ -298,8 +298,13 @@ class FyersWebSocketManager:
             "positions": []
         }
     
+    def refresh_settings(self) -> None:
+        """Pick up reloaded .env / token after auth."""
+        self.settings = get_settings()
+
     def _get_access_token(self) -> Optional[str]:
-        """Get formatted access token."""
+        """Get formatted access token (always from current settings)."""
+        self.settings = get_settings()
         return self.settings.get_access_token_formatted()
     
     def start_data_stream(

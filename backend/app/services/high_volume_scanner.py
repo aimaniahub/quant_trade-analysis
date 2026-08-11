@@ -35,7 +35,7 @@ LARGE_CAP_STOCKS = {
     "NSE:INFY-EQ", "NSE:HINDUNILVR-EQ", "NSE:SBIN-EQ", "NSE:BHARTIARTL-EQ",
     "NSE:ITC-EQ", "NSE:KOTAKBANK-EQ", "NSE:LT-EQ", "NSE:AXISBANK-EQ",
     "NSE:BAJFINANCE-EQ", "NSE:ASIANPAINT-EQ", "NSE:MARUTI-EQ", "NSE:TITAN-EQ",
-    "NSE:SUNPHARMA-EQ", "NSE:TATAMOTORS-EQ", "NSE:NTPC-EQ", "NSE:POWERGRID-EQ",
+    "NSE:SUNPHARMA-EQ", "NSE:TMPV-EQ", "NSE:NTPC-EQ", "NSE:POWERGRID-EQ",
     "NSE:WIPRO-EQ", "NSE:HCLTECH-EQ", "NSE:ULTRACEMCO-EQ", "NSE:NESTLEIND-EQ",
     "NSE:TECHM-EQ", "NSE:TATASTEEL-EQ", "NSE:ADANIENT-EQ", "NSE:ADANIPORTS-EQ",
     "NSE:M&M-EQ", "NSE:BAJAJFINSV-EQ", "NSE:DRREDDY-EQ", "NSE:CIPLA-EQ",
@@ -200,11 +200,14 @@ class HighVolumeScannerService:
             try:
                 scanned += 1
                 
-                # Fetch historical data
-                history = self.market_service.get_historical_data(
-                    symbol=symbol,
-                    resolution=timeframe,
-                    days=5  # Last 5 days of intraday data
+                # Offload blocking Fyers REST so the event loop can serve other clients
+                history = await asyncio.to_thread(
+                    self.market_service.get_historical_data,
+                    symbol,
+                    timeframe,
+                    None,
+                    None,
+                    5,  # last 5 days of intraday data
                 )
                 
                 if not history.get("success") or not history.get("candles"):
@@ -556,7 +559,9 @@ class HighVolumeScannerService:
                 analyzed += 1
                 
                 # Fetch option chain with 20 strikes for comprehensive analysis
-                chain_data = self.market_service.get_option_chain(symbol, strike_count=20)
+                chain_data = await asyncio.to_thread(
+                    self.market_service.get_option_chain, symbol, 20
+                )
                 
                 if not chain_data.get("success"):
                     errors.append({"symbol": symbol, "error": chain_data.get("error", "Failed to fetch")})
@@ -570,8 +575,11 @@ class HighVolumeScannerService:
                     continue
                 
                 # Get day high from spot data
-                spot_data = self.market_service.get_spot_price(symbol)
-                day_high = spot_data.get("day_high") if spot_data.get("success") else None
+                spot_data = await asyncio.to_thread(self.market_service.get_spot_price, symbol)
+                # get_spot_price returns "high", not "day_high"
+                day_high = None
+                if spot_data.get("success"):
+                    day_high = spot_data.get("high") or spot_data.get("day_high")
                 
                 # Perform analyses
                 oi_analysis = self._analyze_oi_concentrations(chain_data, spot_price)

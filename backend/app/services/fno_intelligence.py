@@ -11,13 +11,20 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 from enum import Enum
 
+import pytz
+
+from app.services.option_analytics import deep_analyze_chain
+
+IST = pytz.timezone("Asia/Kolkata")
+
 
 class MarketState(str, Enum):
     """Market state classifications"""
-    TREND = "TREND"          # Directional move
-    RANGE = "RANGE"          # Sideways
-    INTENT = "INTENT"        # Institutional accumulation/build-up
-    NO_TRADE = "NO-TRADE"    # Illiquid / noisy
+    TREND = "TREND"              # Directional move
+    RANGE = "RANGE"              # Sideways
+    INTENT = "INTENT"            # Institutional accumulation/build-up
+    ADJUSTMENT = "ADJUSTMENT"    # Expiry / premium adjustment window
+    NO_TRADE = "NO-TRADE"        # Illiquid / noisy
 
 
 class OIPattern(str, Enum):
@@ -47,8 +54,8 @@ class FNOIntelligenceEngine:
         }
     
     def get_current_time_window(self) -> str:
-        """Get current market time window"""
-        now = datetime.now()
+        """Get current market time window (IST)."""
+        now = datetime.now(IST)
         hour, minute = now.hour, now.minute
         current_mins = hour * 60 + minute
         
@@ -127,6 +134,43 @@ class FNOIntelligenceEngine:
         
         # ====== STRIKE GUIDANCE (BUY ONLY) ======
         strike_guidance = self._get_strike_guidance(chain, spot_price, market_state, institutional_flow)
+
+        clusters = institutional_flow.get("clusters") or []
+        call_clusters = sum(1 for c in clusters if c.get("type") == "CALL_ACCUMULATION")
+        put_clusters = sum(1 for c in clusters if c.get("type") == "PUT_ACCUMULATION")
+
+        # ====== DEEP MATHEMATICAL ANALYTICS (direction-neutral scoring) ======
+        deep = deep_analyze_chain(
+            chain=chain,
+            spot=spot_price,
+            atm=atm_strike,
+            institutional_intent=institutional_flow.get("intent_score", 0),
+            symbol=chain_data.get("symbol"),
+            call_clusters=call_clusters,
+            put_clusters=put_clusters,
+        )
+        quant = deep.get("quant") or {}
+        # Align strike guidance bias with unbiased quant vote when clear
+        q_bias = quant.get("bias")
+        if q_bias in ("BULLISH", "BEARISH") and strike_guidance.get("suggested"):
+            if strike_guidance.get("bias") != q_bias:
+                # Rebuild guidance from quant bias for consistency (no side preference)
+                strike_guidance = self._guidance_from_bias(
+                    spot_price, q_bias, quant.get("factors") or []
+                )
+        elif q_bias in ("BULLISH", "BEARISH") and not strike_guidance.get("suggested"):
+            if market_state["state"] != MarketState.NO_TRADE.value:
+                strike_guidance = self._guidance_from_bias(
+                    spot_price, q_bias, quant.get("factors") or []
+                )
+
+        # Blend structural confidence with quant edge score
+        blended_conf = int(
+            round(
+                0.55 * float(market_state.get("confidence") or 0)
+                + 0.45 * float(quant.get("quant_score") or 0)
+            )
+        )
         
         return {
             "symbol": chain_data.get("symbol"),
@@ -134,7 +178,7 @@ class FNOIntelligenceEngine:
             "atm_strike": atm_strike,
             "market_state": market_state["state"],
             "intent_score": institutional_flow["intent_score"],
-            "confidence": market_state["confidence"],
+            "confidence": blended_conf,
             "message": market_state["message"],
             "time_window": self.get_current_time_window(),
             "pcr": pcr,
@@ -144,10 +188,26 @@ class FNOIntelligenceEngine:
             "oi_analysis": oi_analysis,
             "institutional_flow": institutional_flow,
             "strike_guidance": strike_guidance,
+            "deep_analytics": deep,
+            "quant_score": quant.get("quant_score"),
+            "quant_bias": quant.get("bias"),
+            "quant_conviction": quant.get("conviction"),
+            "quant_factors": quant.get("factors"),
+            "max_pain": (deep.get("max_pain") or {}).get("max_pain"),
+            "expected_move": (deep.get("straddle") or {}).get("expected_move"),
+            "expected_move_pct": (deep.get("straddle") or {}).get("expected_move_pct"),
+            "iv_skew": (deep.get("iv_structure") or {}).get("skew"),
+            "iv_skew_label": (deep.get("iv_structure") or {}).get("skew_label"),
+            "gamma_wall": (deep.get("greeks_walls") or {}).get("gamma_wall_strike"),
+            "pin_risk": (deep.get("greeks_walls") or {}).get("pin_risk"),
             "total_call_oi": total_call_oi,
             "total_put_oi": total_put_oi,
-            "tradable": market_state["state"] in [MarketState.TREND.value, MarketState.INTENT.value],
-            "timestamp": datetime.now().isoformat()
+            "tradable": market_state["state"] in [
+                MarketState.TREND.value,
+                MarketState.INTENT.value,
+                MarketState.ADJUSTMENT.value,
+            ],
+            "timestamp": datetime.now(IST).isoformat()
         }
     
     def _analyze_atm_behavior(self, atm_data: Optional[Dict], spot_price: float) -> Dict[str, Any]:
@@ -349,8 +409,8 @@ class FNOIntelligenceEngine:
         bypass_time_check: bool = False
     ) -> Dict[str, Any]:
         """
-        Classify market into: TREND, RANGE, ADJUSTMENT, NO-TRADE
-        Only TREND and ADJUSTMENT allow trades
+        Classify market into: TREND, RANGE, INTENT, ADJUSTMENT, NO-TRADE.
+        Tradable states: TREND, INTENT, ADJUSTMENT.
         
         Args:
             bypass_time_check: If True, skip time window restrictions
@@ -448,56 +508,93 @@ class FNOIntelligenceEngine:
         institutional_flow: Dict
     ) -> Dict[str, Any]:
         """
-        Expert Logic: Provide precise ITM/ATM/OTM buy picks based on intent.
-        No selling allowed.
+        Symmetric buy-side guidance from flow clusters only.
+        Equal rules for CE vs PE — no default side.
         """
         if market_state["state"] == MarketState.NO_TRADE:
-            return {"suggested": False}
+            return {"suggested": False, "bias": "NEUTRAL", "trades": []}
 
-        # Identify Trend Bias
         clusters = institutional_flow.get("clusters", [])
         call_intent = sum(1 for c in clusters if c["type"] == "CALL_ACCUMULATION")
         put_intent = sum(1 for c in clusters if c["type"] == "PUT_ACCUMULATION")
-        
-        bias = "BULLISH" if call_intent > put_intent else ("BEARISH" if put_intent > call_intent else "NEUTRAL")
-        
-        # Calculate ATM strike
+
+        # Strict majority; ties → NEUTRAL (not bearish by default)
+        if call_intent > put_intent:
+            bias = "BULLISH"
+        elif put_intent > call_intent:
+            bias = "BEARISH"
+        else:
+            bias = "NEUTRAL"
+
+        return self._guidance_from_bias(
+            spot_price,
+            bias,
+            [
+                f"Call clusters={call_intent}",
+                f"Put clusters={put_intent}",
+                f"Intent score={institutional_flow.get('intent_score', 0)}",
+            ],
+        )
+
+    def _guidance_from_bias(
+        self,
+        spot_price: float,
+        bias: str,
+        notes: List[str],
+    ) -> Dict[str, Any]:
+        """Mirror CE/PE constructions — identical structure both sides."""
+        if bias not in ("BULLISH", "BEARISH"):
+            return {
+                "suggested": False,
+                "bias": "NEUTRAL",
+                "trades": [],
+                "expert_note": "No directional majority — neutral (no forced side)",
+            }
+
         strike_interval = 50 if spot_price > 500 else 10
+        if spot_price > 5000:
+            strike_interval = 50
+        elif spot_price > 1000:
+            strike_interval = 20 if spot_price < 2000 else 50
         atm_strike = round(spot_price / strike_interval) * strike_interval
-        
+
         trades = []
         if bias == "BULLISH":
-            trades.append({
-                "type": "ITM_BUY",
-                "strike": atm_strike - strike_interval,
-                "instrument": "CE",
-                "rationale": "Deep intent CALL accumulation detected"
-            })
-            trades.append({
-                "type": "ATM_BUY",
-                "strike": atm_strike,
-                "instrument": "CE",
-                "rationale": "Capitalize on immediate theta/delta alignment"
-            })
-        elif bias == "BEARISH":
-            trades.append({
-                "type": "ITM_BUY",
-                "strike": atm_strike + strike_interval,
-                "instrument": "PE",
-                "rationale": "High-confidence PUT writing / accumulation by Big Money"
-            })
-            trades.append({
-                "type": "ATM_BUY",
-                "strike": atm_strike,
-                "instrument": "PE",
-                "rationale": "Direct bearish directional play"
-            })
+            trades = [
+                {
+                    "type": "ITM_BUY",
+                    "strike": atm_strike - strike_interval,
+                    "instrument": "CE",
+                    "rationale": "Bullish majority → ITM CE",
+                },
+                {
+                    "type": "ATM_BUY",
+                    "strike": atm_strike,
+                    "instrument": "CE",
+                    "rationale": "Bullish majority → ATM CE",
+                },
+            ]
+        else:
+            trades = [
+                {
+                    "type": "ITM_BUY",
+                    "strike": atm_strike + strike_interval,
+                    "instrument": "PE",
+                    "rationale": "Bearish majority → ITM PE",
+                },
+                {
+                    "type": "ATM_BUY",
+                    "strike": atm_strike,
+                    "instrument": "PE",
+                    "rationale": "Bearish majority → ATM PE",
+                },
+            ]
 
         return {
-            "suggested": len(trades) > 0,
+            "suggested": True,
             "bias": bias,
             "trades": trades,
-            "expert_note": f"Institutional clusters detected at {len(clusters)} strikes. Intent score: {institutional_flow['intent_score']}%"
+            "expert_note": " | ".join(notes) if notes else f"{bias} majority vote",
         }
 
     
@@ -559,6 +656,16 @@ class FNOIntelligenceEngine:
                 "message": f"High VIX ({vix:.1f}) - Stick to ITM BUY only"
             })
         
+        # Build adjustment / trade-setup block expected by the UI
+        adjustment = self._build_adjustment_payload(
+            analysis=analysis,
+            guidance=guidance,
+            oi_analysis=oi_analysis,
+        )
+
+        deep = analysis.get("deep_analytics") or {}
+        magnets = deep.get("oi_magnets") or {}
+
         return {
             "symbol": analysis.get("symbol"),
             "spot_price": analysis.get("spot_price"),
@@ -570,13 +677,101 @@ class FNOIntelligenceEngine:
             "time_window": analysis.get("time_window"),
             "tradable": analysis.get("tradable"),
             "pcr": analysis.get("pcr"),
+            "pcr_signal": analysis.get("pcr_signal"),
             "vix": analysis.get("india_vix"),
-            "support": oi_analysis.get("support"),
-            "resistance": oi_analysis.get("resistance"),
+            "support": magnets.get("support") or oi_analysis.get("support"),
+            "resistance": magnets.get("resistance") or oi_analysis.get("resistance"),
             "strike_guidance": guidance,
             "institutional_flow": institutional,
+            "atm_analysis": analysis.get("atm_analysis"),
+            "oi_analysis": oi_analysis,
+            "deep_analytics": deep,
+            "quant_score": analysis.get("quant_score"),
+            "quant_bias": analysis.get("quant_bias"),
+            "quant_conviction": analysis.get("quant_conviction"),
+            "quant_factors": analysis.get("quant_factors"),
+            "max_pain": analysis.get("max_pain"),
+            "expected_move": analysis.get("expected_move"),
+            "expected_move_pct": analysis.get("expected_move_pct"),
+            "iv_skew": analysis.get("iv_skew"),
+            "iv_skew_label": analysis.get("iv_skew_label"),
+            "gamma_wall": analysis.get("gamma_wall"),
+            "pin_risk": analysis.get("pin_risk"),
+            "adjustment": adjustment,
             "alerts": alerts,
             "timestamp": analysis.get("timestamp")
+        }
+
+    def _build_adjustment_payload(
+        self,
+        analysis: Dict[str, Any],
+        guidance: Dict[str, Any],
+        oi_analysis: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Normalize strike_guidance into the adjustment/trade_setup shape
+        consumed by ActiveStrategy and MarketStateDetector.
+        """
+        state = analysis.get("market_state")
+        tradable = analysis.get("tradable", False)
+        suggested = bool(guidance.get("suggested"))
+        trades = guidance.get("trades") or []
+        confidence = int(analysis.get("confidence") or 0)
+
+        # Surface a setup when guidance suggests trades and state is actionable
+        detected = bool(
+            suggested
+            and trades
+            and tradable
+            and state in (
+                MarketState.TREND.value,
+                MarketState.INTENT.value,
+                MarketState.ADJUSTMENT.value,
+            )
+        )
+
+        if not detected:
+            return {
+                "detected": False,
+                "confidence": confidence,
+                "conditions": [],
+                "trade_setup": None,
+            }
+
+        primary = trades[0]
+        action = f"BUY {primary.get('instrument', 'CE')} ({primary.get('type', 'ATM_BUY')})"
+        strikes = [t.get("strike") for t in trades if t.get("strike") is not None]
+        rationale = primary.get("rationale") or guidance.get("expert_note") or analysis.get("message") or ""
+
+        support = oi_analysis.get("support")
+        resistance = oi_analysis.get("resistance")
+        spot = analysis.get("spot_price") or 0
+        if support and resistance:
+            invalidation = f"Spot breaks {support}-{resistance} range"
+        elif spot:
+            band = max(50, round(spot * 0.005))
+            invalidation = f"Spot move > {band} pts from {round(spot)}"
+        else:
+            invalidation = "Structure breaks / signal invalidated"
+
+        conditions = [
+            f"State={state}",
+            f"Bias={guidance.get('bias', 'NEUTRAL')}",
+            f"Intent={analysis.get('intent_score', 0)}",
+        ]
+
+        return {
+            "detected": True,
+            "confidence": confidence,
+            "conditions": conditions,
+            "trade_setup": {
+                "action": action,
+                "rationale": rationale,
+                "strikes": strikes,
+                "bias": guidance.get("bias"),
+                "invalidation": invalidation,
+                "trades": trades,
+            },
         }
     
     def analyze_stock(self, symbol: str, chain_data: Dict[str, Any]) -> Dict[str, Any]:

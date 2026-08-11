@@ -36,10 +36,17 @@ class NiftySentimentService:
             if not quote.get("success"):
                 return {"error": "Unable to fetch VIX", "value": None}
             
+            # get_spot_price returns: ltp, close (prev), change, change_percent
             vix_value = quote.get("ltp", 0) or 0
-            prev_close = quote.get("prev_close", vix_value) or vix_value
+            prev_close = quote.get("close") or quote.get("prev_close") or vix_value or 0
             change = quote.get("change", 0) or 0
-            change_pct = quote.get("change_pct", 0) or 0
+            change_pct = quote.get("change_percent")
+            if change_pct is None:
+                change_pct = quote.get("change_pct", 0) or 0
+            if (not change) and prev_close:
+                change = vix_value - prev_close
+            if (not change_pct) and prev_close:
+                change_pct = (change / prev_close) * 100 if prev_close else 0
             
             # Interpret VIX level
             if vix_value < 12:

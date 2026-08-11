@@ -7,7 +7,7 @@ Supports both manual and automated (TOTP) login flows.
 
 import hashlib
 import pyotp
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from urllib.parse import urlencode, parse_qs, urlparse
 import httpx
 
@@ -23,6 +23,8 @@ class FyersAuthService:
         self.settings = get_settings()
         self._session: Optional[fyersModel.SessionModel] = None
         self._fyers: Optional[fyersModel.FyersModel] = None
+        self._last_token = None
+        self._valid_cache: Optional[Tuple[bool, str, float]] = None  # is_valid, msg, expires
     
     def _create_session(self) -> fyersModel.SessionModel:
         """Create a new Fyers session model."""
@@ -190,47 +192,62 @@ class FyersAuthService:
         
         return self._fyers
     
-    def validate_token(self) -> Tuple[bool, str]:
+    def validate_token(self, force: bool = False) -> Tuple[bool, str]:
         """
         Validate current access token by making a test API call.
-        
-        Returns:
-            Tuple of (is_valid, message)
+        Cached for 60s to avoid profile spam from UI polls.
         """
+        import time
+        now = time.time()
+        if (
+            not force
+            and self._valid_cache is not None
+            and self._valid_cache[2] > now
+        ):
+            return self._valid_cache[0], self._valid_cache[1]
+
         fyers = self.get_fyers_model()
         if not fyers:
-            return False, "No access token configured"
+            result = (False, "No access token configured")
+            self._valid_cache = (*result, now + 15)
+            return result
         
         try:
             response = fyers.get_profile()
             if response.get("s") == "ok":
-                return True, "Token is valid"
-            else:
-                return False, response.get("message", "Token validation failed")
+                result = (True, "Token is valid")
+                self._valid_cache = (*result, now + 60)
+                # Keep user profile on the instance for status
+                self._cached_profile = response.get("data", {})
+                return result
+            result = (False, response.get("message", "Token validation failed"))
+            self._valid_cache = (*result, now + 20)
+            return result
         except Exception as e:
-            return False, f"Token validation error: {str(e)}"
+            result = (False, f"Token validation error: {str(e)}")
+            self._valid_cache = (*result, now + 20)
+            return result
     
     def get_auth_status(self) -> dict:
         """
         Get current authentication status.
-        
-        Returns:
-            Dict with authentication status details
         """
         has_token = bool(self.settings.fyers_access_token)
         is_valid = False
-        user_info = None
+        user_info = getattr(self, "_cached_profile", None)
         
         if has_token:
-            is_valid, _ = self.validate_token()
-            if is_valid:
+            is_valid, _ = self.validate_token(force=False)
+            if is_valid and not user_info:
+                # One profile fetch if not cached with validation
                 fyers = self.get_fyers_model()
                 if fyers:
                     try:
                         profile = fyers.get_profile()
                         if profile.get("s") == "ok":
                             user_info = profile.get("data", {})
-                    except:
+                            self._cached_profile = user_info
+                    except Exception:
                         pass
         
         return {
@@ -240,6 +257,25 @@ class FyersAuthService:
             "user_info": user_info,
             "app_id": self.settings.fyers_app_id[:10] + "..." if self.settings.fyers_app_id else None
         }
+
+    def apply_reloaded_settings(self) -> None:
+        """Refresh in-memory settings after .env token write / reload."""
+        self.settings = get_settings()
+        self._fyers = None
+        self._last_token = None
+        self._valid_cache = None
+        self._cached_profile = None
+        # Clear market cache so next calls use new auth context cleanly
+        try:
+            from app.services.market_cache import get_market_cache
+            get_market_cache().clear()
+        except Exception:
+            pass
+        try:
+            from app.services.fyers_websocket import get_websocket_manager
+            get_websocket_manager().refresh_settings()
+        except Exception:
+            pass
 
 
 # Singleton instance

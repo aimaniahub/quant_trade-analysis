@@ -8,6 +8,7 @@ class MarketState(str, Enum):
     """Market state enumeration."""
     TREND = "TREND"
     RANGE = "RANGE"
+    INTENT = "INTENT"
     ADJUSTMENT = "ADJUSTMENT"
     NO_TRADE = "NO_TRADE"
 

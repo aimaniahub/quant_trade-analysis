@@ -12,8 +12,12 @@ import QuantDashboard from './QuantDashboard';
 import VATScanner from './VATScanner';
 import MCPTradingPanel from './MCPTradingPanel';
 import MACrossoverDashboard from './MACrossoverDashboard';
+import OptionFlowRadar from './OptionFlowRadar';
+import HighVolumeScanner from './HighVolumeScanner';
+import ConfluencePanel from './ConfluencePanel';
+import SystemStatus from './SystemStatus';
 
-type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner' | 'mcpTrading' | 'maCrossover';
+type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner' | 'mcpTrading' | 'maCrossover' | 'optionFlowRadar' | 'highVolume';
 
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState<ViewType>('dashboard');
@@ -40,6 +44,16 @@ export default function Dashboard() {
     // Show MA Crossover Dashboard
     if (currentView === 'maCrossover') {
         return <MACrossoverDashboard onBack={() => setCurrentView('dashboard')} />;
+    }
+
+    // Show Option Flow Radar
+    if (currentView === 'optionFlowRadar') {
+        return <OptionFlowRadar onBack={() => setCurrentView('dashboard')} />;
+    }
+
+    // Show High Volume Scanner
+    if (currentView === 'highVolume') {
+        return <HighVolumeScanner onBack={() => setCurrentView('dashboard')} />;
     }
 
     return (
@@ -84,6 +98,18 @@ export default function Dashboard() {
                     >
                         📈 MA Crossover
                     </button>
+                    <button
+                        onClick={() => setCurrentView('optionFlowRadar')}
+                        className="px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
+                    >
+                        🎯 Flow Radar
+                    </button>
+                    <button
+                        onClick={() => setCurrentView('highVolume')}
+                        className="px-4 py-2 bg-gradient-to-r from-lime-600 to-green-600 hover:from-lime-700 hover:to-green-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
+                    >
+                        📶 High Vol
+                    </button>
                     <AuthButton />
                 </div>
             </header>
@@ -104,6 +130,11 @@ export default function Dashboard() {
                     <OptionChainTable symbol="NSE:NIFTY50-INDEX" />
                 </div>
 
+                {/* Confluence: multi-source trade filter */}
+                <div className="grid grid-cols-1 gap-6">
+                    <ConfluencePanel />
+                </div>
+
                 {/* Bottom Row: Strategy & Alerts */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <ActiveStrategy />
@@ -111,18 +142,9 @@ export default function Dashboard() {
                 </div>
             </main>
 
-            <footer className="max-w-7xl mx-auto mt-12 pt-8 border-t border-zinc-200 dark:border-zinc-800 flex justify-between items-center text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
+            <footer className="max-w-7xl mx-auto mt-12 pt-8 border-t border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
                 <span>© 2026 OptionGreek Engineering</span>
-                <div className="flex gap-4">
-                    <span className="flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                        Backend Active
-                    </span>
-                    <span className="flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-                        Fyers v3 API
-                    </span>
-                </div>
+                <SystemStatus />
             </footer>
         </div>
     );

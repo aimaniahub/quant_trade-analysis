@@ -20,6 +20,14 @@ except ImportError:
 
 from app.core.config import get_settings
 from app.services.fyers_auth import get_auth_service
+from app.services.market_cache import get_market_cache, make_key
+
+
+# Default TTLs (seconds) — short enough for trading UI, long enough to collapse polls
+TTL_QUOTES = 3.0
+TTL_SPOT = 3.0
+TTL_OPTION_CHAIN = 8.0
+TTL_HISTORY = 45.0
 
 
 class FyersMarketService:
@@ -28,6 +36,7 @@ class FyersMarketService:
     def __init__(self):
         self.settings = get_settings()
         self.auth_service = get_auth_service()
+        self.cache = get_market_cache()
     
     def _get_fyers(self) -> Optional[fyersModel.FyersModel]:
         """Get authenticated Fyers model."""
@@ -118,30 +127,31 @@ class FyersMarketService:
         Returns:
             Dict with quote data for each symbol
         """
-        fyers = self._get_fyers()
-        if not fyers:
-            return {"error": "Not authenticated", "data": []}
-        
-        try:
-            # Fyers accepts comma-separated symbols
-            symbols_str = ",".join(symbols[:50])  # Max 50 symbols
-            data = {"symbols": symbols_str}
-            response = fyers.quotes(data)
-            
-            if response.get("s") == "ok":
-                return {
-                    "success": True,
-                    "data": response.get("d", []),
-                    "timestamp": datetime.now().isoformat()
-                }
-            else:
+        syms = list(symbols[:50])
+        key = make_key("quotes", sorted(syms))
+
+        def _fetch():
+            fyers = self._get_fyers()
+            if not fyers:
+                return {"success": False, "error": "Not authenticated", "data": []}
+            try:
+                symbols_str = ",".join(syms)
+                response = fyers.quotes({"symbols": symbols_str})
+                if response.get("s") == "ok":
+                    return {
+                        "success": True,
+                        "data": response.get("d", []),
+                        "timestamp": datetime.now().isoformat(),
+                    }
                 return {
                     "success": False,
                     "error": response.get("message", "Failed to fetch quotes"),
-                    "data": []
+                    "data": [],
                 }
-        except Exception as e:
-            return {"success": False, "error": str(e), "data": []}
+            except Exception as e:
+                return {"success": False, "error": str(e), "data": []}
+
+        return self.cache.cached_call(key, TTL_QUOTES, _fetch)
     
     def get_market_depth(self, symbol: str) -> Dict[str, Any]:
         """
@@ -196,67 +206,64 @@ class FyersMarketService:
         Returns:
             Dict with OHLCV candles
         """
-        fyers = self._get_fyers()
-        if not fyers:
-            return {"error": "Not authenticated", "candles": []}
-        
-        try:
-            # Calculate date range
-            if to_date is None:
-                to_dt = datetime.now()
-            else:
-                to_dt = datetime.strptime(to_date, "%Y-%m-%d")
-            
-            if from_date is None:
-                from_dt = to_dt - timedelta(days=days)
-            else:
-                from_dt = datetime.strptime(from_date, "%Y-%m-%d")
-            
-            # Convert to epoch timestamps
-            range_from = str(int(from_dt.timestamp()))
-            range_to = str(int(to_dt.timestamp()))
-            
-            data = {
-                "symbol": symbol,
-                "resolution": resolution,
-                "date_format": "0",  # 0 for epoch
-                "range_from": range_from,
-                "range_to": range_to,
-                "cont_flag": "1"  # Continuous data
-            }
-            
-            response = fyers.history(data)
-            
-            if response.get("s") == "ok":
-                candles = response.get("candles", [])
-                # Format: [timestamp, open, high, low, close, volume]
-                formatted = []
-                for c in candles:
-                    formatted.append({
-                        "timestamp": c[0],
-                        "datetime": datetime.fromtimestamp(c[0]).isoformat(),
-                        "open": c[1],
-                        "high": c[2],
-                        "low": c[3],
-                        "close": c[4],
-                        "volume": c[5]
-                    })
-                
-                return {
-                    "success": True,
+        key = make_key("history", symbol, resolution, from_date, to_date, days)
+
+        def _fetch():
+            fyers = self._get_fyers()
+            if not fyers:
+                return {"success": False, "error": "Not authenticated", "candles": []}
+            try:
+                if to_date is None:
+                    to_dt = datetime.now()
+                else:
+                    to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+
+                if from_date is None:
+                    from_dt = to_dt - timedelta(days=days)
+                else:
+                    from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+
+                range_from = str(int(from_dt.timestamp()))
+                range_to = str(int(to_dt.timestamp()))
+
+                response = fyers.history({
                     "symbol": symbol,
                     "resolution": resolution,
-                    "candles": formatted,
-                    "count": len(formatted)
-                }
-            else:
+                    "date_format": "0",
+                    "range_from": range_from,
+                    "range_to": range_to,
+                    "cont_flag": "1",
+                })
+
+                if response.get("s") == "ok":
+                    candles = response.get("candles", [])
+                    formatted = []
+                    for c in candles:
+                        formatted.append({
+                            "timestamp": c[0],
+                            "datetime": datetime.fromtimestamp(c[0]).isoformat(),
+                            "open": c[1],
+                            "high": c[2],
+                            "low": c[3],
+                            "close": c[4],
+                            "volume": c[5],
+                        })
+                    return {
+                        "success": True,
+                        "symbol": symbol,
+                        "resolution": resolution,
+                        "candles": formatted,
+                        "count": len(formatted),
+                    }
                 return {
                     "success": False,
                     "error": response.get("message", "Failed to fetch history"),
-                    "candles": []
+                    "candles": [],
                 }
-        except Exception as e:
-            return {"success": False, "error": str(e), "candles": []}
+            except Exception as e:
+                return {"success": False, "error": str(e), "candles": []}
+
+        return self.cache.cached_call(key, TTL_HISTORY, _fetch)
     
     def get_option_chain(
         self,
@@ -273,6 +280,14 @@ class FyersMarketService:
         Returns:
             Dict with option chain data including OI, IV, Greeks
         """
+        key = make_key("oc", symbol, strike_count)
+
+        def _fetch():
+            return self._get_option_chain_uncached(symbol, strike_count)
+
+        return self.cache.cached_call(key, TTL_OPTION_CHAIN, _fetch)
+
+    def _get_option_chain_uncached(self, symbol: str, strike_count: int = 10) -> Dict[str, Any]:
         fyers = self._get_fyers()
         if not fyers:
             return {"error": "Not authenticated", "success": False, "chain": []}
@@ -294,6 +309,9 @@ class FyersMarketService:
                 # First item is usually the underlying spot data
                 spot_price = None
                 atm_strike = None
+
+                # Derive time-to-expiry from nearest expiry date when available
+                time_to_expiry = self._estimate_time_to_expiry(expiry_data)
                 
                 # Group by strike price and pair CE/PE
                 strikes_dict = {}
@@ -322,8 +340,6 @@ class FyersMarketService:
                             "put_iv": 0
                         }
                     
-                    # Calculate time to expiry (estimate ~7 days for nearest expiry)
-                    time_to_expiry = 7 / 365.0  # Default weekly expiry
                     iv_decimal = (opt.get("iv", 0) or 15) / 100  # Convert to decimal, default 15%
                     
                     # Calculate Greeks
@@ -396,6 +412,62 @@ class FyersMarketService:
         except Exception as e:
             return {"success": False, "error": str(e), "chain": []}
     
+    def _estimate_time_to_expiry(self, expiry_data: Any) -> float:
+        """
+        Estimate years to nearest expiry from Fyers expiryData payload.
+        Falls back to ~7 calendar days if parsing fails.
+        """
+        default_tte = 7 / 365.0
+        if not expiry_data:
+            return default_tte
+
+        try:
+            first = expiry_data[0] if isinstance(expiry_data, list) else expiry_data
+            raw = None
+            if isinstance(first, dict):
+                raw = (
+                    first.get("date")
+                    or first.get("expiry")
+                    or first.get("expiry_date")
+                    or first.get("Expiry")
+                )
+            elif first is not None:
+                raw = str(first)
+
+            if not raw:
+                return default_tte
+
+            # Support epoch seconds/ms or common date strings
+            if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.isdigit()):
+                ts = float(raw)
+                if ts > 1e12:  # milliseconds
+                    ts /= 1000.0
+                expiry_dt = datetime.fromtimestamp(ts)
+            else:
+                raw_s = str(raw).strip()
+                expiry_dt = None
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d-%b-%Y", "%Y%m%d", "%d %b %Y"):
+                    try:
+                        expiry_dt = datetime.strptime(raw_s[:11].strip(), fmt)
+                        break
+                    except ValueError:
+                        continue
+                if expiry_dt is None:
+                    # ISO-like
+                    try:
+                        expiry_dt = datetime.fromisoformat(raw_s.replace("Z", "+00:00")).replace(tzinfo=None)
+                    except ValueError:
+                        return default_tte
+
+            # Treat expiry as end-of-day IST approx (use local naive for simplicity)
+            now = datetime.now()
+            days = max((expiry_dt.date() - now.date()).days, 0)
+            # Use at least a few hours of theta on expiry day
+            tte_years = max(days / 365.0, 0.5 / 365.0)
+            return tte_years
+        except Exception:
+            return default_tte
+
     def get_indices(self) -> Dict[str, Any]:
         """
         Get major market indices data.
@@ -407,7 +479,7 @@ class FyersMarketService:
             "NSE:NIFTY50-INDEX",
             "NSE:NIFTYBANK-INDEX",
             "NSE:NIFTYIT-INDEX",
-            "NSE:NIFTYFIN-INDEX",
+            "NSE:FINNIFTY-INDEX",
             "BSE:SENSEX-INDEX"
         ]
         
@@ -423,25 +495,45 @@ class FyersMarketService:
         Returns:
             Dict with spot price details
         """
-        result = self.get_quotes([symbol])
-        
-        if result.get("success") and result.get("data"):
-            quote = result["data"][0] if result["data"] else {}
+        key = make_key("spot", symbol)
+
+        def _fetch():
+            result = self.get_quotes([symbol])
+            if result.get("success") and result.get("data"):
+                quote = result["data"][0] if result["data"] else {}
+                return {
+                    "success": True,
+                    "symbol": symbol,
+                    "ltp": quote.get("v", {}).get("lp"),
+                    "open": quote.get("v", {}).get("open_price"),
+                    "high": quote.get("v", {}).get("high_price"),
+                    "low": quote.get("v", {}).get("low_price"),
+                    "close": quote.get("v", {}).get("prev_close_price"),
+                    "change": quote.get("v", {}).get("ch"),
+                    "change_percent": quote.get("v", {}).get("chp"),
+                    "volume": quote.get("v", {}).get("volume"),
+                }
             return {
-                "success": True,
+                "success": False,
+                "error": result.get("error", "No quote data"),
                 "symbol": symbol,
-                "ltp": quote.get("v", {}).get("lp"),
-                "open": quote.get("v", {}).get("open_price"),
-                "high": quote.get("v", {}).get("high_price"),
-                "low": quote.get("v", {}).get("low_price"),
-                "close": quote.get("v", {}).get("prev_close_price"),
-                "change": quote.get("v", {}).get("ch"),
-                "change_percent": quote.get("v", {}).get("chp"),
-                "volume": quote.get("v", {}).get("volume"),
-                "timestamp": datetime.now().isoformat()
             }
-        else:
-            return result
+
+        # get_quotes already cached; spot cache is thin layer for shape stability
+        hit = self.cache.get(key)
+        if hit is not None:
+            if isinstance(hit, dict):
+                out = dict(hit)
+                out["_cache"] = "hit"
+                return out
+            return hit
+        value = _fetch()
+        if value.get("success"):
+            self.cache.set(key, value, TTL_SPOT)
+        if isinstance(value, dict):
+            value = dict(value)
+            value["_cache"] = "miss"
+        return value
 
 
 # Singleton instance

@@ -57,11 +57,11 @@ async def refresh_token():
 @router.post("/reload-settings")
 async def reload_settings_endpoint():
     """
-    Force reload settings from .env file.
+    Force reload settings from .env file and refresh auth/WS/market cache.
     """
     from app.core.config import reload_settings
-    new_settings = reload_settings()
-    auth_service.settings = new_settings
+    reload_settings()
+    auth_service.apply_reloaded_settings()
     return {"status": "success", "message": "Settings reloaded from .env"}
 
 
@@ -105,8 +105,8 @@ async def submit_auth_code(request: Request):
         if success:
             # Reload settings so the app picks up the new token immediately
             from app.core.config import reload_settings
-            new_settings = reload_settings()
-            auth_service.settings = new_settings
+            reload_settings()
+            auth_service.apply_reloaded_settings()
             
             return {
                 "status": "success",

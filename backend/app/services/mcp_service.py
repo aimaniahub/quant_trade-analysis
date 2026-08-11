@@ -22,9 +22,14 @@ import json
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
+from app.core.config import get_settings
 from app.services.fyers_market import get_market_service
 from app.services.fyers_orders import get_order_service, OrderType, OrderSide, ProductType
 from app.services.fyers_auth import get_auth_service
+
+
+# Tools that can place/modify/cancel real orders
+_WRITE_TOOLS = frozenset({"place_order", "modify_order", "cancel_order"})
 
 
 class MCPService:
@@ -37,6 +42,7 @@ class MCPService:
         self.market_service = get_market_service()
         self.order_service = get_order_service()
         self.auth_service = get_auth_service()
+        self.settings = get_settings()
 
     def get_tools_manifest(self) -> List[Dict[str, Any]]:
         """
@@ -223,12 +229,28 @@ class MCPService:
             }
         ]
 
+    def _assert_trading_allowed(self) -> Optional[Dict[str, Any]]:
+        """Block write tools unless MCP trading is explicitly enabled."""
+        # Refresh settings so kill-switch can flip without restart
+        settings = get_settings()
+        if not settings.mcp_trading_enabled:
+            return self._error_response(
+                "Order placement is DISABLED. Set MCP_TRADING_ENABLED=true in backend/.env "
+                "to arm live trading (use only on a trusted local network)."
+            )
+        return None
+
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
         Executes a specific tool called by the AI agent.
         Returns MCP-formatted response with content array.
         """
         try:
+            if tool_name in _WRITE_TOOLS:
+                blocked = self._assert_trading_allowed()
+                if blocked:
+                    return blocked
+
             # Profile & Account
             if tool_name == "get_profile":
                 return await self._get_profile()
@@ -545,19 +567,27 @@ class MCPService:
         result = self.market_service.get_quotes(symbols)
         
         if result.get("success"):
-            quotes = result.get("quotes", [])
+            # Fyers market service returns "data" with nested v.lp structure
+            quotes = result.get("data") or result.get("quotes") or []
             lines = ["**Real-Time Quotes**\n"]
             
             for q in quotes:
-                symbol = q.get("symbol", "Unknown")
-                ltp = q.get("ltp", 0)
-                change = q.get("ch", 0)
-                change_pct = q.get("chp", 0)
+                v = q.get("v") or {}
+                symbol = q.get("n") or q.get("symbol") or "Unknown"
+                ltp = v.get("lp") or q.get("ltp") or 0
+                change = v.get("ch") if v.get("ch") is not None else q.get("ch", 0)
+                change_pct = v.get("chp") if v.get("chp") is not None else q.get("chp", 0)
+                try:
+                    ltp_f = float(ltp or 0)
+                    chg_f = float(change or 0)
+                    chp_f = float(change_pct or 0)
+                except (TypeError, ValueError):
+                    ltp_f, chg_f, chp_f = 0.0, 0.0, 0.0
                 
-                emoji = "🟢" if change >= 0 else "🔴"
-                lines.append(f"{emoji} **{symbol}**: ₹{ltp:.2f} ({change_pct:+.2f}%)")
+                emoji = "🟢" if chg_f >= 0 else "🔴"
+                lines.append(f"{emoji} **{symbol}**: ₹{ltp_f:.2f} ({chp_f:+.2f}%)")
             
-            return self._success_response("\n".join(lines))
+            return self._success_response("\n".join(lines) if len(lines) > 1 else "No quote data returned.")
         
         return self._error_response(result.get("error", "Failed to fetch quotes"))
 
@@ -572,25 +602,31 @@ class MCPService:
         result = self.market_service.get_option_chain(symbol, strike_count)
         
         if result.get("success"):
-            spot = result.get("spot_price", 0)
-            atm_strike = result.get("atm_strike", 0)
+            spot = result.get("spot_price", 0) or 0
+            atm_strike = result.get("atm_strike", 0) or 0
             chain = result.get("chain", [])[:5]  # Top 5 for readability
             
             lines = [
                 f"**Option Chain: {symbol}**\n",
-                f"- Spot: ₹{spot:,.2f}",
-                f"- ATM Strike: ₹{atm_strike:,.0f}\n",
+                f"- Spot: ₹{float(spot):,.2f}",
+                f"- ATM Strike: ₹{float(atm_strike):,.0f}",
+                f"- PCR: {result.get('pcr', 'N/A')}\n",
                 "| Strike | CE OI | CE LTP | PE LTP | PE OI |",
                 "|--------|-------|--------|--------|-------|"
             ]
             
-            for strike in chain:
-                s = strike.get("strike", 0)
-                ce_oi = strike.get("ce_oi", 0)
-                ce_ltp = strike.get("ce_ltp", 0)
-                pe_ltp = strike.get("pe_ltp", 0)
-                pe_oi = strike.get("pe_oi", 0)
-                lines.append(f"| {s:.0f} | {ce_oi:,} | ₹{ce_ltp:.2f} | ₹{pe_ltp:.2f} | {pe_oi:,} |")
+            for row in chain:
+                s = row.get("strike_price") or row.get("strike") or 0
+                call = row.get("call") or {}
+                put = row.get("put") or {}
+                ce_oi = call.get("oi") or row.get("call_oi") or 0
+                ce_ltp = call.get("ltp") or 0
+                pe_ltp = put.get("ltp") or 0
+                pe_oi = put.get("oi") or row.get("put_oi") or 0
+                lines.append(
+                    f"| {float(s):.0f} | {int(ce_oi):,} | ₹{float(ce_ltp or 0):.2f} | "
+                    f"₹{float(pe_ltp or 0):.2f} | {int(pe_oi):,} |"
+                )
             
             return self._success_response("\n".join(lines))
         

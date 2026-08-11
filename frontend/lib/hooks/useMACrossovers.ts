@@ -45,9 +45,10 @@ export function useMACrossovers() {
   const wsRef = useRef<WebSocket | null>(null);
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const intentionalCloseRef = useRef(false);
 
   // ------------------------------------------------------------------
-  // REST fallback poll
+  // REST fallback poll (slow — only when WS is down)
   // ------------------------------------------------------------------
   const pollRest = useCallback(async () => {
     try {
@@ -68,9 +69,10 @@ export function useMACrossovers() {
   }, []);
 
   const startPoll = useCallback(() => {
+    // Avoid hammering backend: single immediate pull + 60s interval
     pollRest();
     if (pollTimerRef.current) return;
-    pollTimerRef.current = setInterval(pollRest, 30_000);
+    pollTimerRef.current = setInterval(pollRest, 60_000);
   }, [pollRest]);
 
   const stopPoll = useCallback(() => {
@@ -84,9 +86,15 @@ export function useMACrossovers() {
   // WebSocket connection
   // ------------------------------------------------------------------
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (
+      wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
 
     try {
+      intentionalCloseRef.current = false;
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
 
@@ -94,6 +102,8 @@ export function useMACrossovers() {
         setConnected(true);
         setError(null);
         stopPoll();
+        // One snapshot via REST so UI is warm without continuous polling
+        pollRest();
       };
 
       ws.onmessage = (evt) => {
@@ -147,15 +157,16 @@ export function useMACrossovers() {
 
       ws.onclose = () => {
         setConnected(false);
+        if (intentionalCloseRef.current) return;
         startPoll();
-        // Reconnect after 5 s
-        reconnectTimerRef.current = setTimeout(connect, 5_000);
+        // Reconnect after 8 s (was 5) — less thrash with many tabs
+        reconnectTimerRef.current = setTimeout(connect, 8_000);
       };
     } catch (e) {
       setError("Cannot connect to backend");
       startPoll();
     }
-  }, [startPoll, stopPoll]);
+  }, [startPoll, stopPoll, pollRest]);
 
   // ------------------------------------------------------------------
   // Lifecycle
@@ -163,9 +174,18 @@ export function useMACrossovers() {
   useEffect(() => {
     connect();
     return () => {
-      wsRef.current?.close();
+      intentionalCloseRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       stopPoll();
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      try {
+        wsRef.current?.close();
+      } catch {
+        // ignore
+      }
+      wsRef.current = null;
     };
   }, [connect, stopPoll]);
 

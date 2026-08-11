@@ -24,7 +24,15 @@ interface MarketStateData {
             action: string;
             rationale: string;
             strikes: number[];
-        }
+            invalidation?: string;
+            bias?: string;
+        } | null;
+    };
+    strike_guidance?: {
+        suggested?: boolean;
+        bias?: string;
+        expert_note?: string;
+        trades?: Array<{ strike?: number; instrument?: string; type?: string; rationale?: string }>;
     };
     alerts?: Array<{
         type: string;
@@ -37,7 +45,7 @@ export default function MarketStateDetector() {
         ["market", "state"],
         () => api.market.getMarketState() as Promise<MarketStateData>,
         {
-            refetchInterval: 30000,
+            refetchInterval: 45000,
         },
     );
 
@@ -46,6 +54,7 @@ export default function MarketStateDetector() {
     const stateColors: Record<string, string> = {
         'TREND': 'bg-blue-500 text-white',
         'RANGE': 'bg-amber-500 text-white',
+        'INTENT': 'bg-emerald-500 text-white',
         'ADJUSTMENT': 'bg-purple-500 text-white',
         'NO-TRADE': 'bg-zinc-600 text-white'
     };
@@ -137,16 +146,23 @@ export default function MarketStateDetector() {
                 </div>
             </div>
 
-            {/* Adjustment Signal */}
+            {/* Actionable setup signal */}
             {state?.adjustment?.detected && state.adjustment.trade_setup && (
                 <div className="p-2 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
-                    <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-purple-600 dark:text-purple-400">🎯 ADJUSTMENT SIGNAL</span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-bold text-purple-600 dark:text-purple-400">
+                            🎯 {state.state === 'INTENT' ? 'INTENT SIGNAL' : state.state === 'TREND' ? 'TREND SIGNAL' : 'ADJUSTMENT SIGNAL'}
+                        </span>
                         <span className="text-[10px] text-purple-500">{state.adjustment.confidence}% confidence</span>
                     </div>
                     <div className="text-xs text-purple-700 dark:text-purple-300 mt-1">
                         <strong>{state.adjustment.trade_setup.action}</strong>: {state.adjustment.trade_setup.rationale}
                     </div>
+                    {state.adjustment.trade_setup.invalidation && (
+                        <div className="text-[10px] text-purple-500/80 mt-1">
+                            Invalidation: {state.adjustment.trade_setup.invalidation}
+                        </div>
+                    )}
                 </div>
             )}
 

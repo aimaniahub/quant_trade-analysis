@@ -30,7 +30,7 @@ FNO_STOCKS: List[str] = [
     # NBFC & Finance
     "NSE:BAJFINANCE-EQ",
     "NSE:BAJAJFINSV-EQ",
-    "NSE:HDFC-EQ",
+    # Note: NSE:HDFC-EQ delisted after HDFC–HDFCBANK merger — do not include
     "NSE:LICHSGFIN-EQ",
     "NSE:CHOLAFIN-EQ",
     "NSE:MANAPPURAM-EQ",
@@ -82,7 +82,7 @@ FNO_STOCKS: List[str] = [
     
     # Automobiles
     "NSE:MARUTI-EQ",
-    "NSE:TATAMOTORS-EQ",
+    "NSE:TMPV-EQ",
     "NSE:M&M-EQ",
     "NSE:BAJAJ-AUTO-EQ",
     "NSE:HEROMOTOCO-EQ",
@@ -173,7 +173,7 @@ FNO_STOCKS: List[str] = [
     "NSE:INDUSTOWER-EQ",
     "NSE:TATACOMM-EQ",
     "NSE:ZEEL-EQ",
-    "NSE:PVR-EQ",
+    "NSE:PVRINOX-EQ",
     
     # Consumer Durables & Electronics
     "NSE:TITAN-EQ",
@@ -207,7 +207,7 @@ FNO_STOCKS: List[str] = [
     "NSE:SRF-EQ",
     "NSE:PIIND-EQ",
     "NSE:AARTIIND-EQ",
-    "NSE:TATACHEMAC-EQ",
+    "NSE:TATACHEM-EQ",
     
     # Miscellaneous
     "NSE:INDIGO-EQ",
@@ -251,7 +251,7 @@ TOP_FNO_STOCKS: List[str] = [
     "NSE:INDUSINDBK-EQ",
     # Large-Cap Auto
     "NSE:MARUTI-EQ",
-    "NSE:TATAMOTORS-EQ",
+    "NSE:TMPV-EQ",
     "NSE:M&M-EQ",
     # Large-Cap IT
     "NSE:WIPRO-EQ",
@@ -274,17 +274,53 @@ TOP_FNO_STOCKS: List[str] = [
 ]
 
 
+# Index symbols commonly scanned alongside equities
+FNO_INDICES: List[str] = [
+    "NSE:NIFTY50-INDEX",
+    "NSE:NIFTYBANK-INDEX",
+    # Fyers symbol for Fin Nifty (not NIFTYFIN-INDEX)
+    "NSE:FINNIFTY-INDEX",
+]
+
+# Runtime / known-bad symbols (auto-extended when Fyers returns Invalid symbol)
+INVALID_SYMBOLS: set[str] = {
+    "NSE:TATAMOTORS-EQ",  # demerged → use NSE:TMPV-EQ
+    "NSE:NIFTYFIN-INDEX",  # wrong ticker → use NSE:FINNIFTY-INDEX
+    "NSE:HDFC-EQ",
+}
+
+
+def is_valid_symbol(symbol: str) -> bool:
+    return bool(symbol) and symbol not in INVALID_SYMBOLS
+
+
+def mark_invalid_symbol(symbol: str) -> None:
+    if symbol:
+        INVALID_SYMBOLS.add(symbol)
+
+
+def filter_valid_symbols(symbols: List[str]) -> List[str]:
+    return [s for s in symbols if is_valid_symbol(s)]
+
+
 def get_fno_stocks(top_only: bool = False) -> List[str]:
     """
     Get list of F&O stocks.
     
     Args:
-        top_only: If True, return only top 20 high-volume stocks
+        top_only: If True, return only top high-volume stocks
         
     Returns:
         List of stock symbols in Fyers format
     """
     return TOP_FNO_STOCKS if top_only else FNO_STOCKS
+
+
+def get_fno_universe(include_indices: bool = True) -> List[str]:
+    """Canonical scan universe used by MA / radar / scanners."""
+    if include_indices:
+        return list(dict.fromkeys([*FNO_STOCKS, *FNO_INDICES]))
+    return list(FNO_STOCKS)
 
 
 def get_stock_count() -> int:

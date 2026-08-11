@@ -12,7 +12,7 @@ export default function OptionChainTable({ symbol = 'NSE:NIFTY50-INDEX' }: Optio
         ["options", "chain", symbol],
         () => api.options.getChain(symbol),
         {
-            refetchInterval: 30000,
+            refetchInterval: 45000,
             enabled: Boolean(symbol),
         },
     );
@@ -87,13 +87,15 @@ export default function OptionChainTable({ symbol = 'NSE:NIFTY50-INDEX' }: Optio
                                     className={`border-b border-zinc-100 dark:border-zinc-800 hover:bg-zinc-100/50 dark:hover:bg-zinc-800/50 transition-colors ${isATM ? 'bg-blue-500/5 dark:bg-blue-500/10' : ''}`}
                                 >
                                     {/* CALLS */}
-                                    <td className="py-3 px-1 text-center text-zinc-500">{(row.call?.oi / 1000).toFixed(1)}k</td>
-                                    <td className="py-3 px-1 text-center text-zinc-500">{row.call?.iv?.toFixed(1) || '-'}</td>
-                                    <td className={`py-3 px-1 text-center font-medium ${row.call?.chg >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                        {row.call?.chg?.toFixed(1) || '0.0'}
+                                    <td className="py-3 px-1 text-center text-zinc-500">
+                                        {row.call?.oi != null ? `${(Number(row.call.oi) / 1000).toFixed(1)}k` : '-'}
+                                    </td>
+                                    <td className="py-3 px-1 text-center text-zinc-500">{row.call?.iv != null ? Number(row.call.iv).toFixed(1) : '-'}</td>
+                                    <td className={`py-3 px-1 text-center font-medium ${(row.call?.chg ?? 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                        {row.call?.chg != null ? Number(row.call.chg).toFixed(1) : '-'}
                                     </td>
                                     <td className="py-3 px-1 text-center font-bold text-zinc-900 dark:text-zinc-100 border-r border-zinc-200 dark:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-800/20">
-                                        {row.call?.ltp?.toFixed(2) || '0.00'}
+                                        {row.call?.ltp != null ? Number(row.call.ltp).toFixed(2) : '-'}
                                     </td>
 
                                     {/* STRIKE */}
@@ -103,13 +105,15 @@ export default function OptionChainTable({ symbol = 'NSE:NIFTY50-INDEX' }: Optio
 
                                     {/* PUTS */}
                                     <td className="py-3 px-1 text-center font-bold text-zinc-900 dark:text-zinc-100 bg-zinc-50/50 dark:bg-zinc-800/20">
-                                        {row.put?.ltp?.toFixed(2) || '0.00'}
+                                        {row.put?.ltp != null ? Number(row.put.ltp).toFixed(2) : '-'}
                                     </td>
-                                    <td className={`py-3 px-1 text-center font-medium ${row.put?.chg >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                        {row.put?.chg?.toFixed(1) || '0.0'}
+                                    <td className={`py-3 px-1 text-center font-medium ${(row.put?.chg ?? 0) >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                        {row.put?.chg != null ? Number(row.put.chg).toFixed(1) : '-'}
                                     </td>
-                                    <td className="py-3 px-1 text-center text-zinc-500">{row.put?.iv?.toFixed(1) || '-'}</td>
-                                    <td className="py-3 px-1 text-center text-zinc-500">{(row.put?.oi / 1000).toFixed(1)}k</td>
+                                    <td className="py-3 px-1 text-center text-zinc-500">{row.put?.iv != null ? Number(row.put.iv).toFixed(1) : '-'}</td>
+                                    <td className="py-3 px-1 text-center text-zinc-500">
+                                        {row.put?.oi != null ? `${(Number(row.put.oi) / 1000).toFixed(1)}k` : '-'}
+                                    </td>
                                 </tr>
                             );
                         })}

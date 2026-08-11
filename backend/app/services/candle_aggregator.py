@@ -73,6 +73,8 @@ class CandleAggregator:
         self._callbacks: List[Callable[[Dict], None]] = []
         self._running = False
         self._flush_thread: Optional[threading.Thread] = None
+        # Track last day cumulative volume to derive per-tick volume deltas
+        self._last_day_vol: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,10 +93,33 @@ class CandleAggregator:
         """
         symbol = message.get("symbol") or message.get("s")
         ltp = message.get("ltp") or message.get("v", {}).get("ltp")
-        vol = message.get("vol_traded_today") or message.get("v", {}).get("vol_traded_today", 0)
+        # Prefer last-traded qty. Day cumulative volume is NOT candle volume —
+        # convert it to a positive delta when needed.
+        raw_vol = (
+            message.get("last_traded_qty")
+            or message.get("v", {}).get("last_traded_qty")
+            or message.get("vol")
+            or 0
+        )
+        day_vol = message.get("vol_traded_today") or message.get("v", {}).get("vol_traded_today")
 
         if not symbol or not ltp:
             return
+
+        try:
+            vol = float(raw_vol or 0)
+        except (TypeError, ValueError):
+            vol = 0.0
+
+        if vol <= 0 and day_vol is not None:
+            try:
+                day_vol_f = float(day_vol)
+                prev = self._last_day_vol.get(symbol)
+                if prev is not None and day_vol_f >= prev:
+                    vol = day_vol_f - prev
+                self._last_day_vol[symbol] = day_vol_f
+            except (TypeError, ValueError):
+                pass
 
         now_ts = int(_time.time())
         minute_ts = now_ts - (now_ts % 60)  # floor to minute boundary

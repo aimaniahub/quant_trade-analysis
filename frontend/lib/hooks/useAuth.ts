@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../api';
 
 export interface AuthStatus {
@@ -15,6 +16,12 @@ export function useAuth() {
     const [status, setStatus] = useState<AuthStatus | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const queryClient = useQueryClient();
+
+    const invalidateMarketData = useCallback(async () => {
+        // Refresh all market/strategy widgets after a successful login
+        await queryClient.invalidateQueries();
+    }, [queryClient]);
 
     const checkStatus = useCallback(async () => {
         try {
@@ -46,20 +53,22 @@ export function useAuth() {
             setLoading(true);
             await api.auth.autoLogin();
             await checkStatus();
+            await invalidateMarketData();
         } catch (err: any) {
             setError(err.message || 'Auto-login failed. Please sign in manually.');
         } finally {
             setLoading(false);
         }
-    }, [checkStatus]);
+    }, [checkStatus, invalidateMarketData]);
 
     const submitAuthCode = useCallback(async (code: string) => {
         try {
             setLoading(true);
             setError(null);
             const result = await api.auth.submitAuthCode(code);
-            // Token saved & settings reloaded on backend, now refresh status
+            // Token saved & settings reloaded on backend, now refresh status + data
             await checkStatus();
+            await invalidateMarketData();
             return result;
         } catch (err: any) {
             const msg = err.message || 'Failed to generate token';
@@ -68,7 +77,7 @@ export function useAuth() {
         } finally {
             setLoading(false);
         }
-    }, [checkStatus]);
+    }, [checkStatus, invalidateMarketData]);
 
     useEffect(() => {
         checkStatus();

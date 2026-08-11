@@ -7,13 +7,13 @@ import { useApiQuery } from "../lib/hooks/useApiQuery";
 const INDEX_SYMBOLS = [
     'NSE:NIFTY50-INDEX',
     'NSE:NIFTYBANK-INDEX',
-    'NSE:NIFTYFIN-INDEX'
+    'NSE:FINNIFTY-INDEX'
 ];
 
 const INDEX_LABELS: Record<string, string> = {
     'NSE:NIFTY50-INDEX': 'NIFTY 50',
     'NSE:NIFTYBANK-INDEX': 'BANK NIFTY',
-    'NSE:NIFTYFIN-INDEX': 'FIN NIFTY'
+    'NSE:FINNIFTY-INDEX': 'FIN NIFTY'
 };
 
 interface IndexData {
@@ -32,7 +32,7 @@ export default function MarketIndices() {
         ["market", "indices"],
         () => api.market.getIndices(),
         {
-            refetchInterval: 10000,
+            refetchInterval: 15000,
             onSuccess: () => {
                 setLastUpdate(new Date());
             },

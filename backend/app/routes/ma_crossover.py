@@ -90,6 +90,9 @@ class ConfigUpdate(BaseModel):
     consecutive_candles: Optional[int] = None
     cooldown_minutes: Optional[int] = None
     scan_batch_size: Optional[int] = None
+    scan_interval_secs: Optional[int] = None
+    auto_scan_top_only: Optional[bool] = None
+    auto_scan_chunk_size: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------

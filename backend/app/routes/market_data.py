@@ -21,7 +21,8 @@ class BulkAnalysisRequest(BaseModel):
 @router.get("/market/spot/{symbol}")
 async def get_spot_price(symbol: str):
     """Get current spot price for a symbol."""
-    result = market_service.get_spot_price(symbol)
+    import asyncio
+    result = await asyncio.to_thread(market_service.get_spot_price, symbol)
     if result.get("success"):
         return result
     else:
@@ -34,95 +35,162 @@ async def get_market_state(symbol: str = Query("NSE:NIFTY50-INDEX", description=
     Get market state analysis using the F&O Intelligence Engine.
     
     Returns:
-        Market state classification (TREND, RANGE, ADJUSTMENT, NO-TRADE),
+        Market state classification (TREND, RANGE, INTENT, ADJUSTMENT, NO-TRADE),
         confidence level, analysis details, and trading signals.
     """
-    # Get fresh option chain data
-    chain_data = market_service.get_option_chain(symbol, strike_count=10)
+    import asyncio
+    from app.services.signal_bus import get_signal_bus
+
+    # Offload blocking Fyers + analysis off the event loop
+    chain_data = await asyncio.to_thread(market_service.get_option_chain, symbol, 10)
     
     if not chain_data.get("success"):
         raise HTTPException(status_code=400, detail=chain_data.get("error", "Failed to fetch option chain"))
     
-    # Run intelligence analysis
-    analysis = intelligence_engine.get_analysis_summary(chain_data)
+    analysis = await asyncio.to_thread(intelligence_engine.get_analysis_summary, chain_data)
+
+    # Only publish high-confidence actionable setups (not every PCR/VIX blurb).
+    # Signal bus already dedupes; keep this tight so 45s UI polls don't spam.
+    try:
+        bus = get_signal_bus()
+        adj = analysis.get("adjustment") or {}
+        conf = float(adj.get("confidence") or analysis.get("confidence") or 0)
+        if (
+            adj.get("detected")
+            and adj.get("trade_setup")
+            and conf >= 60
+            and analysis.get("tradable")
+        ):
+            setup = adj["trade_setup"]
+            bus.publish(
+                source="intelligence",
+                message=f"{setup.get('action')} on {symbol}: {setup.get('rationale', '')}",
+                level="signal",
+                symbol=symbol,
+                score=conf,
+                meta={"state": analysis.get("state"), "strikes": setup.get("strikes")},
+            )
+    except Exception:
+        pass
     
     return analysis
 
 
 @router.get("/market/stocks/scan")
 async def scan_fno_stocks(
-    limit: int = Query(20, ge=1, le=50, description="Maximum number of stocks to return"),
-    tradable_only: bool = Query(False, description="Only return TREND/ADJUSTMENT stocks"),
-    top_only: bool = Query(True, description="Scan only top 20 high-volume stocks")
+    limit: int = Query(100, ge=1, le=200, description="Max stocks to analyze"),
+    tradable_only: bool = Query(False, description="Only return tradable states"),
+    top_only: bool = Query(False, description="If true, only TOP liquid F&O names"),
+    strike_count: int = Query(10, ge=5, le=20, description="Strikes above/below ATM"),
+    deep: bool = Query(True, description="Include deep mathematical analytics"),
 ):
     """
-    Scan F&O stocks and return analysis using real market data.
-    
-    This endpoint analyzes F&O stocks based on real-time or last available prices 
-    from the Fyers API. No mock data is used.
-    
-    Returns:
-        List of stock analyses sorted by tradability and confidence.
+    Deep-scan F&O stocks with option-chain mathematics.
+
+    Default: full F&O universe (filtered valid symbols), not just top 20.
+    Rate-limited and cached to protect Fyers quotas.
     """
+    import asyncio
     from datetime import datetime
-    
-    # Get stock list
-    stocks = TOP_FNO_STOCKS if top_only else get_fno_stocks()[:limit]
-    
-    results = []
-    errors = []
-    
-    for symbol in stocks[:limit]:
-        try:
-            # Always fetch real chain data from Fyers
-            # Fyers provides LTP and OI even when the market is closed
-            chain_data = market_service.get_option_chain(symbol, strike_count=5)
-            
-            if chain_data.get("success"):
-                # Analyze using real data, skipping time restrictions for scanning
-                analysis = intelligence_engine.analyze_stock(symbol, chain_data)
-                
-                if "error" not in analysis:
-                    results.append(analysis)
-                else:
-                    errors.append({"symbol": symbol, "error": analysis.get("error")})
-            else:
-                errors.append({
-                    "symbol": symbol, 
-                    "error": chain_data.get("error", "Failed to fetch real market data")
-                })
-                
-        except Exception as e:
-            errors.append({"symbol": symbol, "error": str(e)})
-    
-    # Sort by tradability (tradable first) and then by confidence
-    results.sort(key=lambda x: (
-        0 if x.get("tradable") else 1,
-        -(x.get("confidence") or 0)
-    ))
-    
-    # Filter if tradable_only
+    from app.services.fno_stocks import filter_valid_symbols, get_fno_stocks as _all_fno
+    from app.services.rate_limiter import get_fyers_limiter, is_rate_limit_error
+
+    if top_only:
+        stocks = filter_valid_symbols(list(TOP_FNO_STOCKS))[:limit]
+    else:
+        stocks = filter_valid_symbols(list(_all_fno(top_only=False)))[:limit]
+
+    results: list = []
+    errors: list = []
+    limiter = get_fyers_limiter()
+    sem = asyncio.Semaphore(2)  # mild concurrency; cache + limiter protect API
+
+    async def _one(symbol: str):
+        async with sem:
+            if limiter.in_cooldown:
+                return {"symbol": symbol, "error": "rate_limited"}
+            try:
+                await limiter.acquire()
+                chain_data = await asyncio.to_thread(
+                    market_service.get_option_chain, symbol, strike_count
+                )
+                if not chain_data.get("success"):
+                    err = chain_data.get("error", "Failed to fetch OC")
+                    if is_rate_limit_error(err):
+                        limiter.trip_limit(err)
+                    return {"symbol": symbol, "error": err}
+
+                analysis = await asyncio.to_thread(
+                    intelligence_engine.analyze_stock, symbol, chain_data
+                )
+                if "error" in analysis:
+                    return {"symbol": symbol, "error": analysis.get("error")}
+                # Ensure symbol field present
+                analysis["symbol"] = analysis.get("symbol") or symbol
+                if not deep:
+                    analysis.pop("deep_analytics", None)
+                return {"ok": True, "data": analysis}
+            except Exception as e:
+                if is_rate_limit_error(e):
+                    limiter.trip_limit(str(e))
+                return {"symbol": symbol, "error": str(e)}
+
+    outcomes = await asyncio.gather(*[_one(s) for s in stocks])
+    for out in outcomes:
+        if out.get("ok"):
+            results.append(out["data"])
+        else:
+            errors.append({"symbol": out.get("symbol"), "error": out.get("error")})
+
+    # Sort by quant edge only (no bull/bear preference in ordering)
+    results.sort(
+        key=lambda x: (
+            -(x.get("quant_score") or x.get("confidence") or 0),
+            -(x.get("intent_score") or 0),
+            x.get("symbol") or "",
+        )
+    )
+
     if tradable_only:
         results = [r for r in results if r.get("tradable")]
-    
-    # Limit results
-    results = results[:limit]
-    
+
     return {
         "success": True,
         "count": len(results),
-        "total_scanned": len(stocks[:limit]),
+        "total_scanned": len(stocks),
         "tradable_count": sum(1 for r in results if r.get("tradable")),
+        "universe_requested": len(stocks),
+        "top_only": top_only,
+        "strike_count": strike_count,
+        "deep": deep,
         "stocks": results,
         "errors": errors if errors else None,
-        "timestamp": datetime.now().isoformat()
+        "error_count": len(errors),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@router.get("/market/cache-stats")
+async def market_cache_stats():
+    """Debug: short-TTL market data cache hit rates."""
+    from app.services.market_cache import get_market_cache
+    from app.services.rate_limiter import get_fyers_limiter
+    lim = get_fyers_limiter()
+    return {
+        "success": True,
+        "cache": get_market_cache().stats(),
+        "rate_limit": {
+            "in_cooldown": lim.in_cooldown,
+            "cooldown_remaining": round(lim.cooldown_remaining, 1),
+        },
     }
 
 
 @router.get("/market/indices")
 async def get_indices():
     """Get major market indices data."""
-    result = market_service.get_indices()
+    import asyncio
+    result = await asyncio.to_thread(market_service.get_indices)
     if result.get("success"):
         return result
     else:
@@ -137,7 +205,10 @@ async def get_history(
     days: int = 30
 ):
     """Get historical OHLCV data."""
-    result = market_service.get_historical_data(symbol, resolution, days=days)
+    import asyncio
+    result = await asyncio.to_thread(
+        market_service.get_historical_data, symbol, resolution, None, None, days
+    )
     if result.get("success"):
         return result
     else:
@@ -168,6 +239,8 @@ async def scan_high_volume_stocks(
     import asyncio
     
     try:
+        # scan_high_volume_stocks is async but does blocking Fyers I/O inside;
+        # run the whole coroutine in a worker via to_thread-friendly wrapper.
         result = await scanner_service.scan_high_volume_stocks(
             timeframe=timeframe,
             top_count=top_count
@@ -232,6 +305,19 @@ async def bulk_option_chain_analysis(
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 
+@router.get("/market/news-bias")
+async def get_news_bias(force: bool = Query(False, description="Bypass cache and refresh from Grok")):
+    """
+    Optional Grok news/macro bias used by the confluence engine.
+    Returns NEUTRAL when GROK_API_KEY is missing or the call fails.
+    """
+    import asyncio
+    from app.services.news_context import get_news_service
+
+    svc = get_news_service()
+    return await asyncio.to_thread(svc.get_market_bias, force)
+
+
 @router.get("/market/nifty-sentiment")
 async def get_nifty_sentiment():
     """
@@ -240,10 +326,11 @@ async def get_nifty_sentiment():
     Returns:
         VIX data, PCR analysis, market breadth, OI change, support/resistance levels
     """
+    import asyncio
     from app.services.nifty_sentiment import get_sentiment_service
     
     sentiment_service = get_sentiment_service()
-    return sentiment_service.get_full_sentiment()
+    return await asyncio.to_thread(sentiment_service.get_full_sentiment)
 
 
 @router.get("/market/live-trade-signal/{symbol}")
@@ -254,9 +341,12 @@ async def get_live_trade_signal(symbol: str):
     Returns:
         Current trade recommendation with entry, stop-loss, target, and confidence
     """
+    import asyncio
     try:
-        # Fetch fresh option chain
-        chain_data = market_service.get_option_chain(symbol, strike_count=20)
+        # Fetch fresh option chain (cached + off event loop)
+        chain_data = await asyncio.to_thread(
+            market_service.get_option_chain, symbol, 20
+        )
         
         if not chain_data.get("success"):
             raise HTTPException(status_code=400, detail=chain_data.get("error", "Failed to fetch OC"))
@@ -307,7 +397,10 @@ async def get_greeks_heatmap(
     Returns:
         Strike-wise Delta, Gamma, Theta, Vega for both CE and PE
     """
-    chain_data = market_service.get_option_chain(symbol, strike_count=strike_count)
+    import asyncio
+    chain_data = await asyncio.to_thread(
+        market_service.get_option_chain, symbol, strike_count
+    )
     
     if not chain_data.get("success"):
         raise HTTPException(status_code=400, detail=chain_data.get("error", "Failed to fetch OC"))

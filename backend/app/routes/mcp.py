@@ -11,10 +11,14 @@ from typing import Any, Dict, List, Optional
 import json
 import asyncio
 
+from app.core.config import get_settings
 from app.services.mcp_service import get_mcp_service
 from app.services.fyers_auth import get_auth_service
 
 router = APIRouter()
+
+# Tools that move real money — require trading kill-switch + optional API key
+_WRITE_TOOLS = frozenset({"place_order", "modify_order", "cancel_order"})
 
 
 def get_mcp():
@@ -27,6 +31,17 @@ def check_auth():
     auth = get_auth_service()
     status = auth.get_auth_status()
     return status.get("authenticated", False)
+
+
+def _verify_mcp_api_key(request: Request) -> None:
+    """If MCP_API_KEY is configured, require matching X-MCP-API-KEY header."""
+    settings = get_settings()
+    expected = (settings.mcp_api_key or "").strip()
+    if not expected:
+        return
+    provided = request.headers.get("X-MCP-API-KEY", "")
+    if provided != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-MCP-API-KEY")
 
 
 @router.get("/mcp/tools")
@@ -55,20 +70,33 @@ async def call_tool(request: Request, mcp=Depends(get_mcp)):
             "arguments": {...}
         }
     
-    Returns:
-        Tool execution result with content array
+    Write tools (place/modify/cancel order) require MCP_TRADING_ENABLED=true.
+    If MCP_API_KEY is set, all calls must send header X-MCP-API-KEY.
     """
     try:
+        _verify_mcp_api_key(request)
         body = await request.json()
         tool_name = body.get("name")
         arguments = body.get("arguments", {})
         
         if not tool_name:
             raise HTTPException(status_code=400, detail="Tool name is required")
+
+        settings = get_settings()
+        if tool_name in _WRITE_TOOLS and not settings.mcp_trading_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Live trading is disabled. Set MCP_TRADING_ENABLED=true in backend/.env "
+                    "to allow place/modify/cancel order tools."
+                ),
+            )
         
         result = await mcp.call_tool(tool_name, arguments)
         return result
         
+    except HTTPException:
+        raise
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     except Exception as e:
@@ -86,19 +114,22 @@ async def get_mcp_status(is_authenticated: bool = Depends(check_auth)):
     auth = get_auth_service()
     auth_status = auth.get_auth_status()
     
+    settings = get_settings()
     return {
         "server": "OptionGreek MCP Server",
         "version": "1.0.0",
         "status": "online",
         "authenticated": auth_status.get("authenticated", False),
         "user": auth_status.get("user_info", {}).get("name") if auth_status.get("authenticated") else None,
+        "trading_enabled": bool(settings.mcp_trading_enabled),
+        "api_key_required": bool((settings.mcp_api_key or "").strip()),
         "capabilities": [
             "portfolio_management",
-            "order_execution", 
+            "order_execution" if settings.mcp_trading_enabled else "order_execution_disabled",
             "market_data",
             "option_chain_analysis"
         ],
-        "tools_count": 12
+        "tools_count": 11
     }
 
 
@@ -174,6 +205,7 @@ async def batch_call(request: Request, mcp=Depends(get_mcp)):
         Array of results for each tool call
     """
     try:
+        _verify_mcp_api_key(request)
         body = await request.json()
         calls = body.get("calls", [])
         
@@ -182,7 +214,8 @@ async def batch_call(request: Request, mcp=Depends(get_mcp)):
         
         if len(calls) > 10:
             raise HTTPException(status_code=400, detail="Maximum 10 calls per batch")
-        
+
+        settings = get_settings()
         results = []
         for call in calls:
             tool_name = call.get("name")
@@ -191,12 +224,24 @@ async def batch_call(request: Request, mcp=Depends(get_mcp)):
             if not tool_name:
                 results.append({"isError": True, "content": [{"type": "text", "text": "Missing tool name"}]})
                 continue
+
+            if tool_name in _WRITE_TOOLS and not settings.mcp_trading_enabled:
+                results.append({
+                    "isError": True,
+                    "content": [{
+                        "type": "text",
+                        "text": "Live trading disabled (MCP_TRADING_ENABLED=false)",
+                    }],
+                })
+                continue
             
             result = await mcp.call_tool(tool_name, arguments)
             results.append(result)
         
         return {"results": results}
-        
+
+    except HTTPException:
+        raise
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     except Exception as e:

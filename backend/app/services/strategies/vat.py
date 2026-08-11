@@ -19,7 +19,12 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from enum import Enum
+
+import pytz
+
 from app.services.fyers_market import get_market_service
+
+IST = pytz.timezone("Asia/Kolkata")
 
 
 class ExpiryPhase(Enum):
@@ -192,7 +197,7 @@ class EnhancedVATStrategy:
         Returns:
             Tuple of (ExpiryPhase enum, days_to_expiry)
         """
-        now = datetime.now()
+        now = datetime.now(IST)
         weekday = now.weekday()
         
         # Nifty expires Thursday, BankNifty expires Wednesday
@@ -215,7 +220,7 @@ class EnhancedVATStrategy:
     
     def is_optimal_time_window(self) -> bool:
         """Check if current time is in optimal VAT trading window (10AM-3PM IST)."""
-        now = datetime.now()
+        now = datetime.now(IST)
         return self.config.optimal_start_hour <= now.hour < self.config.optimal_end_hour
     
     def calculate_momentum_score(self, spot_price: float, symbol: str) -> Tuple[float, str]:
@@ -233,18 +238,25 @@ class EnhancedVATStrategy:
                 days=1
             )
             
-            if not hist_data.get("success") or not hist_data.get("data"):
+            # get_historical_data returns "candles" (list of dicts with open/high/low/close)
+            candles = hist_data.get("candles") or hist_data.get("data") or []
+            if not hist_data.get("success") or not candles:
                 return (50.0, "neutral")  # Neutral if no data
-            
-            candles = hist_data["data"]
+
             if len(candles) < 6:
                 return (50.0, "neutral")
             
             # Get last 6 candles (30 minutes)
             recent_candles = candles[-6:]
             
-            # Calculate price change
-            start_price = recent_candles[0].get("close", spot_price)
+            # Calculate price change (support dict or raw OHLCV list)
+            first = recent_candles[0]
+            if isinstance(first, dict):
+                start_price = first.get("close", spot_price)
+            else:
+                start_price = first[4] if len(first) > 4 else spot_price
+            if not start_price:
+                start_price = spot_price
             price_change_pct = ((spot_price - start_price) / start_price) * 100
             
             # Determine direction
@@ -434,12 +446,17 @@ class EnhancedVATStrategy:
         # Calculate momentum
         momentum_score, momentum_dir = self.calculate_momentum_score(spot_price, symbol)
         
-        # Get VIX if available
+        # Get VIX if available (quotes nested under v.lp)
         vix = 0.0
         try:
-            vix_data = self.market_service.get_quotes(["NSE:INDIAVIX-INDEX"])
-            if vix_data.get("success") and vix_data.get("data"):
-                vix = vix_data["data"][0].get("ltp", 0)
+            vix_spot = self.market_service.get_spot_price("NSE:INDIAVIX-INDEX")
+            if vix_spot.get("success"):
+                vix = float(vix_spot.get("ltp") or 0)
+            else:
+                vix_data = self.market_service.get_quotes(["NSE:INDIAVIX-INDEX"])
+                if vix_data.get("success") and vix_data.get("data"):
+                    q0 = vix_data["data"][0] or {}
+                    vix = float((q0.get("v") or {}).get("lp") or q0.get("ltp") or 0)
         except Exception:
             pass
         
@@ -448,7 +465,7 @@ class EnhancedVATStrategy:
             anchor_strike=anchor_strike,
             expiry_phase=expiry_phase.value,
             days_to_expiry=days_to_expiry,
-            current_time=datetime.now().strftime("%H:%M:%S"),
+            current_time=datetime.now(IST).strftime("%H:%M:%S"),
             is_optimal_window=is_optimal,
             spot_change_percent=0,
             spot_momentum_direction=momentum_dir,
@@ -545,16 +562,16 @@ class EnhancedVATStrategy:
             gap_score = self.calculate_gap_score(gap, min_gap, avg_premium)
             
             # Determine undervalued leg
+            # Greeks live on the option dict itself (fyers_market), not nested under "greeks"
             if ce_ltp < pe_ltp:
                 signal_type = "BUY_CE"
                 undervalued_strike = call_strike
                 entry_price = ce_ltp
                 target_premium = pe_ltp
                 option_type = "CE"
-                greeks = call_data.get("greeks") or {}
-                delta = greeks.get("delta") if greeks.get("delta") is not None else 0.4
-                gamma = greeks.get("gamma") if greeks.get("gamma") is not None else 0.01
-                theta = greeks.get("theta") if greeks.get("theta") is not None else 0
+                delta = call_data.get("delta") if call_data.get("delta") is not None else 0.4
+                gamma = call_data.get("gamma") if call_data.get("gamma") is not None else 0.01
+                theta = call_data.get("theta") if call_data.get("theta") is not None else 0
                 iv = call_data.get("iv") if call_data.get("iv") is not None else 20
             else:
                 signal_type = "BUY_PE"
@@ -562,10 +579,9 @@ class EnhancedVATStrategy:
                 entry_price = pe_ltp
                 target_premium = ce_ltp
                 option_type = "PE"
-                greeks = put_data.get("greeks") or {}
-                delta = greeks.get("delta") if greeks.get("delta") is not None else -0.4
-                gamma = greeks.get("gamma") if greeks.get("gamma") is not None else 0.01
-                theta = greeks.get("theta") if greeks.get("theta") is not None else 0
+                delta = put_data.get("delta") if put_data.get("delta") is not None else -0.4
+                gamma = put_data.get("gamma") if put_data.get("gamma") is not None else 0.01
+                theta = put_data.get("theta") if put_data.get("theta") is not None else 0
                 iv = put_data.get("iv") if put_data.get("iv") is not None else 20
             
             # Skip if gap too small

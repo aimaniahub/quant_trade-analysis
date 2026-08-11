@@ -30,7 +30,18 @@ export const api = {
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.detail || `Request failed with status ${response.status}`);
+            const detail = errorData.detail;
+            let message: string;
+            if (typeof detail === "string") {
+                message = detail;
+            } else if (Array.isArray(detail)) {
+                message = detail.map((d: any) => d?.msg || JSON.stringify(d)).join("; ");
+            } else if (detail && typeof detail === "object") {
+                message = JSON.stringify(detail);
+            } else {
+                message = `Request failed with status ${response.status}`;
+            }
+            throw new Error(message);
         }
 
         return response.json();
@@ -61,8 +72,16 @@ export const api = {
         getMarketState: () => api.fetch('/market/state'),
         getHistory: (symbol: string, resolution = 'D', days = 30) =>
             api.fetch(`/market/history/${symbol}?resolution=${resolution}&days=${days}`),
-        scanStocks: (limit = 20, tradableOnly = false, topOnly = true) =>
-            api.fetch(`/market/stocks/scan?limit=${limit}&tradable_only=${tradableOnly}&top_only=${topOnly}`),
+        scanStocks: (
+            limit = 100,
+            tradableOnly = false,
+            topOnly = false,
+            strikeCount = 10,
+            deep = true,
+        ) =>
+            api.fetch(
+                `/market/stocks/scan?limit=${limit}&tradable_only=${tradableOnly}&top_only=${topOnly}&strike_count=${strikeCount}&deep=${deep}`,
+            ),
 
         // High Volume Scanner methods
         getFnoStocks: () => api.fetch('/market/fno-stocks'),
@@ -80,8 +99,14 @@ export const api = {
             api.fetch(`/market/greeks-heatmap/${symbol}?strike_count=${strikeCount}`),
         // Nifty sentiment
         getNiftySentiment: () => api.fetch('/market/nifty-sentiment'),
+        // Optional Grok news bias
+        getNewsBias: (force = false) =>
+            api.fetch(`/market/news-bias?force=${force ? 'true' : 'false'}`),
         // VAT Strategy
         scanVAT: (symbol = "NSE:NIFTY50-INDEX") => api.fetch(`/strategies/vat/scan?symbol=${symbol}`),
+        // Backend readiness
+        getReady: () => api.fetch('/ready'),
+        getHealth: () => api.fetch('/health'),
     },
 
     /**
@@ -112,6 +137,53 @@ export const api = {
             }),
         getConfig: () => api.fetch('/mcp/config'),
     },
+
+    /**
+     * Multi-source confluence
+     */
+    confluence: {
+        get: (minSources = 2, includeNiftyState = true) =>
+            api.fetch(
+                `/confluence?min_sources=${minSources}&include_nifty_state=${includeNiftyState}`,
+            ),
+        status: () => api.fetch('/confluence/status'),
+        triggerRadar: () =>
+            api.fetch('/confluence/radar/scan', { method: 'POST' }),
+    },
+
+    /**
+     * Option Flow Radar methods
+     */
+    radar: {
+        getWatchlist: () => api.fetch('/radar/watchlist'),
+        scan: (minLis = 0, optionType?: string, strikeCount = 8) => {
+            const params = new URLSearchParams();
+            params.set('min_lis', String(minLis));
+            if (optionType) params.set('option_type', optionType);
+            params.set('strike_count', String(strikeCount));
+            return api.fetch(`/radar/scan?${params.toString()}`);
+        },
+        scanCustom: (symbols: string[], minLis = 0, optionType?: string) =>
+            api.fetch('/radar/scan', {
+                method: 'POST',
+                body: JSON.stringify({ symbols, min_lis: minLis, option_type: optionType }),
+            }),
+        getSymbolFlow: (symbol: string, strikeCount = 10) =>
+            api.fetch(`/radar/flow/${encodeURIComponent(symbol)}?strike_count=${strikeCount}`),
+        getCandles: (symbol: string, resolution = '5', days = 1) =>
+            api.fetch(`/radar/candles/${encodeURIComponent(symbol)}?resolution=${resolution}&days=${days}`),
+        backtest: (payload: {
+            symbol: string;
+            strike: number;
+            option_type: string;
+            signal_timestamp: string;
+            forward_minutes?: number[];
+        }) =>
+            api.fetch('/radar/backtest', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            }),
+    },
 };
 
 /**
@@ -124,6 +196,8 @@ export class WSClient {
     private reconnectInterval = 3000;
     private maxReconnectAttempts = 5;
     private reconnectAttempts = 0;
+    private intentionalClose = false;
+    private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(path: string, onMessage: (data: any) => void) {
         this.url = `${WS_BASE_URL}${path}`;
@@ -132,6 +206,12 @@ export class WSClient {
 
     connect() {
         try {
+            this.intentionalClose = false;
+            // Avoid stacking sockets
+            if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
             this.ws = new WebSocket(this.url);
 
             this.ws.onopen = () => {
@@ -140,13 +220,19 @@ export class WSClient {
             };
 
             this.ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                this.onMessage(data);
+                try {
+                    const data = JSON.parse(event.data);
+                    this.onMessage(data);
+                } catch (err) {
+                    console.error('Failed to parse WebSocket message:', err);
+                }
             };
 
             this.ws.onclose = () => {
                 console.log('WebSocket connection closed');
-                this.attemptReconnect();
+                if (!this.intentionalClose) {
+                    this.attemptReconnect();
+                }
             };
 
             this.ws.onerror = (error) => {
@@ -158,17 +244,19 @@ export class WSClient {
     }
 
     private attemptReconnect() {
+        if (this.intentionalClose) return;
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
             this.reconnectAttempts++;
             console.log(`Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts}...`);
-            setTimeout(() => this.connect(), this.reconnectInterval);
+            if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
         }
     }
 
     send(data: any) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(data));
-        } else {
+        } else if (!this.intentionalClose) {
             console.warn('WebSocket is not open. Initializing connection...');
             this.connect();
         }
@@ -183,8 +271,18 @@ export class WSClient {
     }
 
     close() {
+        this.intentionalClose = true;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
         if (this.ws) {
-            this.ws.close();
+            try {
+                this.ws.close();
+            } catch {
+                // ignore
+            }
+            this.ws = null;
         }
     }
 }

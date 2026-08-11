@@ -109,8 +109,16 @@ export default function MCPTradingPanel({ onBack }: MCPTradingPanelProps) {
         }
     }, []);
 
+    const tradingEnabled = Boolean(mcpStatus?.trading_enabled);
+
     // Place order
     const placeOrder = async () => {
+        if (!tradingEnabled) {
+            setError(
+                'Live trading is DISABLED on the server. Set MCP_TRADING_ENABLED=true in backend/.env to arm order placement.',
+            );
+            return;
+        }
         setLoading(true);
         setOrderResult(null);
         setError(null);
@@ -190,6 +198,12 @@ export default function MCPTradingPanel({ onBack }: MCPTradingPanelProps) {
                             : 'bg-red-500/20 text-red-400 border border-red-500/30'
                         }`}>
                         {mcpStatus?.authenticated ? '🟢 Connected' : '🔴 Not Authenticated'}
+                    </div>
+                    <div className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider ${mcpStatus?.trading_enabled
+                            ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                            : 'bg-zinc-500/20 text-zinc-400 border border-zinc-500/30'
+                        }`}>
+                        {mcpStatus?.trading_enabled ? '⚡ Trading ARMED' : '🔒 Trading OFF'}
                     </div>
                     <span className="text-xs text-zinc-500">{mcpStatus?.tools_count} tools</span>
                 </div>
@@ -296,7 +310,14 @@ export default function MCPTradingPanel({ onBack }: MCPTradingPanelProps) {
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         {/* Order Form */}
                         <div className="bg-white dark:bg-zinc-900 rounded-2xl p-6 border border-zinc-200 dark:border-zinc-800">
-                            <h2 className="text-lg font-bold mb-6">⚡ Place Order</h2>
+                            <h2 className="text-lg font-bold mb-2">⚡ Place Order</h2>
+                            {!tradingEnabled && (
+                                <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-xs">
+                                    Live order placement is <strong>disabled</strong> (server kill-switch).
+                                    Set <code className="font-mono">MCP_TRADING_ENABLED=true</code> in{' '}
+                                    <code className="font-mono">backend/.env</code> and restart the API to arm trading.
+                                </div>
+                            )}
 
                             <div className="space-y-4">
                                 {/* Symbol */}
@@ -406,18 +427,27 @@ export default function MCPTradingPanel({ onBack }: MCPTradingPanelProps) {
                                 {/* Place Order Button */}
                                 <button
                                     onClick={placeOrder}
-                                    disabled={loading || !mcpStatus?.authenticated}
+                                    disabled={loading || !mcpStatus?.authenticated || !tradingEnabled}
                                     className={`w-full py-4 rounded-xl font-bold uppercase text-sm tracking-wider transition-all ${orderForm.side === 'BUY'
                                             ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700'
                                             : 'bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700'
                                         } text-white shadow-lg disabled:opacity-50 disabled:cursor-not-allowed`}
                                 >
-                                    {loading ? '⏳ Placing Order...' : `${orderForm.side === 'BUY' ? '🟢' : '🔴'} Place ${orderForm.side} Order`}
+                                    {loading
+                                        ? '⏳ Placing Order...'
+                                        : !tradingEnabled
+                                          ? '🔒 Trading Disabled'
+                                          : `${orderForm.side === 'BUY' ? '🟢' : '🔴'} Place ${orderForm.side} Order`}
                                 </button>
 
                                 {!mcpStatus?.authenticated && (
                                     <p className="text-xs text-amber-500 text-center">
                                         ⚠️ Please authenticate with Fyers first to place orders
+                                    </p>
+                                )}
+                                {mcpStatus?.authenticated && !tradingEnabled && (
+                                    <p className="text-xs text-amber-500 text-center">
+                                        ⚠️ Server kill-switch: set MCP_TRADING_ENABLED=true to arm live orders
                                     </p>
                                 )}
                             </div>
@@ -450,7 +480,7 @@ export default function MCPTradingPanel({ onBack }: MCPTradingPanelProps) {
                                         'NSE:HDFCBANK-EQ',
                                         'NSE:INFY-EQ',
                                         'NSE:ICICIBANK-EQ',
-                                        'NSE:TATAMOTORS-EQ',
+                                        'NSE:TMPV-EQ',
                                         'NSE:BAJFINANCE-EQ',
                                     ].map((symbol) => (
                                         <button

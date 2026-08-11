@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # Grok API (for news engine)
     grok_api_key: str = ""
     grok_api_url: str = "https://api.x.ai/v1"
+    # Optional preferred model (fallback chain used if empty/fails)
+    grok_model: str = "grok-3-mini"
     
     # WebSocket Configuration
     ws_heartbeat_interval: int = 30  # seconds
@@ -41,6 +43,10 @@ class Settings(BaseSettings):
     # Trading Configuration
     max_trades_per_day: int = 2
     min_risk_reward_ratio: float = 1.0
+    # Kill-switch: order placement via MCP is disabled unless explicitly enabled
+    mcp_trading_enabled: bool = False
+    # Optional shared secret for write tools (header: X-MCP-API-KEY)
+    mcp_api_key: str = ""
     
     # Market Hours (IST)
     market_open_hour: int = 9

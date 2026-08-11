@@ -37,14 +37,21 @@ export default function RealTimeAlerts() {
                         <div key={alert.id} className="flex items-start gap-3 text-xs">
                             <span className={`w-1.5 h-1.5 mt-1.5 rounded-full ${typeColors[alert.type]}`}></span>
                             <div className="flex-1">
-                                <span className={`
-                                    ${alert.type === 'signal' ? 'text-purple-600 dark:text-purple-400 font-medium' :
-                                        alert.type === 'warning' ? 'text-amber-600 dark:text-amber-400' :
-                                            'text-zinc-600 dark:text-zinc-400'}
-                                `}>
-                                    {alert.message}
-                                </span>
-                                <span className="text-[10px] text-zinc-400 ml-2">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    {alert.source && (
+                                        <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500">
+                                            {alert.source}
+                                        </span>
+                                    )}
+                                    <span className={`
+                                        ${alert.type === 'signal' ? 'text-purple-600 dark:text-purple-400 font-medium' :
+                                            alert.type === 'warning' ? 'text-amber-600 dark:text-amber-400' :
+                                                'text-zinc-600 dark:text-zinc-400'}
+                                    `}>
+                                        {alert.message}
+                                    </span>
+                                </div>
+                                <span className="text-[10px] text-zinc-400">
                                     {alert.timestamp.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                                 </span>
                             </div>

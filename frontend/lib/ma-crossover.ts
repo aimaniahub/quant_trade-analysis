@@ -57,37 +57,51 @@ export interface ServiceStatus {
   };
 }
 
+async function parseJsonOrThrow(r: Response, fallback: string) {
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: fallback }));
+    const detail = err?.detail;
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((d: any) => d?.msg || JSON.stringify(d)).join("; ")
+          : fallback,
+    );
+  }
+  return r.json();
+}
+
 export async function fetchStatus(): Promise<ServiceStatus> {
   const r = await fetch(`${API}/status`);
-  return r.json();
+  return parseJsonOrThrow(r, "Failed to fetch MA crossover status");
 }
 
 export async function fetchCrossovers(limit = 100): Promise<CrossoverEvent[]> {
   const r = await fetch(`${API}/crossovers?limit=${limit}`);
-  const d = await r.json();
+  const d = await parseJsonOrThrow(r, "Failed to fetch crossovers");
   return d.crossovers ?? [];
 }
 
 export async function fetchNearing(limit = 50): Promise<CrossoverEvent[]> {
   const r = await fetch(`${API}/nearing?limit=${limit}`);
-  const d = await r.json();
+  const d = await parseJsonOrThrow(r, "Failed to fetch nearing list");
   return d.nearing ?? [];
 }
 
 export async function startService(): Promise<void> {
-  await fetch(`${API}/start`, { method: "POST" });
+  const r = await fetch(`${API}/start`, { method: "POST" });
+  await parseJsonOrThrow(r, "Failed to start MA crossover service");
 }
 
 export async function stopService(): Promise<void> {
-  await fetch(`${API}/stop`, { method: "POST" });
+  const r = await fetch(`${API}/stop`, { method: "POST" });
+  await parseJsonOrThrow(r, "Failed to stop MA crossover service");
 }
 
 export async function triggerScan(): Promise<void> {
   const r = await fetch(`${API}/scan`, { method: "POST" });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({ detail: "Failed to trigger scan" }));
-    throw new Error(err.detail || "Failed to trigger scan");
-  }
+  await parseJsonOrThrow(r, "Failed to trigger scan");
 }
 
 export async function updateConfig(cfg: Partial<MAConfig>): Promise<MAConfig> {
@@ -96,7 +110,7 @@ export async function updateConfig(cfg: Partial<MAConfig>): Promise<MAConfig> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(cfg),
   });
-  const d = await r.json();
+  const d = await parseJsonOrThrow(r, "Failed to update MA config");
   return d.config;
 }
 
