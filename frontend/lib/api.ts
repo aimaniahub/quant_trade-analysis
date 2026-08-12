@@ -82,11 +82,45 @@ export const api = {
             api.fetch(
                 `/market/stocks/scan?limit=${limit}&tradable_only=${tradableOnly}&top_only=${topOnly}&strike_count=${strikeCount}&deep=${deep}`,
             ),
+        /** Start background full-universe scan (poll getStockScanJob). */
+        startStockScan: (
+            limit = 200,
+            tradableOnly = false,
+            topOnly = false,
+            strikeCount = 10,
+            deep = true,
+            symbols?: string[],
+        ) =>
+            api.fetch(
+                `/market/stocks/scan/start?limit=${limit}&tradable_only=${tradableOnly}&top_only=${topOnly}&strike_count=${strikeCount}&deep=${deep}`,
+                {
+                    method: 'POST',
+                    body: JSON.stringify(symbols?.length ? { symbols } : {}),
+                },
+            ),
+        getStockScanJob: (jobId: string, includeResults = true) =>
+            api.fetch(
+                `/market/stocks/scan/jobs/${encodeURIComponent(jobId)}?include_results=${includeResults}`,
+            ),
+        retryFailedStockScan: (jobId: string) =>
+            api.fetch(`/market/stocks/scan/jobs/${encodeURIComponent(jobId)}/retry-failed`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+            }),
+        listStockScanJobs: (limit = 10) =>
+            api.fetch(`/market/stocks/scan/jobs?limit=${limit}`),
 
         // High Volume Scanner methods
         getFnoStocks: () => api.fetch('/market/fno-stocks'),
         scanHighVolume: (timeframe = '15', topCount = 5) =>
             api.fetch(`/market/high-volume-scan?timeframe=${timeframe}&top_count=${topCount}`),
+        startHighVolumeScan: (timeframe = '15', topCount = 5) =>
+            api.fetch(
+                `/market/high-volume-scan/start?timeframe=${timeframe}&top_count=${topCount}`,
+                { method: 'POST', body: JSON.stringify({}) },
+            ),
+        getHighVolumeScanJob: (jobId: string) =>
+            api.fetch(`/market/high-volume-scan/jobs/${encodeURIComponent(jobId)}`),
         bulkOCAnalysis: (symbols: string[]) =>
             api.fetch('/market/bulk-oc-analysis', {
                 method: 'POST',
@@ -163,6 +197,18 @@ export const api = {
             params.set('strike_count', String(strikeCount));
             return api.fetch(`/radar/scan?${params.toString()}`);
         },
+        startScan: (minLis = 0, optionType?: string, strikeCount = 8) => {
+            const params = new URLSearchParams();
+            params.set('min_lis', String(minLis));
+            if (optionType) params.set('option_type', optionType);
+            params.set('strike_count', String(strikeCount));
+            return api.fetch(`/radar/scan/start?${params.toString()}`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+            });
+        },
+        getScanJob: (jobId: string) =>
+            api.fetch(`/radar/scan/jobs/${encodeURIComponent(jobId)}`),
         scanCustom: (symbols: string[], minLis = 0, optionType?: string) =>
             api.fetch('/radar/scan', {
                 method: 'POST',

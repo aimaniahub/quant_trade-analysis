@@ -2,6 +2,7 @@
 
 import { api } from '../lib/api';
 import { useApiQuery } from '../lib/hooks/useApiQuery';
+import LoadingBanner from './ui/LoadingBanner';
 
 interface ConfluenceSource {
     name: string;
@@ -131,6 +132,12 @@ export default function ConfluencePanel() {
                     {data.news.summary}
                 </div>
             )}
+
+            <LoadingBanner
+                active={isLoading || isFetching}
+                label={data ? 'Refreshing confluence' : 'Aggregating multi-source signals'}
+                detail="MA · Radar · Intelligence · bus (+ soft news)"
+            />
 
             {isLoading && !data && (
                 <div className="animate-pulse space-y-2">

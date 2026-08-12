@@ -5,6 +5,7 @@ import NiftySentimentCards from './NiftySentimentCards';
 import LiveTradeSignal from './LiveTradeSignal';
 import GreeksHeatmap from './GreeksHeatmap';
 import { api } from '../lib/api';
+import LoadingBanner from './ui/LoadingBanner';
 
 interface HighVolumeStock {
     symbol: string;
@@ -23,26 +24,38 @@ export default function QuantDashboard({ onBack }: QuantDashboardProps) {
     const [selectedStock, setSelectedStock] = useState<string>('NSE:NIFTY50-INDEX');
     const [topStocks, setTopStocks] = useState<HighVolumeStock[]>([]);
     const [loadingStocks, setLoadingStocks] = useState(true);
+    const [stocksError, setStocksError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<'signal' | 'greeks'>('signal');
 
     // Fetch top high-volume stocks on load
     useEffect(() => {
+        let cancelled = false;
         const fetchTopStocks = async () => {
+            setLoadingStocks(true);
+            setStocksError(null);
             try {
-                const response = await api.market.scanHighVolume('60', 5);
-                if (response.success && response.top_stocks) {
+                const response = await api.market.scanHighVolume('60', 8);
+                if (cancelled) return;
+                if (response.success && response.top_stocks?.length) {
                     setTopStocks(response.top_stocks);
-                    if (response.top_stocks.length > 0) {
-                        setSelectedStock(response.top_stocks[0].symbol);
-                    }
+                    setSelectedStock(response.top_stocks[0].symbol);
+                } else {
+                    setTopStocks([]);
+                    setStocksError(response.error || 'No high-volume names returned');
                 }
-            } catch (error) {
-                console.error('Failed to fetch top stocks:', error);
+            } catch (error: any) {
+                if (!cancelled) {
+                    setStocksError(error?.message || 'Failed to fetch high-volume stocks');
+                    setTopStocks([]);
+                }
             } finally {
-                setLoadingStocks(false);
+                if (!cancelled) setLoadingStocks(false);
             }
         };
         fetchTopStocks();
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     return (
@@ -67,14 +80,35 @@ export default function QuantDashboard({ onBack }: QuantDashboardProps) {
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                        <span className="text-xs text-zinc-400">LIVE</span>
+                        <span
+                            className={`w-2 h-2 rounded-full ${
+                                loadingStocks
+                                    ? 'bg-amber-400 animate-pulse'
+                                    : stocksError
+                                      ? 'bg-rose-500'
+                                      : 'bg-emerald-500 animate-pulse'
+                            }`}
+                        />
+                        <span className="text-xs text-zinc-400">
+                            {loadingStocks ? 'LOADING' : stocksError ? 'DEGRADED' : 'LIVE'}
+                        </span>
                     </div>
                 </div>
             </header>
 
             {/* Main Content */}
             <main className="max-w-7xl mx-auto p-4 space-y-6">
+                <LoadingBanner
+                    active={loadingStocks}
+                    label="Scanning high-volume F&O names"
+                    detail="Relative volume · buying pressure · top composite scores"
+                />
+                {stocksError && !loadingStocks && (
+                    <div className="p-3 rounded-xl border border-rose-500/30 bg-rose-500/10 text-xs text-rose-300">
+                        {stocksError} — index symbols still available below.
+                    </div>
+                )}
+
                 {/* Nifty Sentiment Cards */}
                 <section>
                     <NiftySentimentCards autoRefresh={true} refreshInterval={30000} />

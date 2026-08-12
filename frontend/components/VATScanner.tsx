@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
+import LoadingBanner from './ui/LoadingBanner';
 
 // Types - Enhanced for new VAT response
 interface VATOpportunity {
@@ -71,8 +72,8 @@ export default function VATScanner({ onBack }: VATScannerProps) {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const fetchVATData = async () => {
-        setLoading(true);
+    const fetchVATData = async (silent = false) => {
+        if (!silent) setLoading(true);
         setError(null);
         try {
             const result = await api.market.scanVAT(selectedSymbol);
@@ -84,14 +85,15 @@ export default function VATScanner({ onBack }: VATScannerProps) {
         } catch (err: any) {
             setError(err.message || "Network error");
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
     useEffect(() => {
-        fetchVATData();
-        const interval = setInterval(fetchVATData, 30000); // Poll every 30s
+        fetchVATData(false);
+        const interval = setInterval(() => fetchVATData(true), 45000);
         return () => clearInterval(interval);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedSymbol]);
 
     return (
@@ -112,6 +114,11 @@ export default function VATScanner({ onBack }: VATScannerProps) {
                             </h1>
                             <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest mt-1">
                                 Premium Dislocation & Arbitrage Finder
+                                {loading && (
+                                    <span className="ml-2 text-purple-500 normal-case tracking-normal">
+                                        · Scanning…
+                                    </span>
+                                )}
                             </p>
                         </div>
                     </div>
@@ -136,18 +143,28 @@ export default function VATScanner({ onBack }: VATScannerProps) {
                             BANK NIFTY
                         </button>
                         <button
-                            onClick={fetchVATData}
-                            className="px-4 py-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-lg text-xs font-bold uppercase"
+                            onClick={() => fetchVATData(false)}
+                            disabled={loading}
+                            className="px-4 py-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-lg text-xs font-bold uppercase disabled:opacity-50"
                         >
-                            ↻
+                            {loading ? '…' : '↻'}
                         </button>
                     </div>
                 </div>
 
+                <LoadingBanner
+                    active={loading}
+                    label={data ? 'Refreshing VAT analysis' : 'Scanning option chain for VAT gaps'}
+                    detail={`${selectedSymbol.replace('NSE:', '')} · premium dislocation + expiry window`}
+                />
+
                 {loading && !data && (
-                    <div className="text-center py-20">
-                        <div className="animate-spin w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full mx-auto mb-4"></div>
-                        <p className="text-zinc-500 font-medium">Scanning Option Chain...</p>
+                    <div className="text-center py-12 opacity-60">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                            {[1, 2, 3, 4].map(i => (
+                                <div key={i} className="h-28 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl animate-pulse" />
+                            ))}
+                        </div>
                     </div>
                 )}
 
@@ -158,7 +175,7 @@ export default function VATScanner({ onBack }: VATScannerProps) {
                 )}
 
                 {data && (
-                    <div className="space-y-8">
+                    <div className={`space-y-8 ${loading ? 'opacity-70' : ''}`}>
                         {/* Summary Cards */}
                         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                             <div className="p-6 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl">

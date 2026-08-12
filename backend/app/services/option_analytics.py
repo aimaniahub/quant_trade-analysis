@@ -2,24 +2,36 @@
 Deep mathematical option-chain analytics for NSE F&O stocks.
 
 Pure functions over Fyers-normalized chain rows:
-  strike_price, call{ltp,oi,volume,iv,delta,gamma,theta,vega,chg}, put{...}
+  strike_price, call{ltp,oi,volume,iv,delta,gamma,theta,vega,chg,oi_change}, put{...}
 
 Metrics
 -------
-• Max Pain (classic OI settlement magnet)
+• Four canonical OI buildups (Long/Short Buildup, Short Covering, Long Unwinding)
+• Professional PCR suite (OI / Volume / ATM / band) + regime tags
+• Max Pain, call/put walls, gamma pin
 • ATM straddle & 1σ expected move
-• PCR (OI / volume)
-• IV skew & risk-reversal (OTM put vs OTM call)
-• Gamma wall / pin risk
-• Delta-weighted OI imbalance
-• Premium dislocation (CE/PE equidistant)
-• Composite quant_score (0–100) + directional bias
+• IV skew & risk-reversal
+• Premium dislocation
+• Composite quant_score (0–100) + directional bias (buildup-aware)
 """
 
 from __future__ import annotations
 
 import math
+import statistics
 from typing import Any, Dict, List, Optional, Tuple
+
+
+# ── Buildup thresholds (tunable) ──────────────────────────────────
+VOR_ACTIVE = 0.35          # Volume / OI — active trading
+DOI_MEANINGFUL_PCT = 5.0   # |ΔOI| % of prior OI
+VOL_STRONG_MULT = 1.5      # vs chain median volume for Strong
+
+BUILDUP_LONG = "Long Buildup"
+BUILDUP_SHORT = "Short Buildup"
+BUILDUP_SC = "Short Covering"
+BUILDUP_LU = "Long Unwinding"
+BUILDUP_NEUTRAL = "Churn / Neutral"
 
 
 def _safe(v, default=0.0) -> float:
@@ -69,6 +81,316 @@ def compute_max_pain(chain: List[Dict]) -> Dict[str, Any]:
 
 
 def compute_pcr(chain: List[Dict]) -> Dict[str, Any]:
+    """Backward-compatible PCR + extended professional fields. """
+    return compute_professional_pcr(chain, spot=None, atm=None, band=5)
+
+
+def classify_buildup(
+    price_change: float,
+    oi_change: float,
+    volume: float = 0.0,
+    avg_volume: float = 0.0,
+    prev_oi: float = 0.0,
+    oi: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    Four canonical states (desk standard):
+
+    Price↑ + OI↑ → Long Buildup
+    Price↓ + OI↑ → Short Buildup
+    Price↑ + OI↓ → Short Covering
+    Price↓ + OI↓ → Long Unwinding
+    """
+    pc = _safe(price_change)
+    oc = _safe(oi_change)
+    vol = _safe(volume)
+    avg_vol = _safe(avg_volume)
+    base_oi = _safe(prev_oi)
+    if base_oi <= 0:
+        # Reconstruct prior OI when only current OI + change known
+        base_oi = max(_safe(oi) - oc, 0.0)
+
+    vor = vol / max(_safe(oi), 1.0)
+    doi_pct = abs(oc) / max(base_oi, 1.0) * 100.0 if (base_oi > 0 or abs(oc) > 0) else 0.0
+    meaningful = doi_pct >= DOI_MEANINGFUL_PCT or abs(oc) >= 50_000  # loose floor for liquid names
+    active = vor >= VOR_ACTIVE or vol >= max(avg_vol, 1.0) * 0.5
+
+    # Tiny moves → churn
+    if abs(pc) < 1e-9 and abs(oc) < 1e-9:
+        state, strength = BUILDUP_NEUTRAL, "None"
+    elif pc > 0 and oc > 0:
+        state = BUILDUP_LONG
+        strength = "Strong" if (vol >= VOL_STRONG_MULT * max(avg_vol, 1.0) and meaningful) else (
+            "Weak" if meaningful or active else "Weak"
+        )
+        if not meaningful and vol < max(avg_vol, 1.0):
+            strength = "Weak"
+    elif pc < 0 and oc > 0:
+        state = BUILDUP_SHORT
+        strength = "Strong" if (vol >= VOL_STRONG_MULT * max(avg_vol, 1.0) and meaningful) else "Weak"
+    elif pc > 0 and oc < 0:
+        state, strength = BUILDUP_SC, "Moderate"
+    elif pc < 0 and oc < 0:
+        state, strength = BUILDUP_LU, "Moderate"
+    else:
+        state, strength = BUILDUP_NEUTRAL, "None"
+
+    # Premium confirmation: long buildup stronger if premium rising already in pc
+    premium_confirm = False
+    if state == BUILDUP_LONG and pc > 0:
+        premium_confirm = True
+    elif state == BUILDUP_SHORT and pc < 0:
+        premium_confirm = True
+
+    actionable = state in (BUILDUP_LONG, BUILDUP_SHORT) and strength == "Strong"
+    fade_risk = state == BUILDUP_SC  # rally may die once covering done
+
+    return {
+        "state": state,
+        "strength": strength,
+        "price_change": round(pc, 4),
+        "oi_change": round(oc, 2),
+        "doi_pct": round(doi_pct, 2),
+        "vor": round(vor, 4),
+        "volume": round(vol, 2),
+        "avg_volume": round(avg_vol, 2),
+        "meaningful_doi": meaningful,
+        "active_vor": active,
+        "premium_confirm": premium_confirm,
+        "actionable": actionable,
+        "fade_risk": fade_risk,
+    }
+
+
+def _chain_median_volume(chain: List[Dict], side: str) -> float:
+    vols = []
+    for row in chain:
+        v = _safe(_leg(row, side).get("volume"))
+        if v > 0:
+            vols.append(v)
+    if not vols:
+        return 1.0
+    try:
+        return float(statistics.median(vols))
+    except Exception:
+        return float(sum(vols) / len(vols))
+
+
+def _leg_price_change(leg: Dict) -> float:
+    """Prefer absolute LTP change; fall back to % so zeros don't kill classification."""
+    chg = _safe(leg.get("chg"))
+    if abs(chg) > 1e-9:
+        return chg
+    return _safe(leg.get("chg_pct"))
+
+
+def analyze_chain_buildups(
+    chain: List[Dict],
+    spot: float,
+    atm: Optional[float] = None,
+    band: int = 3,
+) -> Dict[str, Any]:
+    """
+    Per-strike CE/PE buildup + ATM-band rollup used for bias and UI.
+    Uses option premium direction (chg) + ΔOI — desk-style for stock options.
+    """
+    if not chain:
+        return {"error": "no chain", "strikes": [], "summary": {}}
+
+    if not atm:
+        atm = min(
+            (r.get("strike_price") for r in chain if r.get("strike_price") is not None),
+            key=lambda s: abs(_safe(s) - spot),
+            default=None,
+        )
+
+    med_ce = _chain_median_volume(chain, "call")
+    med_pe = _chain_median_volume(chain, "put")
+
+    strikes_out: List[Dict[str, Any]] = []
+    counts = {
+        BUILDUP_LONG: 0,
+        BUILDUP_SHORT: 0,
+        BUILDUP_SC: 0,
+        BUILDUP_LU: 0,
+        BUILDUP_NEUTRAL: 0,
+    }
+    strong_long_ce = 0
+    strong_short_pe = 0
+    strong_long_pe = 0  # put long buildup = bearish
+    strong_short_ce = 0  # call short buildup = bearish
+    sc_calls = 0
+    sc_puts = 0
+
+    # Sort strikes for band selection
+    ordered = sorted(
+        [r for r in chain if r.get("strike_price") is not None],
+        key=lambda r: _safe(r.get("strike_price")),
+    )
+    atm_idx = 0
+    if atm is not None:
+        atm_idx = min(
+            range(len(ordered)),
+            key=lambda i: abs(_safe(ordered[i].get("strike_price")) - _safe(atm)),
+            default=0,
+        )
+    lo = max(0, atm_idx - band)
+    hi = min(len(ordered), atm_idx + band + 1)
+    band_set = set(id(ordered[i]) for i in range(lo, hi))
+
+    atm_band_rows: List[Dict[str, Any]] = []
+
+    for row in ordered:
+        s = _safe(row.get("strike_price"))
+        c, p = _leg(row, "call"), _leg(row, "put")
+        ce_b = classify_buildup(
+            _leg_price_change(c),
+            _safe(c.get("oi_change")),
+            _safe(c.get("volume")),
+            med_ce,
+            _safe(c.get("prev_oi")),
+            _safe(c.get("oi")),
+        )
+        pe_b = classify_buildup(
+            _leg_price_change(p),
+            _safe(p.get("oi_change")),
+            _safe(p.get("volume")),
+            med_pe,
+            _safe(p.get("prev_oi")),
+            _safe(p.get("oi")),
+        )
+        counts[ce_b["state"]] = counts.get(ce_b["state"], 0) + 1
+        counts[pe_b["state"]] = counts.get(pe_b["state"], 0) + 1
+
+        if ce_b["state"] == BUILDUP_LONG and ce_b["strength"] == "Strong":
+            strong_long_ce += 1
+        if ce_b["state"] == BUILDUP_SHORT and ce_b["strength"] == "Strong":
+            strong_short_ce += 1
+        if pe_b["state"] == BUILDUP_LONG and pe_b["strength"] == "Strong":
+            strong_long_pe += 1
+        if pe_b["state"] == BUILDUP_SHORT and pe_b["strength"] == "Strong":
+            strong_short_pe += 1
+        if ce_b["state"] == BUILDUP_SC:
+            sc_calls += 1
+        if pe_b["state"] == BUILDUP_SC:
+            sc_puts += 1
+
+        entry = {
+            "strike": s,
+            "is_atm": abs(s - _safe(atm)) < 1e-6 if atm else False,
+            "in_band": id(row) in band_set,
+            "call": {**ce_b, "oi": _safe(c.get("oi")), "ltp": _safe(c.get("ltp"))},
+            "put": {**pe_b, "oi": _safe(p.get("oi")), "ltp": _safe(p.get("ltp"))},
+        }
+        strikes_out.append(entry)
+        if id(row) in band_set:
+            atm_band_rows.append(entry)
+
+    # Dominant narrative for ATM ± band
+    band_long_ce = sum(
+        1 for e in atm_band_rows if e["call"]["state"] == BUILDUP_LONG
+    )
+    band_short_pe = sum(
+        1 for e in atm_band_rows if e["put"]["state"] == BUILDUP_SHORT
+    )
+    band_sc_ce = sum(1 for e in atm_band_rows if e["call"]["state"] == BUILDUP_SC)
+    band_long_pe = sum(
+        1 for e in atm_band_rows if e["put"]["state"] == BUILDUP_LONG
+    )
+    band_short_ce = sum(
+        1 for e in atm_band_rows if e["call"]["state"] == BUILDUP_SHORT
+    )
+
+    # Bias from buildup (not absolute OI)
+    bull_pts = strong_long_ce * 2 + band_long_ce + strong_short_pe + band_short_pe * 0.5
+    bear_pts = strong_long_pe * 2 + band_long_pe + strong_short_ce + band_short_ce * 0.5
+    # Short covering rally = weaker bull (fade risk)
+    if band_sc_ce > band_long_ce and bull_pts >= bear_pts:
+        primary = BUILDUP_SC
+        bias = "BULLISH"
+        conviction = "LOW"
+        note = "ATM rally leans Short Covering — may fade once covering done"
+    elif bull_pts - bear_pts >= 1.5:
+        primary = BUILDUP_LONG
+        bias = "BULLISH"
+        conviction = "HIGH" if strong_long_ce >= 1 else "MEDIUM"
+        note = "Call Long Buildup / Put Short Covering tilt — fresher bullish money"
+    elif bear_pts - bull_pts >= 1.5:
+        primary = BUILDUP_SHORT if strong_short_ce or band_short_ce else BUILDUP_LONG
+        # Put long buildup is bearish
+        if strong_long_pe or band_long_pe >= band_short_ce:
+            primary = BUILDUP_LONG  # on puts
+            note = "Put Long Buildup / Call Short Buildup — fresh bearish money"
+        else:
+            note = "Call Short Buildup dominant — fresh bearish writers"
+        bias = "BEARISH"
+        conviction = "HIGH" if (strong_long_pe + strong_short_ce) >= 1 else "MEDIUM"
+    else:
+        primary = BUILDUP_NEUTRAL
+        bias = "NEUTRAL"
+        conviction = "LOW"
+        note = "Mixed buildup / churn near ATM"
+
+    # Top actionable strikes for UI chips
+    actionable: List[Dict[str, Any]] = []
+    for e in strikes_out:
+        for side, key in (("CE", "call"), ("PE", "put")):
+            b = e[key]
+            if b.get("actionable") or (
+                b.get("state") in (BUILDUP_LONG, BUILDUP_SHORT)
+                and b.get("strength") in ("Strong", "Moderate")
+                and e.get("in_band")
+            ):
+                actionable.append(
+                    {
+                        "strike": e["strike"],
+                        "side": side,
+                        "state": b["state"],
+                        "strength": b["strength"],
+                        "oi_change": b["oi_change"],
+                        "fade_risk": b.get("fade_risk"),
+                    }
+                )
+    actionable.sort(
+        key=lambda x: (
+            0 if x["strength"] == "Strong" else 1,
+            -abs(_safe(x.get("oi_change"))),
+        )
+    )
+
+    return {
+        "atm": atm,
+        "band": band,
+        "median_call_volume": round(med_ce, 1),
+        "median_put_volume": round(med_pe, 1),
+        "counts": counts,
+        "strong_long_ce": strong_long_ce,
+        "strong_short_ce": strong_short_ce,
+        "strong_long_pe": strong_long_pe,
+        "strong_short_pe": strong_short_pe,
+        "short_covering_calls": sc_calls,
+        "short_covering_puts": sc_puts,
+        "primary_state": primary,
+        "bias": bias,
+        "conviction": conviction,
+        "note": note,
+        "bull_points": round(bull_pts, 2),
+        "bear_points": round(bear_pts, 2),
+        "atm_band": atm_band_rows,
+        "actionable": actionable[:12],
+        "strikes": strikes_out,  # full chain classification
+    }
+
+
+def compute_professional_pcr(
+    chain: List[Dict],
+    spot: Optional[float] = None,
+    atm: Optional[float] = None,
+    band: int = 5,
+) -> Dict[str, Any]:
+    """
+    OI PCR + Volume PCR + ATM PCR + ±band PCR + India regime labels.
+    """
     total_call_oi = total_put_oi = 0.0
     total_call_vol = total_put_vol = 0.0
     for row in chain:
@@ -80,19 +402,150 @@ def compute_pcr(chain: List[Dict]) -> Dict[str, Any]:
 
     oi_pcr = total_put_oi / max(total_call_oi, 1.0)
     vol_pcr = total_put_vol / max(total_call_vol, 1.0)
+
+    if not atm and spot and chain:
+        atm = min(
+            (r.get("strike_price") for r in chain if r.get("strike_price") is not None),
+            key=lambda s: abs(_safe(s) - spot),
+            default=None,
+        )
+
+    atm_call_oi = atm_put_oi = atm_call_vol = atm_put_vol = 0.0
+    band_call_oi = band_put_oi = band_call_vol = band_put_vol = 0.0
+
+    if atm is not None:
+        ordered = sorted(
+            [r for r in chain if r.get("strike_price") is not None],
+            key=lambda r: _safe(r.get("strike_price")),
+        )
+        atm_idx = min(
+            range(len(ordered)),
+            key=lambda i: abs(_safe(ordered[i].get("strike_price")) - _safe(atm)),
+            default=0,
+        )
+        lo, hi = max(0, atm_idx - band), min(len(ordered), atm_idx + band + 1)
+        for i, row in enumerate(ordered):
+            c, p = _leg(row, "call"), _leg(row, "put")
+            if i == atm_idx:
+                atm_call_oi = _safe(c.get("oi"))
+                atm_put_oi = _safe(p.get("oi"))
+                atm_call_vol = _safe(c.get("volume"))
+                atm_put_vol = _safe(p.get("volume"))
+            if lo <= i < hi:
+                band_call_oi += _safe(c.get("oi"))
+                band_put_oi += _safe(p.get("oi"))
+                band_call_vol += _safe(c.get("volume"))
+                band_put_vol += _safe(p.get("volume"))
+
+    atm_oi_pcr = atm_put_oi / max(atm_call_oi, 1.0)
+    atm_vol_pcr = atm_put_vol / max(atm_call_vol, 1.0)
+    band_oi_pcr = band_put_oi / max(band_call_oi, 1.0)
+    band_vol_pcr = band_put_vol / max(band_call_vol, 1.0)
+
+    # Structural labels (India)
+    if oi_pcr >= 1.25:
+        regime = "PUT_WRITING_FLOOR"
+        regime_label = "Strong put writing → bullish floor"
+        oi_bias = "BULLISH"
+    elif oi_pcr <= 0.7:
+        regime = "CALL_WRITING_CEILING"
+        regime_label = "Aggressive call writing → bearish ceiling"
+        oi_bias = "BEARISH"
+    elif oi_pcr >= 1.1:
+        regime = "PUT_LEAN"
+        regime_label = "Mild put-side support"
+        oi_bias = "BULLISH"
+    elif oi_pcr <= 0.85:
+        regime = "CALL_LEAN"
+        regime_label = "Mild call-side pressure"
+        oi_bias = "BEARISH"
+    else:
+        regime = "BALANCED"
+        regime_label = "Balanced PCR"
+        oi_bias = "NEUTRAL"
+
+    vol_bias = (
+        "BULLISH" if vol_pcr > 1.1 else "BEARISH" if vol_pcr < 0.8 else "NEUTRAL"
+    )
+
+    # Rising PCR + rising price would need history — flag ATM vs total divergence
+    health = "NEUTRAL"
+    if oi_pcr >= 1.15 and vol_pcr >= 1.05:
+        health = "HEALTHY_BULLISH_SUPPORT"
+    elif oi_pcr <= 0.85 and vol_pcr <= 0.95:
+        health = "BEARISH_CEILING_ACTIVE"
+    elif vol_pcr < oi_pcr - 0.25 and oi_pcr > 1.0:
+        health = "POSSIBLE_SHORT_COVERING_NOISE"
+
+    total_opt_vol = total_call_vol + total_put_vol
+    ce_vol_share = total_call_vol / max(total_opt_vol, 1.0)
+    pe_vol_share = total_put_vol / max(total_opt_vol, 1.0)
+    band_opt_vol = band_call_vol + band_put_vol
+    atm_opt_vol = atm_call_vol + atm_put_vol
+    # CE-heavy options activity near ATM (bullish participation)
+    atm_ce_vol_share = atm_call_vol / max(atm_opt_vol, 1.0)
+    band_ce_vol_share = band_call_vol / max(band_opt_vol, 1.0)
+
+    # Relative option activity vs chain median (proxy when multi-day avg unavailable)
+    all_vols = []
+    for row in chain:
+        all_vols.append(_safe(_leg(row, "call").get("volume")))
+        all_vols.append(_safe(_leg(row, "put").get("volume")))
+    pos_vols = [v for v in all_vols if v > 0]
+    med_leg_vol = float(statistics.median(pos_vols)) if pos_vols else 1.0
+    atm_ce_rel = atm_call_vol / max(med_leg_vol, 1.0)
+    atm_pe_rel = atm_put_vol / max(med_leg_vol, 1.0)
+
     return {
         "oi_pcr": round(oi_pcr, 3),
         "volume_pcr": round(vol_pcr, 3),
+        "atm_oi_pcr": round(atm_oi_pcr, 3),
+        "atm_volume_pcr": round(atm_vol_pcr, 3),
+        "band_oi_pcr": round(band_oi_pcr, 3),
+        "band_volume_pcr": round(band_vol_pcr, 3),
+        "band": band,
+        "atm": atm,
         "total_call_oi": total_call_oi,
         "total_put_oi": total_put_oi,
         "total_call_volume": total_call_vol,
         "total_put_volume": total_put_vol,
-        "oi_bias": (
-            "BULLISH" if oi_pcr > 1.1 else "BEARISH" if oi_pcr < 0.8 else "NEUTRAL"
-        ),
-        "volume_bias": (
-            "BULLISH" if vol_pcr > 1.1 else "BEARISH" if vol_pcr < 0.8 else "NEUTRAL"
-        ),
+        "ce_vol_share": round(ce_vol_share, 3),
+        "pe_vol_share": round(pe_vol_share, 3),
+        "atm_call_volume": atm_call_vol,
+        "atm_put_volume": atm_put_vol,
+        "band_call_volume": band_call_vol,
+        "band_put_volume": band_put_vol,
+        "atm_ce_vol_share": round(atm_ce_vol_share, 3),
+        "band_ce_vol_share": round(band_ce_vol_share, 3),
+        "atm_ce_rel_vol": round(atm_ce_rel, 2),
+        "atm_pe_rel_vol": round(atm_pe_rel, 2),
+        "median_leg_volume": round(med_leg_vol, 1),
+        "oi_bias": oi_bias,
+        "volume_bias": vol_bias,
+        "regime": regime,
+        "regime_label": regime_label,
+        "health": health,
+    }
+
+
+def compute_structure_walls(chain: List[Dict], spot: float) -> Dict[str, Any]:
+    """
+    Call wall (resistance) = highest Call OI above/near spot
+    Put wall (support) = highest Put OI below/near spot
+    Plus max-pain-adjacent magnets.
+    """
+    magnets = compute_oi_magnets(chain, spot)
+    call_wall = magnets.get("resistance")
+    put_wall = magnets.get("support")
+    return {
+        "call_wall": call_wall,
+        "call_wall_oi": magnets.get("resistance_oi"),
+        "put_wall": put_wall,
+        "put_wall_oi": magnets.get("support_oi"),
+        "top_call_oi": magnets.get("top_call_oi") or [],
+        "top_put_oi": magnets.get("top_put_oi") or [],
+        "support": put_wall,
+        "resistance": call_wall,
     }
 
 
@@ -326,46 +779,84 @@ def composite_quant_score(
     institutional_intent: float = 0,
     call_clusters: int = 0,
     put_clusters: int = 0,
+    buildup: Optional[Dict] = None,
+    walls: Optional[Dict] = None,
 ) -> Dict[str, Any]:
     """
-    Unbiased directional vote + separate edge score.
-
-    Direction = equal-weight votes only (no side gets a permanent head-start).
-    quant_score = how readable / actionable the structure is (not "how bearish").
+    Unbiased directional vote + edge score.
+    Buildup classification is first-class (stronger weight than absolute OI).
     """
     score = 0.0
     bull = 0.0
     bear = 0.0
     factors: List[str] = []
-    votes: List[str] = []  # each independent signal: BULLISH | BEARISH
+    votes: List[str] = []
 
-    # --- Directional votes (symmetric thresholds) ---
+    buildup = buildup or {}
+    walls = walls or {}
+
+    # --- 1) Buildup engine (highest weight) ---
+    b_bias = buildup.get("bias")
+    b_state = buildup.get("primary_state") or BUILDUP_NEUTRAL
+    b_conv = buildup.get("conviction") or "LOW"
+    if b_bias == "BULLISH":
+        w = 2.0 if b_conv == "HIGH" else 1.25
+        votes.append("BULLISH")
+        bull += w
+        factors.append(f"{b_state} ({b_conv}) — {buildup.get('note', 'buildup')[:60]}")
+        if b_state == BUILDUP_SC:
+            # Fade risk: keep vote but cut conviction later
+            factors.append("Short Covering tilt — rally may fade")
+    elif b_bias == "BEARISH":
+        w = 2.0 if b_conv == "HIGH" else 1.25
+        votes.append("BEARISH")
+        bear += w
+        factors.append(f"{b_state} ({b_conv}) — {buildup.get('note', 'buildup')[:60]}")
+
+    strong_ce = int(buildup.get("strong_long_ce") or 0)
+    strong_pe = int(buildup.get("strong_long_pe") or 0)
+    if strong_ce:
+        factors.append(f"Strong CE Long Buildup ×{strong_ce}")
+    if strong_pe:
+        factors.append(f"Strong PE Long Buildup ×{strong_pe}")
+
+    # --- 2) PCR suite ---
     oi_pcr = pcr.get("oi_pcr") or 1.0
     vol_pcr = pcr.get("volume_pcr") or 1.0
+    atm_pcr = pcr.get("atm_oi_pcr")
 
-    # India F&O convention (symmetric bands):
-    # PCR high → put-side OI/volume → often treated as support / bullish cushion
-    # PCR low  → call-side heavy → often treated as resistance / bearish
-    if oi_pcr >= 1.15:
+    if oi_pcr >= 1.2:
         votes.append("BULLISH")
         bull += 1
-        factors.append(f"OI PCR {oi_pcr:.2f} (put-side support)")
-    elif oi_pcr <= 0.85:
+        factors.append(f"OI PCR {oi_pcr:.2f} put-writing floor")
+    elif oi_pcr <= 0.75:
         votes.append("BEARISH")
         bear += 1
-        factors.append(f"OI PCR {oi_pcr:.2f} (call-side heavy)")
+        factors.append(f"OI PCR {oi_pcr:.2f} call-writing ceiling")
 
     if vol_pcr >= 1.15:
         votes.append("BULLISH")
-        bull += 1
-        factors.append(f"Volume PCR {vol_pcr:.2f} (put volume lead)")
+        bull += 0.75
+        factors.append(f"Vol PCR {vol_pcr:.2f}")
     elif vol_pcr <= 0.85:
         votes.append("BEARISH")
-        bear += 1
-        factors.append(f"Volume PCR {vol_pcr:.2f} (call volume lead)")
+        bear += 0.75
+        factors.append(f"Vol PCR {vol_pcr:.2f}")
 
-    # IV skew: put-rich → defensive/fear (bearish vote); call-rich → bullish vote
-    # Same absolute threshold both ways
+    if atm_pcr is not None:
+        if atm_pcr >= 1.2:
+            votes.append("BULLISH")
+            bull += 0.5
+            factors.append(f"ATM PCR {atm_pcr:.2f}")
+        elif atm_pcr <= 0.8:
+            votes.append("BEARISH")
+            bear += 0.5
+            factors.append(f"ATM PCR {atm_pcr:.2f}")
+
+    if pcr.get("regime_label"):
+        factors.append(str(pcr["regime_label"])[:50])
+
+    # --- 3) IV skew ---
     skew = float(iv.get("skew") or 0)
     if skew >= 2.0:
         votes.append("BEARISH")
@@ -376,7 +867,7 @@ def composite_quant_score(
         bull += 1
         factors.append(f"Call IV skew {skew:.1f}")
 
-    # Delta-weighted OI (symmetric)
+    # --- 4) Delta-OI ---
     if greeks.get("delta_bias") == "BULLISH":
         votes.append("BULLISH")
         bull += 1
@@ -386,95 +877,146 @@ def composite_quant_score(
         bear += 1
         factors.append("Net delta-OI bearish")
 
-    # Flow clusters (equal weight each side)
+    # --- 5) Flow clusters ---
     if call_clusters > put_clusters:
         votes.append("BULLISH")
-        bull += 1
-        factors.append(f"Call flow clusters {call_clusters}>{put_clusters}")
+        bull += 0.75
+        factors.append(f"Call clusters {call_clusters}>{put_clusters}")
     elif put_clusters > call_clusters:
         votes.append("BEARISH")
-        bear += 1
-        factors.append(f"Put flow clusters {put_clusters}>{call_clusters}")
+        bear += 0.75
+        factors.append(f"Put clusters {put_clusters}>{call_clusters}")
 
-    # Max pain: spot above pain → mild bullish (writers defend); below → mild bearish
-    # Only vote when clearly away from pain (±1%)
+    # --- 6) Max pain ---
     mp = max_pain.get("max_pain")
     if mp and spot:
         dist_pct = (spot - mp) / spot * 100
         if dist_pct >= 1.0:
             votes.append("BULLISH")
-            bull += 0.75
+            bull += 0.5
             factors.append(f"Spot above max pain ({mp})")
         elif dist_pct <= -1.0:
             votes.append("BEARISH")
-            bear += 0.75
+            bear += 0.5
             factors.append(f"Spot below max pain ({mp})")
 
-    # --- Edge / readability score (direction-neutral) ---
-    # Clarity of structure, not which side is "better"
+    # --- Edge score ---
     if abs(oi_pcr - 1.0) >= 0.15:
-        score += 15
-    else:
-        score += 8
-
-    if abs(skew) >= 2.0:
         score += 12
     else:
-        score += 8
+        score += 6
+
+    if buildup.get("primary_state") and buildup.get("primary_state") != BUILDUP_NEUTRAL:
+        score += 14 if b_conv == "HIGH" else 10
+    else:
+        score += 4
+
+    if abs(skew) >= 2.0:
+        score += 10
+    else:
+        score += 6
 
     pin = float(greeks.get("pin_risk") or 0)
-    score += min(12.0, pin * 0.12)
+    score += min(10.0, pin * 0.1)
     if pin > 50:
         factors.append(f"Pin risk {pin:.0f}% @ γ-wall {greeks.get('gamma_wall_strike')}")
 
     intent = max(0.0, min(100.0, float(institutional_intent or 0)))
-    score += intent * 0.18
-    if intent >= 50:
-        factors.append(f"Flow intensity {intent:.0f}")
+    score += intent * 0.15
 
     if mp and spot:
         dist = abs(mp - spot) / spot * 100
-        score += 12 if dist < 1.0 else 8 if dist < 2.5 else 5
+        score += 10 if dist < 1.0 else 6 if dist < 2.5 else 4
 
     if straddle.get("expected_move"):
-        score += 10
+        score += 8
         factors.append(
-            f"1σ move ≈ ₹{straddle['expected_move']} ({straddle.get('expected_move_pct')}%)"
+            f"1σ ≈ ₹{straddle['expected_move']} ({straddle.get('expected_move_pct')}%)"
         )
-    else:
-        score += 3
 
-    # Agreement bonus (either side) — rewards consensus, not a direction
+    if walls.get("call_wall") or walls.get("put_wall"):
+        score += 6
+        factors.append(
+            f"Walls P{walls.get('put_wall')}/C{walls.get('call_wall')}"
+        )
+
     agree = abs(bull - bear)
     if agree >= 2:
         score += 8
     elif agree >= 1:
         score += 4
 
+    # Penalize short-covering-only narratives
+    if b_state == BUILDUP_SC and b_bias == "BULLISH":
+        score = max(0.0, score - 8)
+        bull = max(0.0, bull - 0.5)
+
     score = max(0.0, min(100.0, score))
 
-    # Majority vote with neutral dead-zone (must clear margin)
-    if bull - bear >= 1.0:
+    if bull - bear >= 1.25:
         bias = "BULLISH"
-    elif bear - bull >= 1.0:
+    elif bear - bull >= 1.25:
         bias = "BEARISH"
     else:
         bias = "NEUTRAL"
 
-    conviction = "HIGH" if score >= 70 and bias != "NEUTRAL" else (
-        "MEDIUM" if score >= 50 else "LOW"
+    conviction = (
+        "HIGH"
+        if score >= 70 and bias != "NEUTRAL" and b_state != BUILDUP_SC
+        else "MEDIUM"
+        if score >= 50
+        else "LOW"
     )
+    if b_state == BUILDUP_SC and bias == "BULLISH":
+        conviction = "LOW"
 
     return {
         "quant_score": round(score, 1),
         "bias": bias,
         "conviction": conviction,
-        "factors": factors[:8],
+        "factors": factors[:10],
         "bull_points": round(bull, 2),
         "bear_points": round(bear, 2),
         "votes": votes,
         "vote_tally": {"bull": round(bull, 2), "bear": round(bear, 2)},
+        "primary_buildup": b_state,
+        "buildup_note": buildup.get("note"),
+        # component scores for desk stack (option-only until fused)
+        "option_score": round(min(40.0, score * 0.4), 1),
     }
+
+
+def fuse_desk_conviction(
+    quant: Dict[str, Any],
+    buildup: Optional[Dict] = None,
+    tech: Optional[Dict] = None,
+    premium: Optional[Dict] = None,
+    *,
+    pcr: Optional[Dict] = None,
+    greeks: Optional[Dict] = None,
+    max_pain: Optional[Dict] = None,
+    iv: Optional[Dict] = None,
+    spot: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    Hardened desk decision (Option_Chain_Analyzer_Fix_Report.md).
+
+    Priority: HTF gate → PCR structure → Buildup → Gamma/MaxPain → Skew/Premium → 15m.
+    Conflicting flow vs structure defaults to WAIT — never aggressive BUY.
+    """
+    from app.services.desk_decision import fuse_with_hardened_decision
+
+    return fuse_with_hardened_decision(
+        quant,
+        buildup,
+        tech,
+        premium,
+        pcr=pcr,
+        greeks=greeks,
+        max_pain=max_pain,
+        iv=iv,
+        spot=spot,
+    )
 
 
 def deep_analyze_chain(
@@ -497,7 +1039,7 @@ def deep_analyze_chain(
             default=None,
         )
 
-    pcr = compute_pcr(chain)
+    pcr = compute_professional_pcr(chain, spot=spot, atm=atm, band=5)
     max_pain = compute_max_pain(chain)
     if spot and max_pain.get("max_pain"):
         max_pain["distance_from_spot"] = round(max_pain["max_pain"] - spot, 2)
@@ -510,6 +1052,35 @@ def deep_analyze_chain(
     greeks = compute_greeks_walls(chain, spot)
     dislocation = compute_premium_dislocation(chain, spot, atm)
     magnets = compute_oi_magnets(chain, spot)
+    walls = compute_structure_walls(chain, spot)
+    # Per-strike + ATM-band buildup (four canonical states)
+    buildup_full = analyze_chain_buildups(chain, spot, atm, band=3)
+    # Slim payload for list UIs (drop full strikes to save bandwidth)
+    buildup_summary = {
+        k: buildup_full.get(k)
+        for k in (
+            "atm",
+            "band",
+            "primary_state",
+            "bias",
+            "conviction",
+            "note",
+            "bull_points",
+            "bear_points",
+            "strong_long_ce",
+            "strong_short_ce",
+            "strong_long_pe",
+            "strong_short_pe",
+            "short_covering_calls",
+            "short_covering_puts",
+            "counts",
+            "actionable",
+            "atm_band",
+            "median_call_volume",
+            "median_put_volume",
+        )
+    }
+
     quant = composite_quant_score(
         pcr,
         iv,
@@ -520,6 +1091,8 @@ def deep_analyze_chain(
         institutional_intent,
         call_clusters=call_clusters,
         put_clusters=put_clusters,
+        buildup=buildup_summary,
+        walls=walls,
     )
 
     return {
@@ -533,5 +1106,7 @@ def deep_analyze_chain(
         "greeks_walls": greeks,
         "premium_dislocation": dislocation,
         "oi_magnets": magnets,
+        "walls": walls,
+        "buildup": buildup_summary,
         "quant": quant,
     }

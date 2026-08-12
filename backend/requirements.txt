@@ -36,3 +36,6 @@ pyotp>=2.9.0
 # Timezone conversions
 pytz
 
+# Redis (optional durable jobs + L2 market cache)
+redis>=5.0.0
+

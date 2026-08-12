@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../lib/api';
+import LoadingBanner from './ui/LoadingBanner';
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -697,6 +698,10 @@ export default function OptionFlowRadar({ onBack }: Props) {
     const [scanData, setScanData] = useState<ScanResult | null>(null);
     const [scanLoading, setScanLoading] = useState(false);
     const [scanError, setScanError] = useState<string | null>(null);
+    const [scanProgress, setScanProgress] = useState(0);
+    const [scanCurrent, setScanCurrent] = useState<string | null>(null);
+    const scanPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const scanRunRef = useRef(0);
 
     // Filters
     const [minLis, setMinLis] = useState(0);
@@ -722,52 +727,114 @@ export default function OptionFlowRadar({ onBack }: Props) {
     const [alerts, setAlerts] = useState<FlaggedContract[]>([]);
     const alertedRefs = useRef<Set<string>>(new Set());
 
-    // ── Scan ─────────────────────────────────────────────────────
+    // ── Scan (background job + poll) ─────────────────────────────
+
+    const stopScanPoll = useCallback(() => {
+        if (scanPollRef.current) {
+            clearInterval(scanPollRef.current);
+            scanPollRef.current = null;
+        }
+    }, []);
+
+    const applyRadarAlerts = useCallback((flagged: FlaggedContract[] | undefined) => {
+        if (!flagged?.length) return;
+        const newAlerts: FlaggedContract[] = [];
+        flagged
+            .filter(c => c.lis >= 70)
+            .forEach(c => {
+                const key = `${c.symbol}-${c.strike}-${c.type}-${(c.timestamp || '').slice(0, 16)}`;
+                if (!alertedRefs.current.has(key)) {
+                    alertedRefs.current.add(key);
+                    newAlerts.push(c);
+                }
+            });
+        if (newAlerts.length) {
+            setAlerts(prev => [...newAlerts, ...prev].slice(0, 20));
+        }
+    }, []);
 
     const runScan = useCallback(async (silent = false) => {
+        const myRun = ++scanRunRef.current;
+        stopScanPoll();
         if (!silent) setScanLoading(true);
         setScanError(null);
+        setScanProgress(p => (silent && scanData ? p : 2));
+        setScanCurrent(null);
+
         try {
-            const data: ScanResult = await api.radar.scan(
+            const started: any = await api.radar.startScan(
                 minLis,
                 optTypeFilter || undefined,
                 8,
             );
-            setScanData(data);
-            setLastRefresh(new Date());
+            if (myRun !== scanRunRef.current) return;
+            const jid = started.job_id as string;
+            if (!jid) throw new Error('No radar job id returned');
 
-            // Fire alerts for LIS > 70
-            if (data.flagged) {
-                const newAlerts: FlaggedContract[] = [];
-                data.flagged
-                    .filter(c => c.lis >= 70)
-                    .forEach(c => {
-                        const key = `${c.symbol}-${c.strike}-${c.type}-${c.timestamp.slice(0, 16)}`;
-                        if (!alertedRefs.current.has(key)) {
-                            alertedRefs.current.add(key);
-                            newAlerts.push(c);
+            const pollOnce = async () => {
+                if (myRun !== scanRunRef.current) return;
+                try {
+                    const snap: any = await api.radar.getScanJob(jid);
+                    if (myRun !== scanRunRef.current) return;
+                    setScanProgress(Number(snap.completion_pct ?? 0));
+                    setScanCurrent(snap.current_symbol || null);
+                    const flagged = snap.flagged || [];
+                    if (flagged.length || snap.status === 'completed' || snap.status === 'failed') {
+                        setScanData({
+                            success: true,
+                            scanned: snap.scanned ?? snap.completed ?? 0,
+                            total_flagged: snap.total_flagged ?? flagged.length,
+                            flagged,
+                            errors: snap.errors || [],
+                            timestamp: snap.timestamp || new Date().toISOString(),
+                            market_hours: snap.market_hours ?? true,
+                        });
+                    }
+                    const done =
+                        snap.status === 'completed' ||
+                        snap.status === 'failed' ||
+                        snap.status === 'cancelled';
+                    if (done) {
+                        stopScanPoll();
+                        setScanLoading(false);
+                        setLastRefresh(new Date());
+                        applyRadarAlerts(flagged);
+                        if (snap.status === 'failed') {
+                            setScanError(snap.error_message || 'Radar job failed');
                         }
-                    });
-                if (newAlerts.length) {
-                    setAlerts(prev => [...newAlerts, ...prev].slice(0, 20));
+                    }
+                } catch (e: any) {
+                    if (myRun !== scanRunRef.current) return;
+                    stopScanPoll();
+                    setScanLoading(false);
+                    setScanError(e?.message || 'Radar poll failed');
                 }
-            }
+            };
+
+            await pollOnce();
+            if (myRun !== scanRunRef.current) return;
+            scanPollRef.current = setInterval(pollOnce, 1500);
         } catch (e: any) {
+            if (myRun !== scanRunRef.current) return;
             setScanError(e.message || 'Scan failed');
-        } finally {
             setScanLoading(false);
         }
-    }, [minLis, optTypeFilter]);
+    }, [applyRadarAlerts, minLis, optTypeFilter, scanData, stopScanPoll]);
 
     // Initial scan
     useEffect(() => {
         runScan();
+        return () => {
+            scanRunRef.current += 1;
+            stopScanPoll();
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [minLis, optTypeFilter]);
 
-    // Auto-refresh every 60s
+    // Auto-refresh every 90s (jobs are heavy — avoid 60s pile-up)
     useEffect(() => {
         if (autoRefresh) {
-            refreshTimerRef.current = setInterval(() => runScan(true), 60_000);
+            refreshTimerRef.current = setInterval(() => runScan(true), 90_000);
         } else {
             if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
         }
@@ -949,6 +1016,18 @@ export default function OptionFlowRadar({ onBack }: Props) {
             </header>
 
             <main className="max-w-screen-2xl mx-auto px-4 py-4">
+                <LoadingBanner
+                    active={scanLoading}
+                    label={scanData ? 'Refreshing option flow radar' : 'Scanning watchlist option chains'}
+                    progress={scanProgress}
+                    detail={
+                        scanCurrent
+                            ? `Now: ${String(scanCurrent).replace('NSE:', '').replace('-EQ', '')} · ${Math.round(scanProgress)}%`
+                            : scanData
+                              ? `Live job… ${scanData.scanned} scanned · ${scanData.total_flagged} flagged so far`
+                              : 'Background job · LIS · OI change · volume spikes · greeks'
+                    }
+                />
 
                 {/* ══════════════════════════════════════════════
                     TAB: LIVE MONITOR

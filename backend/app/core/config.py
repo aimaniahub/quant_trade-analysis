@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     market_open_minute: int = 15
     market_close_hour: int = 15
     market_close_minute: int = 30
+
+    # Redis (optional — graceful fallback to in-memory when disabled/unreachable)
+    # Set REDIS_ENABLED=true and REDIS_URL=redis://localhost:6379/0
+    redis_enabled: bool = False
+    redis_url: str = "redis://localhost:6379/0"
+    redis_prefix: str = "optiongreek"
+    redis_job_ttl_seconds: int = 3600  # scan job retention
+    redis_socket_timeout: float = 2.0
+    redis_connect_timeout: float = 2.0
+    # How often to flush large job payloads during a running scan
+    redis_job_persist_interval: float = 1.5
     
     class Config:
         env_file = ".env"

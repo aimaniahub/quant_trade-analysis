@@ -22,6 +22,25 @@ async def lifespan(app: FastAPI):
     # ── Startup ────────────────────────────────────────────────────────
     print(f"[START] Starting {settings.app_name} v{settings.app_version}")
 
+    # Optional Redis (jobs + L2 market cache). Falls back to memory if off/down.
+    try:
+        from app.services.redis_client import init_redis, status as redis_status
+        from app.services.scan_jobs import get_scan_job_manager
+
+        ok = init_redis()
+        st = redis_status()
+        print(
+            f"[REDIS] enabled={st.get('enabled')} connected={st.get('connected')} "
+            f"backend={st.get('backend')}"
+            + (f" err={st.get('error')}" if st.get("error") else "")
+        )
+        if ok:
+            orphans = get_scan_job_manager().recover_orphans()
+            if orphans:
+                print(f"[REDIS] recovered {orphans} orphaned scan job(s) → interrupted")
+    except Exception as e:
+        print(f"[REDIS] init skipped: {e}")
+
     # Start candle aggregator and hook it into the Fyers tick stream
     aggregator = get_candle_aggregator()
     ma_svc = get_ma_crossover_service()
@@ -47,6 +66,11 @@ async def lifespan(app: FastAPI):
     ws_mgr.remove_subscriber("market_data", aggregator.on_tick)
     try:
         ws_mgr.stop_all()
+    except Exception:
+        pass
+    try:
+        from app.services.redis_client import close_redis
+        close_redis()
     except Exception:
         pass
 

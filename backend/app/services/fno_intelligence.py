@@ -140,38 +140,94 @@ class FNOIntelligenceEngine:
         put_clusters = sum(1 for c in clusters if c.get("type") == "PUT_ACCUMULATION")
 
         # ====== DEEP MATHEMATICAL ANALYTICS (direction-neutral scoring) ======
+        from app.services.option_analytics import fuse_desk_conviction
+        from app.services.chain_snapshots import analyze_premium_behaviour
+        from app.services.tech_filters import get_technical_context
+
+        sym = chain_data.get("symbol")
         deep = deep_analyze_chain(
             chain=chain,
             spot=spot_price,
             atm=atm_strike,
             institutional_intent=institutional_flow.get("intent_score", 0),
-            symbol=chain_data.get("symbol"),
+            symbol=sym,
             call_clusters=call_clusters,
             put_clusters=put_clusters,
         )
-        quant = deep.get("quant") or {}
-        # Align strike guidance bias with unbiased quant vote when clear
-        q_bias = quant.get("bias")
-        if q_bias in ("BULLISH", "BEARISH") and strike_guidance.get("suggested"):
-            if strike_guidance.get("bias") != q_bias:
-                # Rebuild guidance from quant bias for consistency (no side preference)
-                strike_guidance = self._guidance_from_bias(
-                    spot_price, q_bias, quant.get("factors") or []
-                )
-        elif q_bias in ("BULLISH", "BEARISH") and not strike_guidance.get("suggested"):
-            if market_state["state"] != MarketState.NO_TRADE.value:
-                strike_guidance = self._guidance_from_bias(
-                    spot_price, q_bias, quant.get("factors") or []
-                )
+        buildup = deep.get("buildup") or {}
+        walls = deep.get("walls") or {}
+        pcr_pack = deep.get("pcr") or {}
+        straddle_pack = deep.get("straddle") or {}
 
-        # Blend structural confidence with quant edge score
-        blended_conf = int(
-            round(
-                0.55 * float(market_state.get("confidence") or 0)
-                + 0.45 * float(quant.get("quant_score") or 0)
-            )
+        # Premium diffs (Redis/memory snapshot) — free vs prior poll
+        premium = analyze_premium_behaviour(
+            chain, spot_price, atm_strike, symbol=sym, straddle=straddle_pack
         )
-        
+        deep["premium"] = premium
+
+        # Technical stack (15m 7/20 + HTF) — cached; skips on rate limit
+        tech = {"ok": False, "bias": "NEUTRAL", "tech_score": 0}
+        if sym:
+            tech = get_technical_context(sym)
+        deep["technical"] = tech
+
+        # Hardened desk decision (HTF → PCR → Buildup → Gamma → Skew → 15m)
+        quant = fuse_desk_conviction(
+            deep.get("quant") or {},
+            buildup=buildup,
+            tech=tech,
+            premium=premium,
+            pcr=pcr_pack,
+            greeks=deep.get("greeks_walls") or {},
+            max_pain=deep.get("max_pain") or {},
+            iv=deep.get("iv_structure") or {},
+            spot=float(spot_price or 0),
+        )
+        deep["quant"] = quant
+        deep["decision"] = quant.get("decision")
+
+        action = quant.get("action") or "WAIT"
+        q_bias = quant.get("bias")
+
+        # Strike guidance ONLY when action allows directional entry
+        if action in ("BUY", "BUY_CAUTIOUS") and q_bias == "BULLISH":
+            if not strike_guidance.get("suggested") or strike_guidance.get("bias") != "BULLISH":
+                if market_state["state"] != MarketState.NO_TRADE.value:
+                    strike_guidance = self._guidance_from_bias(
+                        spot_price, "BULLISH", quant.get("factors") or []
+                    )
+            if quant.get("prefer_defined_risk"):
+                note = strike_guidance.get("expert_note") or ""
+                strike_guidance = dict(strike_guidance)
+                strike_guidance["expert_note"] = (
+                    (note + " · ").lstrip(" ·")
+                    + "Defined-risk preferred (flat skew / conflicted structure)"
+                )
+                strike_guidance["defined_risk_only"] = True
+        elif action == "SELL" and q_bias == "BEARISH":
+            if not strike_guidance.get("suggested") or strike_guidance.get("bias") != "BEARISH":
+                if market_state["state"] != MarketState.NO_TRADE.value:
+                    strike_guidance = self._guidance_from_bias(
+                        spot_price, "BEARISH", quant.get("factors") or []
+                    )
+        else:
+            # WAIT / conflicted — never show aggressive BUY ONLY
+            strike_guidance = {
+                "suggested": False,
+                "bias": "NEUTRAL",
+                "trades": [],
+                "expert_note": quant.get("verdict")
+                or quant.get("structure_note")
+                or "WAIT — flow vs structure conflict; no directional BUY",
+                "action": "WAIT",
+            }
+
+        # Confidence tracks desk score with HTF/PCR discipline
+        blended_conf = int(round(float(quant.get("quant_score") or 0)))
+        # Prefer professional OI PCR when available
+        pcr_out = pcr_pack.get("oi_pcr") if pcr_pack.get("oi_pcr") is not None else pcr
+        pcr_signal_out = pcr_pack.get("regime_label") or pcr_signal
+
         return {
             "symbol": chain_data.get("symbol"),
             "spot_price": spot_price,
@@ -181,8 +237,8 @@ class FNOIntelligenceEngine:
             "confidence": blended_conf,
             "message": market_state["message"],
             "time_window": self.get_current_time_window(),
-            "pcr": pcr,
-            "pcr_signal": pcr_signal,
+            "pcr": pcr_out,
+            "pcr_signal": pcr_signal_out,
             "india_vix": india_vix,
             "atm_analysis": atm_analysis,
             "oi_analysis": oi_analysis,
@@ -200,6 +256,53 @@ class FNOIntelligenceEngine:
             "iv_skew_label": (deep.get("iv_structure") or {}).get("skew_label"),
             "gamma_wall": (deep.get("greeks_walls") or {}).get("gamma_wall_strike"),
             "pin_risk": (deep.get("greeks_walls") or {}).get("pin_risk"),
+            # ── Desk-style buildup + structure (Phase A/B) ──
+            "buildup_state": buildup.get("primary_state"),
+            "buildup_strength": buildup.get("conviction"),
+            "buildup_note": buildup.get("note"),
+            "buildup_bias": buildup.get("bias"),
+            "buildup": buildup,
+            "oi_pcr": pcr_pack.get("oi_pcr"),
+            "volume_pcr": pcr_pack.get("volume_pcr"),
+            "atm_pcr": pcr_pack.get("atm_oi_pcr"),
+            "band_pcr": pcr_pack.get("band_oi_pcr"),
+            "pcr_regime": pcr_pack.get("regime"),
+            "pcr_regime_label": pcr_pack.get("regime_label"),
+            "pcr_health": pcr_pack.get("health"),
+            "call_wall": walls.get("call_wall"),
+            "put_wall": walls.get("put_wall"),
+            "call_wall_oi": walls.get("call_wall_oi"),
+            "put_wall_oi": walls.get("put_wall_oi"),
+            # ── Phase C: tech + premium + entry ──
+            "technical": tech,
+            "premium": premium,
+            "tech_bias": tech.get("bias"),
+            "tech_score": tech.get("tech_score"),
+            "entry_long": quant.get("entry_long"),
+            "entry_short": quant.get("entry_short"),
+            "watch_long": quant.get("watch_long"),
+            "watch_short": quant.get("watch_short"),
+            "lean_bias": quant.get("lean_bias") or quant.get("bias"),
+            "vol_confirm_long": quant.get("vol_confirm_long"),
+            "vol_confirm_short": quant.get("vol_confirm_short"),
+            "squeeze_risk": quant.get("squeeze_risk") or premium.get("squeeze_risk"),
+            "vol_expand_risk": quant.get("vol_expand_risk") or premium.get("vol_expand_risk"),
+            "score_components": quant.get("components"),
+            # Option volume features
+            "atm_call_volume": pcr_pack.get("atm_call_volume"),
+            "atm_put_volume": pcr_pack.get("atm_put_volume"),
+            "ce_vol_share": pcr_pack.get("ce_vol_share"),
+            "atm_ce_rel_vol": pcr_pack.get("atm_ce_rel_vol"),
+            "atm_pe_rel_vol": pcr_pack.get("atm_pe_rel_vol"),
+            # Hardened decision surfaces (Fix Report)
+            "action": quant.get("action") or "WAIT",
+            "side_preference": quant.get("side_preference"),
+            "max_score_cap": quant.get("max_score_cap"),
+            "verdict": quant.get("verdict"),
+            "conflicted": quant.get("conflicted"),
+            "prefer_defined_risk": quant.get("prefer_defined_risk"),
+            "decision_narrative": quant.get("narrative"),
+            "skew_label": quant.get("skew_label"),
             "total_call_oi": total_call_oi,
             "total_put_oi": total_put_oi,
             "tradable": market_state["state"] in [
@@ -636,16 +739,58 @@ class FNOIntelligenceEngine:
             })
         
         # PCR alert
-        pcr = analysis.get("pcr", 0)
+        pcr = analysis.get("pcr", 0) or 0
         if pcr > 1.3:
             alerts.append({
                 "type": "INFO",
-                "message": f"High PCR ({pcr:.2f}) - Expert: Bullish intent buildup"
+                "message": f"High PCR ({pcr:.2f}) - put-writing floor (bullish structure)"
             })
         elif pcr < 0.6:
             alerts.append({
                 "type": "WARNING",
-                "message": f"Low PCR ({pcr:.2f}) - Expert: Bearish traps possible"
+                "message": f"Low PCR ({pcr:.2f}) - call-writing ceiling (bearish structure)"
+            })
+
+        # Buildup alerts (desk-style)
+        b_state = analysis.get("buildup_state")
+        b_note = analysis.get("buildup_note")
+        if b_state and b_state not in ("Churn / Neutral", None):
+            level = "SIGNAL" if analysis.get("buildup_strength") == "HIGH" else "INFO"
+            if b_state == "Short Covering":
+                level = "WARNING"
+            alerts.append({
+                "type": level,
+                "message": f"{b_state}: {b_note or 'OI+premium classification'}",
+            })
+
+        if analysis.get("squeeze_risk"):
+            alerts.append({
+                "type": "SIGNAL",
+                "message": "SQUEEZE RISK — call writers covering (OI↓ premium↑)",
+            })
+        if analysis.get("vol_expand_risk"):
+            alerts.append({
+                "type": "WARNING",
+                "message": "Vol expansion — ATM straddle rising while spot range-bound",
+            })
+        action = analysis.get("action") or "WAIT"
+        if action == "WAIT" or analysis.get("conflicted"):
+            alerts.append({
+                "type": "WARNING",
+                "message": analysis.get("decision_narrative")
+                or analysis.get("verdict")
+                or "WAIT — conflicted structure (no directional BUY)",
+            })
+        elif analysis.get("entry_long") or action in ("BUY", "BUY_CAUTIOUS"):
+            alerts.append({
+                "type": "SIGNAL",
+                "message": f"{action}: stack allows long"
+                + (" (defined-risk preferred)" if analysis.get("prefer_defined_risk") else ""),
+            })
+        elif analysis.get("entry_short") or action == "SELL":
+            alerts.append({
+                "type": "SIGNAL",
+                "message": f"{action}: short side preferred by HTF/structure",
             })
         
         # VIX alert
@@ -665,6 +810,7 @@ class FNOIntelligenceEngine:
 
         deep = analysis.get("deep_analytics") or {}
         magnets = deep.get("oi_magnets") or {}
+        walls = analysis.get("walls") or deep.get("walls") or {}
 
         return {
             "symbol": analysis.get("symbol"),
@@ -679,8 +825,16 @@ class FNOIntelligenceEngine:
             "pcr": analysis.get("pcr"),
             "pcr_signal": analysis.get("pcr_signal"),
             "vix": analysis.get("india_vix"),
-            "support": magnets.get("support") or oi_analysis.get("support"),
-            "resistance": magnets.get("resistance") or oi_analysis.get("resistance"),
+            "support": (
+                walls.get("put_wall")
+                or magnets.get("support")
+                or oi_analysis.get("support")
+            ),
+            "resistance": (
+                walls.get("call_wall")
+                or magnets.get("resistance")
+                or oi_analysis.get("resistance")
+            ),
             "strike_guidance": guidance,
             "institutional_flow": institutional,
             "atm_analysis": analysis.get("atm_analysis"),
@@ -697,6 +851,50 @@ class FNOIntelligenceEngine:
             "iv_skew_label": analysis.get("iv_skew_label"),
             "gamma_wall": analysis.get("gamma_wall"),
             "pin_risk": analysis.get("pin_risk"),
+            # Desk-style surfaces for UI
+            "buildup_state": analysis.get("buildup_state"),
+            "buildup_strength": analysis.get("buildup_strength"),
+            "buildup_note": analysis.get("buildup_note"),
+            "buildup_bias": analysis.get("buildup_bias"),
+            "buildup": analysis.get("buildup") or deep.get("buildup"),
+            "oi_pcr": analysis.get("oi_pcr"),
+            "volume_pcr": analysis.get("volume_pcr"),
+            "atm_pcr": analysis.get("atm_pcr"),
+            "band_pcr": analysis.get("band_pcr"),
+            "pcr_regime": analysis.get("pcr_regime"),
+            "pcr_regime_label": analysis.get("pcr_regime_label"),
+            "pcr_health": analysis.get("pcr_health"),
+            "call_wall": analysis.get("call_wall") or walls.get("call_wall"),
+            "put_wall": analysis.get("put_wall") or walls.get("put_wall"),
+            "call_wall_oi": analysis.get("call_wall_oi") or walls.get("call_wall_oi"),
+            "put_wall_oi": analysis.get("put_wall_oi") or walls.get("put_wall_oi"),
+            "technical": analysis.get("technical") or deep.get("technical"),
+            "premium": analysis.get("premium") or deep.get("premium"),
+            "tech_bias": analysis.get("tech_bias"),
+            "tech_score": analysis.get("tech_score"),
+            "entry_long": analysis.get("entry_long"),
+            "entry_short": analysis.get("entry_short"),
+            "watch_long": analysis.get("watch_long"),
+            "watch_short": analysis.get("watch_short"),
+            "lean_bias": analysis.get("lean_bias"),
+            "vol_confirm_long": analysis.get("vol_confirm_long"),
+            "vol_confirm_short": analysis.get("vol_confirm_short"),
+            "atm_call_volume": analysis.get("atm_call_volume"),
+            "atm_put_volume": analysis.get("atm_put_volume"),
+            "ce_vol_share": analysis.get("ce_vol_share"),
+            "atm_ce_rel_vol": analysis.get("atm_ce_rel_vol"),
+            "atm_pe_rel_vol": analysis.get("atm_pe_rel_vol"),
+            "squeeze_risk": analysis.get("squeeze_risk"),
+            "vol_expand_risk": analysis.get("vol_expand_risk"),
+            "score_components": analysis.get("score_components"),
+            "action": analysis.get("action") or "WAIT",
+            "side_preference": analysis.get("side_preference"),
+            "max_score_cap": analysis.get("max_score_cap"),
+            "verdict": analysis.get("verdict"),
+            "conflicted": analysis.get("conflicted"),
+            "prefer_defined_risk": analysis.get("prefer_defined_risk"),
+            "decision_narrative": analysis.get("decision_narrative"),
+            "skew_label": analysis.get("skew_label"),
             "adjustment": adjustment,
             "alerts": alerts,
             "timestamp": analysis.get("timestamp")

@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../lib/api';
+import LoadingBanner from './ui/LoadingBanner';
 
 // Type definitions
 interface VolumeData {
@@ -120,42 +121,88 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [scanProgress, setScanProgress] = useState(0);
+    const [currentSymbol, setCurrentSymbol] = useState<string | null>(null);
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const runIdRef = useRef(0);
 
-    // Scan for high volume stocks
+    // Scan for high volume stocks via background job
     const scanStocks = async () => {
+        const myRun = ++runIdRef.current;
+        if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+        }
         setLoading(true);
         setError(null);
         setPhase('scanning');
-        setScanProgress(0);
-
-        // Simulate progress for better UX
-        const progressInterval = setInterval(() => {
-            setScanProgress(prev => Math.min(prev + 2, 90));
-        }, 100);
+        setScanProgress(2);
+        setCurrentSymbol(null);
 
         try {
-            const result = await api.market.scanHighVolume(timeframe, 5);
+            const started: any = await api.market.startHighVolumeScan(timeframe, 5);
+            if (myRun !== runIdRef.current) return;
+            const jid = started.job_id as string;
+            if (!jid) throw new Error('No HV job id');
 
-            // Deduplicate stocks by symbol
-            if (result && result.top_stocks) {
-                const uniqueStocks = result.top_stocks.reduce((acc: HighVolumeStock[], current: HighVolumeStock) => {
-                    const x = acc.find(item => item.symbol === current.symbol);
-                    if (!x) {
-                        return acc.concat([current]);
-                    } else {
-                        return acc;
+            const pollOnce = async () => {
+                if (myRun !== runIdRef.current) return;
+                try {
+                    const snap: any = await api.market.getHighVolumeScanJob(jid);
+                    if (myRun !== runIdRef.current) return;
+                    setScanProgress(Number(snap.completion_pct ?? 0));
+                    setCurrentSymbol(snap.current_symbol || null);
+
+                    const done =
+                        snap.status === 'completed' ||
+                        snap.status === 'failed' ||
+                        snap.status === 'cancelled';
+
+                    if (done) {
+                        if (pollRef.current) {
+                            clearInterval(pollRef.current);
+                            pollRef.current = null;
+                        }
+                        setLoading(false);
+                        if (snap.status === 'failed') {
+                            setError(snap.error_message || 'HV scan failed');
+                            return;
+                        }
+                        let top = snap.top_stocks || [];
+                        // Deduplicate by symbol
+                        top = top.reduce((acc: HighVolumeStock[], current: HighVolumeStock) => {
+                            if (!acc.find(item => item.symbol === current.symbol)) {
+                                return acc.concat([current]);
+                            }
+                            return acc;
+                        }, []);
+                        setScanResult({
+                            success: true,
+                            timeframe: snap.timeframe || `${timeframe}min`,
+                            total_scanned: snap.total_scanned ?? snap.completed ?? 0,
+                            high_volume_count: snap.high_volume_count ?? top.length,
+                            top_stocks: top,
+                            timestamp: snap.timestamp || new Date().toISOString(),
+                        });
+                        setScanProgress(100);
+                        setPhase('results');
                     }
-                }, []);
-                result.top_stocks = uniqueStocks;
-            }
+                } catch (err: any) {
+                    if (myRun !== runIdRef.current) return;
+                    if (pollRef.current) {
+                        clearInterval(pollRef.current);
+                        pollRef.current = null;
+                    }
+                    setLoading(false);
+                    setError(err.message || 'Failed to poll HV scan');
+                }
+            };
 
-            setScanResult(result);
-            setScanProgress(100);
-            setPhase('results');
+            await pollOnce();
+            if (myRun !== runIdRef.current) return;
+            pollRef.current = setInterval(pollOnce, 1500);
         } catch (err: any) {
+            if (myRun !== runIdRef.current) return;
             setError(err.message || 'Failed to scan stocks');
-        } finally {
-            clearInterval(progressInterval);
             setLoading(false);
         }
     };
@@ -166,14 +213,17 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
 
         setPhase('analyzing');
         setError(null);
-        setScanProgress(0);
+        setScanProgress(5);
+        setLoading(true);
 
         const symbols = scanResult.top_stocks.map(s => s.symbol);
 
-        // Simulate progress
         const progressInterval = setInterval(() => {
-            setScanProgress(prev => Math.min(prev + 5, 90));
-        }, 200);
+            setScanProgress(prev => {
+                if (prev >= 85) return prev;
+                return prev + Math.max(0.5, (88 - prev) * 0.04);
+            });
+        }, 350);
 
         try {
             const result = await api.market.bulkOCAnalysis(symbols);
@@ -185,12 +235,21 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
             setPhase('results');
         } finally {
             clearInterval(progressInterval);
+            setLoading(false);
         }
     };
 
     // Initial scan on mount or timeframe change
     useEffect(() => {
         scanStocks();
+        return () => {
+            runIdRef.current += 1;
+            if (pollRef.current) {
+                clearInterval(pollRef.current);
+                pollRef.current = null;
+            }
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [timeframe]);
 
     // Volume badge color
@@ -237,10 +296,13 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
             </p>
             <p className="mt-2 text-xs text-zinc-400">
                 {phase === 'scanning'
-                    ? 'Fetching volume data for 200+ stocks'
-                    : `Analyzing ${scanResult?.top_stocks.length || 0} stocks`
+                    ? `Fetching volume (${timeframe}m) for F&O universe…`
+                    : `Deep OC analysis on ${scanResult?.top_stocks.length || 0} names`
                 }
             </p>
+            {error && (
+                <p className="mt-4 text-xs text-rose-500 max-w-md text-center">{error}</p>
+            )}
         </div>
     );
 
@@ -575,6 +637,23 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
                         )}
                     </div>
                 </header>
+
+                <LoadingBanner
+                    active={loading || phase === 'scanning' || phase === 'analyzing'}
+                    label={
+                        phase === 'analyzing'
+                            ? 'Deep option-chain analysis'
+                            : 'Scanning F&O universe for high volume'
+                    }
+                    progress={scanProgress}
+                    detail={
+                        phase === 'analyzing'
+                            ? `OC · OI walls · breakouts on ${scanResult?.top_stocks?.length || 0} names`
+                            : currentSymbol
+                              ? `Now: ${currentSymbol.replace('NSE:', '').replace('-EQ', '')} · ${Math.round(scanProgress)}%`
+                              : `${timeframe}m relative volume · buying pressure · live job progress`
+                    }
+                />
 
                 {/* Error State */}
                 {error && (

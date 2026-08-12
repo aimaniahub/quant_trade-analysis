@@ -286,8 +286,50 @@ class OptionFlowRadarService:
     def _is_authenticated(self) -> bool:
         return bool(self.auth_service.get_fyers_model())
 
+    def _persist_last_scan(self) -> None:
+        """Optional Redis durability for last radar scan (confluence after restart)."""
+        if not self._last_scan or not self._last_scan_at:
+            return
+        try:
+            from app.services import redis_client as rc
+            if not rc.is_available():
+                return
+            rc.set_json(
+                rc.key("radar", "last_scan"),
+                {
+                    "scan": self._last_scan,
+                    "at": self._last_scan_at.isoformat(),
+                },
+                ttl=1800,
+            )
+        except Exception:
+            pass
+
+    def _hydrate_last_scan_from_redis(self) -> None:
+        if self._last_scan:
+            return
+        try:
+            from app.services import redis_client as rc
+            if not rc.is_available():
+                return
+            raw = rc.get_json(rc.key("radar", "last_scan"))
+            if not raw or not isinstance(raw, dict):
+                return
+            scan = raw.get("scan")
+            at = raw.get("at")
+            if not scan:
+                return
+            self._last_scan = scan
+            try:
+                self._last_scan_at = datetime.fromisoformat(at) if at else datetime.now()
+            except Exception:
+                self._last_scan_at = datetime.now()
+        except Exception:
+            pass
+
     def get_cached_scan(self, max_age_seconds: int = 900) -> Optional[Dict[str, Any]]:
-        """Return last scan if fresh enough."""
+        """Return last scan if fresh enough (memory, then Redis)."""
+        self._hydrate_last_scan_from_redis()
         if not self._last_scan or not self._last_scan_at:
             return None
         age = (datetime.now() - self._last_scan_at).total_seconds()
@@ -296,6 +338,7 @@ class OptionFlowRadarService:
         return {**self._last_scan, "cache_age_seconds": round(age, 1)}
 
     def get_last_scan(self) -> Optional[Dict[str, Any]]:
+        self._hydrate_last_scan_from_redis()
         if not self._last_scan:
             return None
         age = (
@@ -572,10 +615,13 @@ class OptionFlowRadarService:
         min_lis: float = 0,
         opt_type_filter: Optional[str] = None,
         strike_count: int = 10,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Scan all FNO stocks, return ONE best strike per stock.
         Processes in batches to respect API rate limits.
+
+        progress_callback(scanned, total, current_symbol, flagged_row|None, error|None)
         """
         if not self._is_authenticated():
             return {
@@ -585,44 +631,70 @@ class OptionFlowRadarService:
             }
 
         watch = filter_valid_symbols(symbols or ALL_FNO_WATCHLIST)
+        total = len(watch)
         all_flagged: List[Dict] = []
         errors: List[str] = []
         scanned = 0
+        rate_limited_skips = 0
+        aborted_rate_limit = False
         BATCH_SIZE = 10
         BATCH_SLEEP = 0.5  # seconds between batches
+
+        def _progress(sym: str, flagged_row=None, err=None):
+            if progress_callback:
+                try:
+                    progress_callback(scanned, total, sym, flagged_row, err)
+                except Exception:
+                    pass
 
         for batch_start in range(0, len(watch), BATCH_SIZE):
             batch = watch[batch_start: batch_start + BATCH_SIZE]
             for sym in batch:
                 if not is_valid_symbol(sym):
+                    scanned += 1
+                    _progress(sym, err="invalid_symbol")
                     continue
                 try:
                     underlying = self._get_underlying_data(sym)
                     if not underlying:
+                        scanned += 1
+                        _progress(sym, err="no_underlying")
                         continue
 
                     best = self._process_option_chain(sym, underlying, strike_count)
                     if best is None:
                         scanned += 1
+                        _progress(sym)
                         continue
 
                     # Apply filters
                     if opt_type_filter and best["type"] != opt_type_filter:
                         scanned += 1
+                        _progress(sym)
                         continue
                     if min_lis > 0 and best["lis"] < min_lis:
                         scanned += 1
+                        _progress(sym)
                         continue
 
                     all_flagged.append(best)
                     scanned += 1
+                    _progress(sym, flagged_row=best)
 
                 except Exception as exc:
                     msg = str(exc)
                     if "invalid symbol" in msg.lower():
                         mark_invalid_symbol(sym)
+                    try:
+                        from app.services.rate_limiter import is_rate_limit_error
+                        if is_rate_limit_error(exc) or is_rate_limit_error(msg):
+                            rate_limited_skips += 1
+                    except Exception:
+                        pass
                     logger.warning(f"Radar scan error for {sym}: {exc}")
                     errors.append(f"{sym}: {msg}")
+                    scanned += 1
+                    _progress(sym, err=msg)
 
             # Rate-limit protection between batches (longer when under pressure)
             if batch_start + BATCH_SIZE < len(watch):
@@ -631,7 +703,15 @@ class OptionFlowRadarService:
                     lim = get_fyers_limiter()
                     if lim.in_cooldown:
                         time.sleep(min(lim.cooldown_remaining, 30))
-                        break  # abort remaining batches this pass
+                        # Mark remaining symbols as skipped so progress is honest
+                        remaining = watch[batch_start + BATCH_SIZE :]
+                        rate_limited_skips += len(remaining)
+                        for rsym in remaining:
+                            scanned += 1
+                            errors.append(f"{rsym}: rate_limited")
+                            _progress(rsym, err="rate_limited")
+                        aborted_rate_limit = True
+                        break
                 except Exception:
                     pass
                 time.sleep(BATCH_SLEEP)
@@ -641,14 +721,19 @@ class OptionFlowRadarService:
         result = {
             "success": True,
             "scanned": scanned,
+            "universe_requested": total,
             "total_flagged": len(all_flagged),
             "flagged": all_flagged,
             "errors": errors,
+            "rate_limited_skips": rate_limited_skips,
+            "partial": aborted_rate_limit or scanned < total,
+            "completion_pct": round(100.0 * min(scanned, total) / max(total, 1), 1),
             "timestamp": datetime.now().isoformat(),
             "market_hours": self._is_market_hours(),
         }
         self._last_scan = result
         self._last_scan_at = datetime.now()
+        self._persist_last_scan()
         return result
 
     # ── Public: Single symbol option chain with LIS ───────────────
