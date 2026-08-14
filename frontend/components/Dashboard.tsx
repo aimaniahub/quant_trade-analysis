@@ -11,13 +11,21 @@ import StockAnalysis from './StockAnalysis';
 import QuantDashboard from './QuantDashboard';
 import VATScanner from './VATScanner';
 import MCPTradingPanel from './MCPTradingPanel';
-import MACrossoverDashboard from './MACrossoverDashboard';
 import OptionFlowRadar from './OptionFlowRadar';
 import HighVolumeScanner from './HighVolumeScanner';
+import MA7200Scanner from './MA7200Scanner';
 import ConfluencePanel from './ConfluencePanel';
 import SystemStatus from './SystemStatus';
 
-type ViewType = 'dashboard' | 'stockAnalysis' | 'quantDashboard' | 'vatScanner' | 'mcpTrading' | 'maCrossover' | 'optionFlowRadar' | 'highVolume';
+type ViewType =
+    | 'dashboard'
+    | 'stockAnalysis'
+    | 'quantDashboard'
+    | 'vatScanner'
+    | 'mcpTrading'
+    | 'optionFlowRadar'
+    | 'highVolume'
+    | 'ma7200';
 
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState<ViewType>('dashboard');
@@ -41,11 +49,6 @@ export default function Dashboard() {
         return <MCPTradingPanel onBack={() => setCurrentView('dashboard')} />;
     }
 
-    // Show MA Crossover Dashboard
-    if (currentView === 'maCrossover') {
-        return <MACrossoverDashboard onBack={() => setCurrentView('dashboard')} />;
-    }
-
     // Show Option Flow Radar
     if (currentView === 'optionFlowRadar') {
         return <OptionFlowRadar onBack={() => setCurrentView('dashboard')} />;
@@ -54,6 +57,11 @@ export default function Dashboard() {
     // Show High Volume Scanner
     if (currentView === 'highVolume') {
         return <HighVolumeScanner onBack={() => setCurrentView('dashboard')} />;
+    }
+
+    // 15m 7/200 MA Cross + Option Chain confirmation
+    if (currentView === 'ma7200') {
+        return <MA7200Scanner onBack={() => setCurrentView('dashboard')} />;
     }
 
     return (
@@ -67,7 +75,7 @@ export default function Dashboard() {
                         Market Structure & Premium Intelligence
                     </p>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap justify-end">
                     <button
                         onClick={() => setCurrentView('quantDashboard')}
                         className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
@@ -93,10 +101,10 @@ export default function Dashboard() {
                         💹 Trading
                     </button>
                     <button
-                        onClick={() => setCurrentView('maCrossover')}
-                        className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
+                        onClick={() => setCurrentView('ma7200')}
+                        className="px-4 py-2 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-700 hover:to-indigo-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
-                        📈 MA Crossover
+                        🔀 7/200 Cross
                     </button>
                     <button
                         onClick={() => setCurrentView('optionFlowRadar')}

@@ -58,6 +58,8 @@ class HighVolumeScannerService:
     def __init__(self):
         self.market_service = get_market_service()
         self.intelligence_engine = get_intelligence_engine()
+        self._last_scan: Optional[Dict[str, Any]] = None
+        self._last_scan_at: float = 0.0
     
     def classify_stock_cap(self, symbol: str) -> StockCap:
         """Classify stock as Large Cap or Mid Cap"""
@@ -254,7 +256,7 @@ class HighVolumeScannerService:
         results.sort(key=lambda x: x["composite_score"], reverse=True)
         top_stocks = results[:top_count]
         
-        return {
+        out = {
             "success": True,
             "timeframe": f"{timeframe}min",
             "total_scanned": scanned,
@@ -265,6 +267,23 @@ class HighVolumeScannerService:
             "errors": errors[:10] if errors else None,  # Include first 10 errors for debugging
             "timestamp": datetime.now().isoformat()
         }
+        # Share symbols with other strategies (MA 7/200 filter, etc.)
+        try:
+            import time as _time
+            self._last_scan = out
+            self._last_scan_at = _time.time()
+        except Exception:
+            pass
+        return out
+
+    def get_last_scan(self, max_age_seconds: float = 1800.0) -> Optional[Dict[str, Any]]:
+        """Return last HV scan if still fresh (for shared symbol pools)."""
+        import time as _time
+        if not self._last_scan:
+            return None
+        if _time.time() - self._last_scan_at > max_age_seconds:
+            return None
+        return self._last_scan
     
     def _analyze_oi_concentrations(
         self,

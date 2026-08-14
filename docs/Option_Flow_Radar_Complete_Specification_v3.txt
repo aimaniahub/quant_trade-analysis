@@ -1,0 +1,341 @@
+================================================================================
+OPTION FLOW RADAR – COMPLETE SPECIFICATION v3
+================================================================================
+Date: 13 August 2026
+Status: Implementation-ready
+Purpose: Single source of truth for fixing signal quality, adding Greek analysis,
+         multi-layer confirmation, and Alert Box architecture.
+
+This document consolidates:
+- Problems identified in current logic
+- Corrected classification (CE/PE matrix)
+- Corrected LIS momentum scoring
+- Greek Quality Score
+- Alert Box (Unusual / Big Player) rules
+- Multi-layer confirmation stack
+- Final signal grading
+- Implementation order
+
+================================================================================
+1. PROBLEM STATEMENT (WHY CURRENT ALERTS FAIL)
+================================================================================
+
+Symptoms observed:
+- System generates alerts with decent LIS scores
+- Selected strikes often look active on OI/Volume
+- Underlying stock frequently does not follow through
+- Many signals feel "late" or like noise
+- No clear separation between normal flow and unusual/big-player activity
+
+Root causes:
+1. classify_signal() was incomplete and Call-biased.
+   Put Long Buildup and Put Writing were poorly handled.
+2. LIS momentum scoring only rewarded rising option premium
+   (Call-centric). It did not properly interpret Put premium behaviour.
+3. Strike selection allowed far OTM contracts with low delta.
+4. Single-layer signals (OI + Volume) were treated as sufficient.
+5. No dedicated handling for "scary / unusual / institutional size" activity.
+
+Result: High false-positive rate and low follow-through.
+
+================================================================================
+2. CORE DESIGN PHILOSOPHY (LOCKED)
+================================================================================
+
+- Moving averages / technicals only create context or candidates.
+- Option flow is the primary directional evidence.
+- Greeks are a QUALITY FILTER and risk layer — not the primary signal generator.
+- No single data point should generate a high-conviction trade alert.
+- Normal flow and Unusual/Big-Player flow must be separated.
+- Final actionable alerts require multi-layer confirmation.
+
+================================================================================
+3. CORRECTED SIGNAL CLASSIFICATION (CE / PE MATRIX)
+================================================================================
+
+Replace existing classify_signal() with the following complete matrix.
+
+Input:
+- oi_change_pct
+- option_price_change_pct
+- underlying_price_change_pct (optional context)
+- opt_type ("CE" or "PE")
+
+Logic:
+
+CE Side:
+  OI↑ + Premium↑  → Fresh Call Buying      → STRONG_BULLISH
+  OI↑ + Premium↓  → Call Writing           → BEARISH
+  OI↓ + Premium↑  → Call Short Covering    → Mild Bullish / Exhaustion
+  OI↓ + Premium↓  → Call Long Unwinding    → Mild Bearish / Exhaustion
+
+PE Side:
+  OI↑ + Premium↑  → Fresh Put Buying       → STRONG_BEARISH
+  OI↑ + Premium↓  → Put Writing            → BULLISH
+  OI↓ + Premium↑  → Put Short Covering     → Mild Bearish / Exhaustion
+  OI↓ + Premium↓  → Put Long Unwinding     → Mild Bullish / Exhaustion
+
+Fallback:
+  OI↑ only (premium flat) → Smart Money Accum. (Neutral / Watch)
+
+Recommended thresholds:
+- OI change significant if abs(oi_change_pct) >= 8
+- Premium change significant if abs(option_price_change_pct) >= 1.5
+
+This matrix is the foundation. All later scoring depends on correct labelling.
+
+================================================================================
+4. CORRECTED LIS MOMENTUM SCORING
+================================================================================
+
+Old problem:
+momentum_score only rewarded positive option_price_change_pct.
+This favoured Calls and mishandled Puts.
+
+New rule:
+Momentum score must respect the nature of the option type and the classified direction.
+
+Recommended implementation:
+
+def compute_momentum_score(option_price_change_pct, opt_type, direction):
+    """
+    direction = "BULLISH" | "BEARISH" | "NEUTRAL"
+    """
+    if direction == "BULLISH":
+        if opt_type == "CE" and option_price_change_pct > 0:
+            return min(option_price_change_pct / 5.0, 1.0) * 15.0
+        if opt_type == "PE" and option_price_change_pct < 0:   # Put writing
+            return min(abs(option_price_change_pct) / 5.0, 1.0) * 12.0
+    elif direction == "BEARISH":
+        if opt_type == "PE" and option_price_change_pct > 0:
+            return min(option_price_change_pct / 5.0, 1.0) * 15.0
+        if opt_type == "CE" and option_price_change_pct < 0:   # Call writing
+            return min(abs(option_price_change_pct) / 5.0, 1.0) * 12.0
+    return 0.0
+
+This prevents high scores on mismatched premium behaviour.
+
+================================================================================
+5. STRIKE QUALITY HARD FILTERS
+================================================================================
+
+Apply before final scoring:
+
+1. ATM Distance
+   - Prefer strikes within 5–7% of spot.
+   - Hard reject if atm_dist_pct > 8 (configurable).
+
+2. Volume Spike
+   - Require vol_spike_ratio >= 1.5 (raise from 1.2).
+
+3. OI Change
+   - Require abs(oi_change_pct) >= 8.
+
+4. Minimum absolute volume
+   - Keep a floor (e.g. 100–200 contracts) to avoid noise.
+
+These filters remove many low-delta and low-participation strikes.
+
+================================================================================
+6. GREEK QUALITY SCORE (NEW LAYER)
+================================================================================
+
+Greeks are used to grade the quality and risk of the selected strike.
+They do not generate the signal; they filter and re-weight it.
+
+### 6.1 Individual Greek Interpretation
+
+Delta:
+- 0.30 – 0.60 → Ideal (good leverage + meaningful stock impact)
+- 0.20 – 0.30 → Acceptable but weaker
+- < 0.20 → Too far OTM → penalise or reject
+- > 0.70 → Very stock-like / expensive → mild penalise
+
+Gamma:
+- Medium to High near ATM is acceptable
+- Extremely high gamma + low liquidity → higher whipsaw risk → penalise
+
+Theta:
+- High absolute Theta on rich premium → time decay risk → penalise for longer holds
+- Low Theta → more favourable for holding
+
+Vega:
+- Rising IV that supports the direction → positive
+- Already very high IV + expensive premium → caution (premium may be rich)
+
+### 6.2 Greek Quality Score (0–20 points)
+
+Suggested simple scoring:
+
++8  if Delta in 0.30–0.60
++4  if Delta in 0.20–0.30
++0  if Delta < 0.20 (or hard reject)
++4  if Gamma is healthy (not extreme)
++3  if Theta is reasonable for intended holding period
++3  if Vega / IV environment is not hostile
++2  bonus if strike is close to ATM and Delta is in sweet spot
+
+Cap at 20.
+
+Add this score into overall conviction / final ranking.
+Strikes with very low Greek Quality should be downgraded even if raw LIS is high.
+
+================================================================================
+7. MULTI-LAYER CONFIRMATION STACK
+================================================================================
+
+A signal becomes high-confidence only when multiple layers agree.
+
+Layer 1 – Flow Classification (mandatory)
+  Correct CE/PE matrix label (Fresh Buying / Writing etc.)
+
+Layer 2 – Volume Confirmation (mandatory)
+  Volume spike >= 1.5× 3-day average
+
+Layer 3 – Strike Location
+  Within acceptable ATM distance + acceptable Delta
+
+Layer 4 – Greek Quality
+  Greek Quality Score above minimum threshold
+
+Layer 5 – Underlying Context (soft to medium)
+  Short-term trend / VWAP / EMA side should not strongly oppose the flow direction
+
+Layer 6 – Unusual Score (for Alert Box)
+  Size of OI change, volume multiple, IV behaviour, absolute OI added
+
+Only signals that pass the required layers should be marked actionable.
+
+================================================================================
+8. ALERT BOX (UNUSUAL / BIG PLAYER) – DETAILED RULES
+================================================================================
+
+Purpose:
+Separate normal flow from abnormal / institutional-looking activity so the user
+can review high-impact situations without mixing them with routine signals.
+
+### 8.1 Conditions to push a signal into Alert Box
+
+A signal should enter the Alert Box if ANY of the following are true
+(in addition to basic validity):
+
+- OI change >= 25–30% AND volume spike >= 3×
+- Very large absolute OI addition at one strike (size filter)
+- Strong directional premium move + IV expansion
+- Multiple nearby strikes showing coordinated activity (cluster)
+- Slightly OTM strike receiving abnormal size
+- Overall “scary” footprint (large deviation from normal distribution of the stock’s option activity)
+
+### 8.2 Alert Box Behaviour
+
+- Separate window / tab / list
+- Sorted by Unusual Score (highest first)
+- Does NOT auto-promote to trade alert
+- User can manually review and promote to Active Idea if desired
+- Can show extra context: absolute OI added, volume multiple, IV change, Greek snapshot
+
+### 8.3 Normal Radar vs Alert Box
+
+Normal Radar:
+- Clean, multi-layer confirmed signals
+- Lower noise
+- Suitable for regular monitoring
+
+Alert Box:
+- High-impact / unusual / potential big-player activity
+- Requires human judgment
+- Higher reward potential but also higher noise if used blindly
+
+================================================================================
+9. FINAL SIGNAL GRADING
+================================================================================
+
+Grade A+  : Flow + Volume + Greeks + Underlying aligned + Unusual characteristics
+            → Highest priority (Alert Box + strong notification)
+
+Grade A   : Strong multi-layer confirmation, clean direction
+            → Main radar, high conviction
+
+Grade B   : Decent flow but missing 1–2 layers
+            → Watch list only
+
+Grade C   : Weak, conflicting, or low-quality strike
+            → Ignore or very low priority
+
+Only Grade A and A+ should generate strong actionable alerts.
+
+================================================================================
+10. END-TO-END FLOW (TARGET ARCHITECTURE)
+================================================================================
+
+Option Chain Data
+        ↓
+Flow Classification (full CE/PE matrix)
+        ↓
+Volume + OI Strength Filters
+        ↓
+ATM Distance + Delta Filter
+        ↓
+Greek Quality Score
+        ↓
+Underlying Context Check
+        ↓
+┌──────────────────────────┬──────────────────────────────┐
+│     Normal Radar         │         Alert Box            │
+│  (Clean multi-layer)     │  (Unusual / Big Player)      │
+└──────────────────────────┴──────────────────────────────┘
+        ↓
+Signal Grade (A+ / A / B / C)
+        ↓
+Only A / A+ become high-priority alerts
+
+================================================================================
+11. IMPLEMENTATION ORDER
+================================================================================
+
+Phase 1 (Immediate):
+- Replace classify_signal() with full CE/PE matrix
+- Fix momentum scoring inside LIS
+- Raise volume and OI thresholds
+- Add ATM distance hard filter
+
+Phase 2:
+- Implement Greek Quality Score
+- Integrate score into ranking and conviction
+
+Phase 3:
+- Build Alert Box logic and separate storage/UI
+- Define Unusual Score
+- Route qualifying signals into Alert Box
+
+Phase 4:
+- Full multi-layer grading (A+/A/B/C)
+- Notification rules only for A and A+
+
+================================================================================
+12. ACCEPTANCE CRITERIA
+================================================================================
+
+After implementation, the system should satisfy:
+
+1. Put Long Buildup is correctly labelled as bearish.
+2. Call Writing is correctly labelled as bearish.
+3. Put Writing is correctly labelled as bullish.
+4. Far OTM low-delta strikes are largely filtered out.
+5. High LIS alone is not enough for a high-conviction alert.
+6. Unusual large activity is isolated in the Alert Box.
+7. Actionable alerts require multiple layers of confirmation.
+8. Overall false-positive rate is visibly lower than the previous version.
+
+================================================================================
+13. ONE-LINE PRODUCT SUMMARY
+================================================================================
+
+> Detect real directional option flow with correct CE/PE interpretation,
+> filter by volume, strike quality and Greeks, separate normal signals from
+> unusual big-player activity, and only raise high-conviction alerts when
+> multiple independent layers agree.
+
+================================================================================
+END OF SPECIFICATION
+================================================================================

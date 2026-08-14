@@ -186,18 +186,92 @@ export const api = {
     },
 
     /**
+     * 15m 7/200 MA Cross + Option Chain Confirmation
+     */
+    ma7200: {
+        /** Start background direct-API scan; poll getScanJob */
+        startScan: (
+            limit = 200,
+            lookback = 12,
+            source: 'full' | 'top' = 'full',
+            settings?: {
+                fast_ma?: number;
+                slow_ma?: number;
+                window_days?: number;
+                vol_mult?: number;
+                max_bars_ago?: number;
+                history_days?: number;
+            },
+        ) => {
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            params.set('lookback', String(lookback));
+            params.set('source', source);
+            if (settings?.fast_ma != null) params.set('fast_ma', String(settings.fast_ma));
+            if (settings?.slow_ma != null) params.set('slow_ma', String(settings.slow_ma));
+            if (settings?.window_days != null)
+                params.set('window_days', String(settings.window_days));
+            if (settings?.vol_mult != null) params.set('vol_mult', String(settings.vol_mult));
+            if (settings?.max_bars_ago != null)
+                params.set('max_bars_ago', String(settings.max_bars_ago));
+            if (settings?.history_days != null)
+                params.set('history_days', String(settings.history_days));
+            return api.fetch(`/strategies/ma7200/scan/start?${params.toString()}`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+            });
+        },
+        getScanJob: (jobId: string) =>
+            api.fetch(`/strategies/ma7200/scan/jobs/${encodeURIComponent(jobId)}`),
+        /** Blocking scan (prefer startScan) */
+        scan: (
+            limit = 200,
+            lookback = 12,
+            source: 'full' | 'top' = 'full',
+            settings?: {
+                fast_ma?: number;
+                slow_ma?: number;
+                window_days?: number;
+                vol_mult?: number;
+                max_bars_ago?: number;
+                history_days?: number;
+            },
+        ) => {
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            params.set('lookback', String(lookback));
+            params.set('source', source);
+            if (settings?.fast_ma != null) params.set('fast_ma', String(settings.fast_ma));
+            if (settings?.slow_ma != null) params.set('slow_ma', String(settings.slow_ma));
+            if (settings?.window_days != null)
+                params.set('window_days', String(settings.window_days));
+            if (settings?.vol_mult != null) params.set('vol_mult', String(settings.vol_mult));
+            if (settings?.max_bars_ago != null)
+                params.set('max_bars_ago', String(settings.max_bars_ago));
+            if (settings?.history_days != null)
+                params.set('history_days', String(settings.history_days));
+            return api.fetch(`/strategies/ma7200/scan?${params.toString()}`);
+        },
+        analyze: (symbol: string, crossType: string, strikeCount = 12) =>
+            api.fetch(
+                `/strategies/ma7200/analyze?symbol=${encodeURIComponent(symbol)}&cross_type=${crossType}&strike_count=${strikeCount}`,
+            ),
+    },
+
+    /**
      * Option Flow Radar methods
      */
     radar: {
         getWatchlist: () => api.fetch('/radar/watchlist'),
-        scan: (minLis = 0, optionType?: string, strikeCount = 8) => {
+        getLastScan: () => api.fetch('/radar/last'),
+        scan: (minLis = 0, optionType?: string, strikeCount = 12) => {
             const params = new URLSearchParams();
             params.set('min_lis', String(minLis));
             if (optionType) params.set('option_type', optionType);
             params.set('strike_count', String(strikeCount));
             return api.fetch(`/radar/scan?${params.toString()}`);
         },
-        startScan: (minLis = 0, optionType?: string, strikeCount = 8) => {
+        startScan: (minLis = 0, optionType?: string, strikeCount = 12) => {
             const params = new URLSearchParams();
             params.set('min_lis', String(minLis));
             if (optionType) params.set('option_type', optionType);
@@ -214,7 +288,7 @@ export const api = {
                 method: 'POST',
                 body: JSON.stringify({ symbols, min_lis: minLis, option_type: optionType }),
             }),
-        getSymbolFlow: (symbol: string, strikeCount = 10) =>
+        getSymbolFlow: (symbol: string, strikeCount = 14) =>
             api.fetch(`/radar/flow/${encodeURIComponent(symbol)}?strike_count=${strikeCount}`),
         getCandles: (symbol: string, resolution = '5', days = 1) =>
             api.fetch(`/radar/candles/${encodeURIComponent(symbol)}?resolution=${resolution}&days=${days}`),
@@ -229,6 +303,13 @@ export const api = {
                 method: 'POST',
                 body: JSON.stringify(payload),
             }),
+        getIdeas: (limit = 8) => api.fetch(`/radar/ideas?limit=${limit}`),
+        getSymbolIdea: (symbol: string) =>
+            api.fetch(`/radar/ideas/${encodeURIComponent(symbol)}`),
+        getLevels: (symbol: string, strikeCount = 14) =>
+            api.fetch(
+                `/radar/levels/${encodeURIComponent(symbol)}?strike_count=${strikeCount}`,
+            ),
     },
 };
 

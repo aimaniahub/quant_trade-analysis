@@ -9,16 +9,24 @@ import LoadingBanner from './ui/LoadingBanner';
 // ─────────────────────────────────────────────────────────────────
 
 interface SignalInfo {
-    signal: string;       // STRONG_BULLISH | WEAK_BULLISH | BEARISH | EXHAUSTION | NEUTRAL
+    signal: string;       // STRONG_BULLISH | STRONG_BEARISH | BULLISH | BEARISH | EXHAUSTION | ACCUMULATION | NEUTRAL
     label: string;
     icon: string;
     color: string;
+    direction?: string;   // BULLISH | BEARISH | NEUTRAL (stock-side implication)
 }
 
 interface ConvictionInfo {
     level: string;        // HIGH | MEDIUM | LOW
     icon: string;
     label: string;
+}
+
+interface GreekQuality {
+    score: number;
+    max?: number;
+    abs_delta?: number;
+    notes?: string[];
 }
 
 interface GreekInterpretation {
@@ -61,16 +69,148 @@ interface FlaggedContract {
     atm_dist_pct: number;
     lis: number;
     signal: SignalInfo;
+    direction?: string;
     conviction: ConvictionInfo;
     unusual_flags: string[];
+    grade?: string;
+    actionable?: boolean;
+    watch_only?: boolean;
+    alert_box?: boolean;
+    unusual_score?: number;
+    composite_score?: number;
+    greek_quality?: GreekQuality;
+    oi_added?: number;
+    layers_passed?: number;
+    layers?: Record<string, boolean>;
+    vol_spike_source?: string;
+    idea_status?: string;
+    process_locked?: boolean;
+    process_direction?: string;
+    location_score?: number;
+    location_tags?: string[];
+    process_composite?: number;
+    process_recipe?: string;
+    idea?: ProcessIdea;
+    levels_map?: Record<string, any>;
 }
 
+
+interface ProcessIdea {
+    status: string;
+    symbol: string;
+    name: string;
+    direction: string;
+    side: string;
+    strike: number;
+    opt_type: string;
+    label: string;
+    signal?: string;
+    thesis?: string;
+    recipe?: { id?: string; name?: string; ok?: boolean };
+    location_score?: number;
+    location_tags?: string[];
+    composite?: number;
+    prominence?: number;
+    lis?: number;
+    grade?: string;
+    spot?: number;
+    locked_at?: string | null;
+    hold_seconds?: number;
+    invalidation?: number | null;
+    stop?: number | null;
+    target?: number | null;
+    target_2?: number | null;
+    target_label?: string | null;
+    target_2_label?: string | null;
+    entry?: number | null;
+    entry_label?: string | null;
+    exec_action?: string | null;
+    reward_risk?: number | null;
+    trade_opt_type?: string | null;
+    trade_strike?: number | null;
+    entry_zone?: { from?: number; to?: number; reason?: string } | null;
+    cluster_health?: string | null;
+    exit_warnings?: string[];
+    entry_quality?: { score?: number; label?: string; dist_pct?: number } | null;
+    locked_cluster?: { strike?: number; type?: string; oi?: number; state?: string } | null;
+    cluster_plan?: {
+        side?: string;
+        entry_zone?: { from?: number; to?: number; reason?: string } | null;
+        supporting_cluster?: { strike?: number; type?: string; oi?: number; state?: string } | null;
+        primary_target?: { level?: number; reason?: string } | null;
+        secondary_target?: number | null;
+        stop_reference?: number | null;
+        exit_warnings?: string[];
+        cluster_health?: string;
+        entry_quality?: { score?: number; label?: string } | null;
+    } | null;
+    execution?: {
+        action?: string;
+        action_label?: string;
+        entry_role?: string;
+        instrument?: { opt_type?: string; strike?: number; role?: string; note?: string };
+        take_now?: boolean;
+        reward_risk?: number;
+        magnet_source?: string;
+        support_dying?: boolean;
+        tech_confirm?: string[];
+        note?: string;
+        cluster_health?: string;
+        exit_warnings?: string[];
+        entry_zone?: { from?: number; to?: number; reason?: string } | null;
+    } | null;
+    tag_roles?: { entry_tags?: string[]; context_tags?: string[] } | null;
+    vetoes?: string[];
+    persist?: { ready?: boolean; same?: number; n?: number; age_seconds?: number };
+    futures?: { state?: string; label?: string };
+    zone?: { labels?: string[]; mid?: number } | null;
+    pivot_side?: string;
+    camarilla_regime?: string;
+    wall_side?: string;
+    instrument_hint?: { strike?: number; opt_type?: string } | null;
+    structure?: { put_wall?: number; call_wall?: number; max_pain?: number; pcr_regime?: string };
+    day?: { p?: number; s1?: number; r1?: number; pdh?: number; pdl?: number; atr?: number };
+    session?: { vwap?: number; orh?: number; orl?: number };
+    kill_reason?: string | null;
+    kill_frame?: string | null;
+    downgrade_reason?: string | null;
+    downgrade_frame?: string | null;
+    campaign?: string;
+    hq_pullback?: boolean;
+    align_score?: number;
+    align_label?: string;
+    allowed_side?: string;
+    mtf?: {
+        daily_bias?: string;
+        h4_bias?: string;
+        h1_bias?: string;
+        m15_bias?: string;
+        align_score?: number;
+        align_label?: string;
+        allowed_side?: string;
+        campaign?: string;
+        hq_pullback?: boolean;
+        turning?: boolean;
+        m15_trigger?: boolean;
+        momentum_now?: string;
+    };
+}
 
 interface ScanResult {
     success: boolean;
     scanned: number;
     total_flagged: number;
     flagged: FlaggedContract[];
+    watch?: FlaggedContract[];
+    alert_box?: FlaggedContract[];
+    ideas?: ProcessIdea[];
+    ideas_confirmed?: ProcessIdea[];
+    ideas_pullbacks?: ProcessIdea[];
+    ideas_watch?: ProcessIdea[];
+    ideas_conflict?: ProcessIdea[];
+    idea_counts?: { active?: number; watch?: number; conflict?: number; confirmed?: number; pullbacks?: number };
+    grade_counts?: Record<string, number>;
+    engine?: string;
     errors: string[];
     timestamp: string;
     market_hours: boolean;
@@ -104,6 +244,10 @@ interface SymbolFlow {
         close: number;
         volume: number;
     }>;
+    idea?: ProcessIdea | null;
+    levels?: Record<string, any>;
+    partial?: boolean;
+    warning?: string;
 }
 
 interface BacktestResult {
@@ -153,7 +297,7 @@ function LISRing({ lis }: { lis: number }) {
     );
 }
 
-// Signal badge
+// Signal badge — label + stock-side direction from CE/PE matrix
 function SignalBadge({ signal }: { signal: SignalInfo }) {
     const bg: Record<string, string> = {
         emerald: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
@@ -163,9 +307,13 @@ function SignalBadge({ signal }: { signal: SignalInfo }) {
         zinc: 'bg-zinc-500/15 text-zinc-400 border-zinc-700',
     };
     const cls = bg[signal.color] || bg.zinc;
+    const dir = signal.direction && signal.direction !== 'NEUTRAL' ? signal.direction : null;
     return (
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-bold ${cls}`}>
             {signal.icon} {signal.label}
+            {dir ? (
+                <span className="opacity-80 font-black">· {dir === 'BULLISH' ? '↑' : '↓'}</span>
+            ) : null}
         </span>
     );
 }
@@ -689,10 +837,299 @@ interface Props {
     onBack: () => void;
 }
 
-type TabType = 'live' | 'flow' | 'backtest_list';
+type TabType = 'process' | 'live' | 'alerts' | 'watch' | 'flow' | 'backtest_list';
+
+function fmtPx(v?: number | null) {
+    if (v == null || Number.isNaN(Number(v))) return '—';
+    return Number(v).toLocaleString('en-IN', { maximumFractionDigits: 1 });
+}
+
+function processSignal(idea: ProcessIdea): {
+    text: string;
+    tone: 'bull' | 'bear' | 'none';
+    hint: string;
+} {
+    const d = (idea.direction || idea.side || '').toUpperCase();
+    if (idea.status === 'CONFLICT') {
+        return { text: 'NO TRADE', tone: 'none', hint: 'Both sides printing — stand aside' };
+    }
+    if (d === 'BULLISH' || d === 'LONG') {
+        return {
+            text: 'BULLISH SIGNAL',
+            tone: 'bull',
+            hint: idea.label || idea.recipe?.name || 'Long process',
+        };
+    }
+    if (d === 'BEARISH' || d === 'SHORT') {
+        return {
+            text: 'BEARISH SIGNAL',
+            tone: 'bear',
+            hint: idea.label || idea.recipe?.name || 'Short process',
+        };
+    }
+    return { text: 'NO SIGNAL', tone: 'none', hint: idea.label || 'Waiting for direction' };
+}
+
+function ProcessIdeaCard({
+    idea,
+    onOpen,
+}: {
+    idea: ProcessIdea;
+    onOpen: (idea: ProcessIdea) => void;
+}) {
+    const sig = processSignal(idea);
+    const long = sig.tone === 'bull';
+    const locked = idea.status === 'ACTIVE';
+    return (
+        <button
+            type="button"
+            onClick={() => onOpen(idea)}
+            className={`w-full text-left p-4 rounded-xl border transition-colors ${
+                locked
+                    ? long
+                        ? 'bg-emerald-500/8 border-emerald-500/40'
+                        : sig.tone === 'bear'
+                          ? 'bg-rose-500/8 border-rose-500/40'
+                          : 'bg-[#0e1420] border-zinc-800'
+                    : idea.status === 'CONFLICT'
+                      ? 'bg-amber-500/8 border-amber-500/30'
+                      : 'bg-[#0e1420] border-zinc-800'
+            }`}
+        >
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                            className={`px-2.5 py-1 rounded-lg text-xs font-black tracking-wide ${
+                                sig.tone === 'bull'
+                                    ? 'bg-emerald-500 text-emerald-950'
+                                    : sig.tone === 'bear'
+                                      ? 'bg-rose-500 text-rose-950'
+                                      : 'bg-zinc-700 text-zinc-200'
+                            }`}
+                        >
+                            {sig.text}
+                        </span>
+                        <span className="text-lg font-black text-white">{idea.name}</span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-black border border-cyan-500/40 text-cyan-300">
+                            {locked ? 'LOCKED' : idea.status}
+                        </span>
+                        {idea.hq_pullback && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-400 text-amber-950">
+                                HIGH-QUALITY PULLBACK
+                            </span>
+                        )}
+                        {idea.campaign && idea.campaign !== 'WATCH' && !idea.hq_pullback && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-black border border-zinc-600 text-zinc-300">
+                                {idea.campaign}
+                            </span>
+                        )}
+                        {idea.recipe?.name && (
+                            <span className="text-[10px] font-bold text-zinc-400 uppercase">
+                                {idea.recipe.name}
+                            </span>
+                        )}
+                    </div>
+                    <p className="text-[12px] font-bold mt-1.5 text-zinc-200">{sig.hint}</p>
+                    {idea.thesis && (
+                        <p className="text-[11px] text-zinc-500 mt-0.5">{idea.thesis}</p>
+                    )}
+                    <div className="flex flex-wrap gap-1.5 mt-2 text-[10px] font-black">
+                        {[
+                            ['D', idea.mtf?.daily_bias],
+                            ['4H', idea.mtf?.h4_bias],
+                            ['1H', idea.mtf?.h1_bias],
+                            ['15m', idea.mtf?.m15_bias],
+                        ].map(([tf, bias]) => (
+                            <span
+                                key={String(tf)}
+                                className={`px-1.5 py-0.5 rounded border ${
+                                    bias === 'BULLISH'
+                                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                                        : bias === 'BEARISH'
+                                          ? 'border-rose-500/40 text-rose-300 bg-rose-500/10'
+                                          : 'border-zinc-700 text-zinc-500'
+                                }`}
+                            >
+                                {tf} {bias || '—'}
+                            </span>
+                        ))}
+                        {idea.mtf?.m15_trigger && (
+                            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                                15m TRIGGER
+                            </span>
+                        )}
+                        {idea.mtf?.turning && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                1H TURNING
+                            </span>
+                        )}
+                        {idea.align_score != null && (
+                            <span className="px-1.5 py-0.5 rounded text-zinc-400">
+                                align {idea.align_score > 0 ? '+' : ''}{idea.align_score}
+                            </span>
+                        )}
+                    </div>
+                    {(idea.kill_frame || idea.downgrade_frame) && (
+                        <p className="text-[10px] text-rose-400 mt-1 font-bold">
+                            {idea.kill_frame
+                                ? `Killed by ${idea.kill_frame}: ${idea.kill_reason}`
+                                : `Downgraded by ${idea.downgrade_frame}: ${idea.downgrade_reason}`}
+                        </p>
+                    )}
+                </div>
+                <div className="text-right shrink-0">
+                    <p className="text-[9px] font-bold uppercase text-zinc-500">Buy this</p>
+                    <p className="text-xl font-black text-white">
+                        {fmtPx(idea.trade_strike ?? idea.execution?.instrument?.strike ?? idea.strike)}{' '}
+                        <span className={(idea.trade_opt_type || idea.execution?.instrument?.opt_type || idea.opt_type) === 'CE' ? 'text-emerald-400' : 'text-rose-400'}>
+                            {idea.trade_opt_type || idea.execution?.instrument?.opt_type || idea.opt_type}
+                        </span>
+                    </p>
+                    <p className={`text-[11px] font-black ${long ? 'text-emerald-400' : sig.tone === 'bear' ? 'text-rose-400' : 'text-zinc-500'}`}>
+                        {long ? 'BUY CE / LONG' : sig.tone === 'bear' ? 'BUY PE / SHORT' : 'FLAT'}
+                    </p>
+                    <p className="text-[10px] text-zinc-500">
+                        {locked && idea.hold_seconds != null ? `held ${Math.round(idea.hold_seconds / 60)}m` : `loc ${idea.location_score ?? '—'}`}
+                    </p>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+                <div className="p-2 rounded-lg bg-zinc-900/70 border border-zinc-800">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-zinc-500">Direction (why)</p>
+                    <p className="text-[11px] font-bold text-zinc-200 mt-0.5">{idea.label || sig.hint}</p>
+                    <p className="text-[10px] text-zinc-500">
+                        Fuel {idea.strike}{idea.opt_type} · does not pick entry
+                    </p>
+                </div>
+                <div className={`p-2 rounded-lg border ${
+                    idea.exec_action === 'AT_ENTRY'
+                        ? 'bg-emerald-500/10 border-emerald-500/40'
+                        : idea.exec_action === 'CLUSTER_BROKEN' || idea.exec_action === 'STAND_ASIDE' || idea.exec_action === 'STOPPED'
+                          ? 'bg-rose-500/10 border-rose-500/40'
+                          : idea.exec_action === 'TRAIL_EXIT' || idea.exec_action === 'CHASE' || idea.exec_action === 'WAIT_FOR_LEVEL'
+                            ? 'bg-amber-500/10 border-amber-500/30'
+                            : idea.exec_action === 'EXTEND'
+                              ? 'bg-cyan-500/10 border-cyan-500/30'
+                              : 'bg-zinc-900/70 border-zinc-800'
+                }`}>
+                    <p className="text-[9px] font-black uppercase tracking-widest text-zinc-500">Execution (when / where)</p>
+                    <p className="text-[11px] font-black text-zinc-100 mt-0.5">
+                        {idea.execution?.action_label || idea.exec_action || 'Plan pending'}
+                    </p>
+                    {idea.reward_risk != null && (
+                        <p className="text-[10px] text-cyan-300">R:R {idea.reward_risk}</p>
+                    )}
+                    <p className="text-[10px] text-zinc-500">
+                        Magnet: {idea.execution?.magnet_source === 'OI_CLUSTER' ? 'OI cluster' : idea.execution?.magnet_source || 'tech backup'}
+                        {idea.execution?.tech_confirm?.length ? ` · confirm ${idea.execution.tech_confirm.join('+')}` : ''}
+                    </p>
+                    {(idea.cluster_health || idea.execution?.cluster_health) && (
+                        <p className={`text-[10px] font-black mt-0.5 ${
+                            (idea.cluster_health || idea.execution?.cluster_health) === 'HEALTHY'
+                                ? 'text-emerald-400'
+                                : (idea.cluster_health || idea.execution?.cluster_health) === 'WEAKENING' || (idea.cluster_health || idea.execution?.cluster_health) === 'CHAOS'
+                                  ? 'text-rose-400'
+                                  : 'text-zinc-400'
+                        }`}>
+                            Cluster {(idea.cluster_health || idea.execution?.cluster_health)}
+                            {idea.entry_quality?.label ? ` · entry ${idea.entry_quality.label}` : ''}
+                        </p>
+                    )}
+                    {(idea.exit_warnings || idea.execution?.exit_warnings || []).slice(0, 2).map((w) => (
+                        <p key={w} className="text-[10px] font-black text-rose-400">{w}</p>
+                    ))}
+                </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mt-2 text-[10px]">
+                <div>
+                    <p className="text-zinc-500 uppercase font-bold">
+                        {long ? 'Entry zone / demand' : 'Entry zone / supply'}
+                    </p>
+                    <p className="text-zinc-200 font-black">
+                        {idea.entry_zone?.from != null && idea.entry_zone?.to != null
+                            ? `${fmtPx(idea.entry_zone.from)}–${fmtPx(idea.entry_zone.to)}`
+                            : `${idea.entry_label ? `${idea.entry_label} ` : ''}${fmtPx(idea.entry ?? idea.spot)}`}
+                    </p>
+                    <p className="text-[9px] text-zinc-500 truncate">
+                        {idea.entry_zone?.reason
+                            || idea.entry_label
+                            || (long ? 'Near put cluster' : 'Near call cluster')}
+                    </p>
+                </div>
+                <div>
+                    <p className="text-zinc-500 uppercase font-bold">Stop / inv</p>
+                    <p className="text-rose-300 font-black">{fmtPx(idea.stop ?? idea.invalidation)}</p>
+                </div>
+                <div>
+                    <p className="text-zinc-500 uppercase font-bold">Target</p>
+                    <p className="text-emerald-300 font-black">
+                        {idea.target_label ? `${idea.target_label} ` : ''}
+                        {fmtPx(idea.target)}
+                    </p>
+                    {idea.target_2 != null && (
+                        <p className="text-[9px] text-zinc-500">
+                            T2 {idea.target_2_label ? `${idea.target_2_label} ` : ''}{fmtPx(idea.target_2)}
+                        </p>
+                    )}
+                </div>
+                <div>
+                    <p className="text-zinc-500 uppercase font-bold">{long ? 'Support wall' : 'Resist wall'}</p>
+                    <p className="text-cyan-300 font-black truncate">
+                        {long
+                            ? `Put ${fmtPx(idea.structure?.put_wall)}`
+                            : `Call ${fmtPx(idea.structure?.call_wall)}`}
+                    </p>
+                    <p className="text-[9px] text-zinc-500">
+                        {long
+                            ? `Call (tgt) ${fmtPx(idea.structure?.call_wall)}`
+                            : `Put (tgt) ${fmtPx(idea.structure?.put_wall)}`}
+                    </p>
+                </div>
+                <div>
+                    <p className="text-zinc-500 uppercase font-bold">Fuel print</p>
+                    <p className="text-zinc-200 font-black truncate">{idea.strike}{idea.opt_type}</p>
+                </div>
+            </div>
+            {(idea.tag_roles?.entry_tags?.length || idea.location_tags?.length) ? (
+                <div className="flex flex-wrap gap-1 mt-2">
+                    {(idea.tag_roles?.entry_tags || idea.location_tags || []).slice(0, 6).map(t => (
+                        <span key={t} className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-[9px] font-bold text-zinc-400">
+                            {t}
+                        </span>
+                    ))}
+                    {idea.futures?.label && (
+                        <span className="px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 text-[9px] font-bold text-blue-300">
+                            {idea.futures.label}
+                        </span>
+                    )}
+                </div>
+            ) : null}
+        </button>
+    );
+}
+
+function GradeBadge({ grade }: { grade?: string }) {
+    const g = grade || '—';
+    const cls =
+        g === 'A+'
+            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+            : g === 'A'
+              ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+              : g === 'B'
+                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                : 'bg-zinc-800 text-zinc-500 border-zinc-700';
+    return (
+        <span className={`px-1.5 py-0.5 rounded border text-[10px] font-black ${cls}`}>
+            {g}
+        </span>
+    );
+}
 
 export default function OptionFlowRadar({ onBack }: Props) {
-    const [tab, setTab] = useState<TabType>('live');
+    const [tab, setTab] = useState<TabType>('process');
 
     // Scan state
     const [scanData, setScanData] = useState<ScanResult | null>(null);
@@ -706,7 +1143,7 @@ export default function OptionFlowRadar({ onBack }: Props) {
     // Filters
     const [minLis, setMinLis] = useState(0);
     const [optTypeFilter, setOptTypeFilter] = useState<'CE' | 'PE' | ''>('');
-    const [sortBy, setSortBy] = useState<'lis' | 'oi_change_pct' | 'volume'>('lis');
+    const [sortBy, setSortBy] = useState<'lis' | 'oi_change_pct' | 'volume' | 'composite_score' | 'unusual_score'>('composite_score');
 
     // Selected contract for detail
     const [selectedContract, setSelectedContract] = useState<FlaggedContract | null>(null);
@@ -714,6 +1151,7 @@ export default function OptionFlowRadar({ onBack }: Props) {
     // Symbol flow detail
     const [flowData, setFlowData] = useState<SymbolFlow | null>(null);
     const [flowLoading, setFlowLoading] = useState(false);
+    const [flowError, setFlowError] = useState<string | null>(null);
 
     // Backtest modal
     const [backtestTarget, setBacktestTarget] = useState<FlaggedContract | null>(null);
@@ -739,8 +1177,9 @@ export default function OptionFlowRadar({ onBack }: Props) {
     const applyRadarAlerts = useCallback((flagged: FlaggedContract[] | undefined) => {
         if (!flagged?.length) return;
         const newAlerts: FlaggedContract[] = [];
+        // Locked process trades first; otherwise Grade A / A+
         flagged
-            .filter(c => c.lis >= 70)
+            .filter(c => c.process_locked || c.grade === 'A+' || c.grade === 'A' || (c.actionable && c.lis >= 65))
             .forEach(c => {
                 const key = `${c.symbol}-${c.strike}-${c.type}-${(c.timestamp || '').slice(0, 16)}`;
                 if (!alertedRefs.current.has(key)) {
@@ -753,12 +1192,37 @@ export default function OptionFlowRadar({ onBack }: Props) {
         }
     }, []);
 
+    const commitScanPayload = useCallback((snap: any) => {
+        const flagged = snap.flagged || [];
+        const watch = snap.watch || [];
+        const alertBox = snap.alert_box || [];
+        setScanData({
+            success: true,
+            engine: snap.engine || 'v4-process',
+            scanned: snap.scanned ?? snap.completed ?? 0,
+            total_flagged: snap.total_flagged ?? flagged.length,
+            flagged,
+            watch,
+            alert_box: alertBox,
+            ideas: snap.ideas || [],
+            ideas_confirmed: snap.ideas_confirmed || [],
+            ideas_pullbacks: snap.ideas_pullbacks || [],
+            ideas_watch: snap.ideas_watch || [],
+            ideas_conflict: snap.ideas_conflict || [],
+            idea_counts: snap.idea_counts,
+            grade_counts: snap.grade_counts,
+            errors: snap.errors || [],
+            timestamp: snap.timestamp || new Date().toISOString(),
+            market_hours: snap.market_hours ?? true,
+        });
+    }, []);
+
     const runScan = useCallback(async (silent = false) => {
         const myRun = ++scanRunRef.current;
         stopScanPoll();
-        if (!silent) setScanLoading(true);
+        setScanLoading(true);
         setScanError(null);
-        setScanProgress(p => (silent && scanData ? p : 2));
+        if (!silent) setScanProgress(2);
         setScanCurrent(null);
 
         try {
@@ -778,28 +1242,20 @@ export default function OptionFlowRadar({ onBack }: Props) {
                     if (myRun !== scanRunRef.current) return;
                     setScanProgress(Number(snap.completion_pct ?? 0));
                     setScanCurrent(snap.current_symbol || null);
-                    const flagged = snap.flagged || [];
-                    if (flagged.length || snap.status === 'completed' || snap.status === 'failed') {
-                        setScanData({
-                            success: true,
-                            scanned: snap.scanned ?? snap.completed ?? 0,
-                            total_flagged: snap.total_flagged ?? flagged.length,
-                            flagged,
-                            errors: snap.errors || [],
-                            timestamp: snap.timestamp || new Date().toISOString(),
-                            market_hours: snap.market_hours ?? true,
-                        });
-                    }
                     const done =
                         snap.status === 'completed' ||
                         snap.status === 'failed' ||
                         snap.status === 'cancelled';
+                    // Keep the existing board on screen. Only replace scores
+                    // when this job is finished.
                     if (done) {
                         stopScanPoll();
                         setScanLoading(false);
                         setLastRefresh(new Date());
-                        applyRadarAlerts(flagged);
-                        if (snap.status === 'failed') {
+                        if (snap.status !== 'failed') {
+                            commitScanPayload(snap);
+                            applyRadarAlerts(snap.flagged || []);
+                        } else {
                             setScanError(snap.error_message || 'Radar job failed');
                         }
                     }
@@ -819,11 +1275,84 @@ export default function OptionFlowRadar({ onBack }: Props) {
             setScanError(e.message || 'Scan failed');
             setScanLoading(false);
         }
-    }, [applyRadarAlerts, minLis, optTypeFilter, scanData, stopScanPoll]);
+    }, [applyRadarAlerts, commitScanPayload, minLis, optTypeFilter, stopScanPoll]);
 
-    // Initial scan
+    const applyIdeaBoard = useCallback((board: any) => {
+        if (!board) return;
+        const ideas = board.active || board.ideas || [];
+        const confirmed = board.confirmed || board.ideas_confirmed || [];
+        const pullbacks = board.pullbacks || board.ideas_pullbacks || [];
+        const watch = board.watch || board.ideas_watch || [];
+        const conflict = board.conflict || board.ideas_conflict || [];
+        const counts = board.counts || board.idea_counts;
+        setScanData((prev) => ({
+            success: true,
+            scanned: prev?.scanned ?? 0,
+            total_flagged: prev?.total_flagged ?? (prev?.flagged?.length ?? 0),
+            flagged: prev?.flagged || [],
+            watch: prev?.watch || [],
+            alert_box: prev?.alert_box || [],
+            ideas,
+            ideas_confirmed: confirmed,
+            ideas_pullbacks: pullbacks,
+            ideas_watch: watch,
+            ideas_conflict: conflict,
+            idea_counts: counts,
+            grade_counts: prev?.grade_counts,
+            errors: prev?.errors || [],
+            timestamp: board.timestamp || prev?.timestamp || new Date().toISOString(),
+            market_hours: prev?.market_hours ?? true,
+            engine: board.engine || prev?.engine || 'v4-process',
+        }));
+    }, []);
+
+    // Paint last completed board immediately so a new scan does not blank the UI
     useEffect(() => {
-        runScan();
+        let cancelled = false;
+        (async () => {
+            try {
+                const last: any = await api.radar.getLastScan();
+                if (cancelled || !last) return;
+                const hasRows =
+                    (last.flagged || []).length ||
+                    (last.watch || []).length ||
+                    (last.alert_box || []).length ||
+                    (last.ideas || []).length ||
+                    (last.ideas_watch || []).length;
+                if (last.has_data || hasRows) {
+                    commitScanPayload(last);
+                }
+            } catch {
+                /* first visit — wait for scan */
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [commitScanPayload]);
+
+    // Process idea book is independent of a full radar scan — keep the board live
+    useEffect(() => {
+        let cancelled = false;
+        const pull = async () => {
+            try {
+                const board: any = await api.radar.getIdeas(8);
+                if (!cancelled && board?.success !== false) applyIdeaBoard(board);
+            } catch {
+                /* idea book empty until first scan */
+            }
+        };
+        pull();
+        const timer = setInterval(pull, 30_000);
+        return () => {
+            cancelled = true;
+            clearInterval(timer);
+        };
+    }, [applyIdeaBoard]);
+
+    // Initial + filter-triggered scan
+    useEffect(() => {
+        runScan(true);
         return () => {
             scanRunRef.current += 1;
             stopScanPoll();
@@ -847,11 +1376,13 @@ export default function OptionFlowRadar({ onBack }: Props) {
 
     const loadFlow = async (symbol: string) => {
         setFlowLoading(true);
+        setFlowError(null);
         try {
             const data: SymbolFlow = await api.radar.getSymbolFlow(symbol, 10);
             setFlowData(data);
+            if (data.warning) setFlowError(data.warning);
         } catch (e: any) {
-            console.error('Flow load error:', e);
+            setFlowError(e?.message || 'Failed to load symbol flow');
         } finally {
             setFlowLoading(false);
         }
@@ -864,11 +1395,19 @@ export default function OptionFlowRadar({ onBack }: Props) {
 
     // ── Derived data ─────────────────────────────────────────────
 
-    const sortedContracts = (scanData?.flagged ?? []).sort((a, b) => {
-        if (sortBy === 'lis') return b.lis - a.lis;
-        if (sortBy === 'oi_change_pct') return Math.abs(b.oi_change_pct) - Math.abs(a.oi_change_pct);
-        return b.volume - a.volume;
-    });
+    const sortRows = (rows: FlaggedContract[]) =>
+        [...rows].sort((a, b) => {
+            if (sortBy === 'lis') return b.lis - a.lis;
+            if (sortBy === 'oi_change_pct') return Math.abs(b.oi_change_pct) - Math.abs(a.oi_change_pct);
+            if (sortBy === 'unusual_score') return (b.unusual_score || 0) - (a.unusual_score || 0);
+            if (sortBy === 'composite_score')
+                return (b.composite_score || b.lis) - (a.composite_score || a.lis);
+            return b.volume - a.volume;
+        });
+
+    const sortedContracts = sortRows(scanData?.flagged ?? []);
+    const alertBoxRows = sortRows(scanData?.alert_box ?? []);
+    const watchRows = sortRows(scanData?.watch ?? []);
 
     const chartMarkers = flowData?.flagged_contracts.map(c => ({
         timestamp: new Date(c.timestamp).getTime() / 1000,
@@ -878,10 +1417,25 @@ export default function OptionFlowRadar({ onBack }: Props) {
 
     // ── LIS stats ─────────────────────────────────────────────────
 
-    const highConviction = sortedContracts.filter(c => c.lis >= 70).length;
-    const mediumConviction = sortedContracts.filter(c => c.lis >= 40 && c.lis < 70).length;
+    const processRows = [
+        ...(scanData?.ideas || []),
+        ...(scanData?.ideas_watch || []),
+    ];
+    const processBulls = processRows.filter(
+        i => i.direction === 'BULLISH' || i.side === 'LONG',
+    ).length;
+    const processBears = processRows.filter(
+        i => i.direction === 'BEARISH' || i.side === 'SHORT',
+    ).length;
+    const processBias =
+        processBulls > processBears ? 'BULLISH' : processBears > processBulls ? 'BEARISH' : processBulls ? 'MIXED' : 'NONE';
+
+    const highConviction = sortedContracts.filter(
+        c => c.grade === 'A+' || c.grade === 'A' || c.lis >= 70,
+    ).length;
     const callCount = sortedContracts.filter(c => c.type === 'CE').length;
     const putCount = sortedContracts.filter(c => c.type === 'PE').length;
+    const gradeCounts = scanData?.grade_counts;
 
     // ── UI helpers ────────────────────────────────────────────────
 
@@ -947,10 +1501,11 @@ export default function OptionFlowRadar({ onBack }: Props) {
 
                     <div>
                         <h1 className="text-lg font-black tracking-tight text-white uppercase">
-                            🎯 Option Flow Radar
+                            🎯 Option Flow Radar{' '}
+                            <span className="text-cyan-500 text-xs not-italic font-black">v4</span>
                         </h1>
                         <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">
-                            Detect Institutional Accumulation Before The First Big Candle
+                            Locked process trades · pivots / CPR / OI walls · persistence
                         </p>
                     </div>
 
@@ -979,10 +1534,9 @@ export default function OptionFlowRadar({ onBack }: Props) {
 
                         <button
                             onClick={() => runScan()}
-                            disabled={scanLoading}
-                            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase rounded-full transition-all disabled:opacity-50"
+                            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase rounded-full transition-all"
                         >
-                            {scanLoading ? 'Scanning...' : '↻ Refresh'}
+                            {scanLoading ? 'Updating…' : '↻ Refresh'}
                         </button>
 
                         {lastRefresh && (
@@ -994,9 +1548,12 @@ export default function OptionFlowRadar({ onBack }: Props) {
                 </div>
 
                 {/* Tab bar */}
-                <div className="max-w-screen-2xl mx-auto px-4 flex gap-1 pb-0">
+                <div className="max-w-screen-2xl mx-auto px-4 flex gap-1 pb-0 flex-wrap">
                     {[
-                        { id: 'live', label: '📡 Live Monitor' },
+                        { id: 'process', label: `🔒 Process (${scanData?.idea_counts?.active ?? scanData?.ideas?.length ?? 0})` },
+                        { id: 'live', label: `📡 Tape A/A+ (${sortedContracts.length})` },
+                        { id: 'alerts', label: `🚨 Alert Box (${alertBoxRows.length})` },
+                        { id: 'watch', label: `👁 Watch B (${watchRows.length})` },
                         { id: 'flow', label: '📊 Stock Flow Detail' },
                         { id: 'backtest_list', label: '🧪 Signal Log' },
                     ].map(t => (
@@ -1032,23 +1589,189 @@ export default function OptionFlowRadar({ onBack }: Props) {
                 {/* ══════════════════════════════════════════════
                     TAB: LIVE MONITOR
                 ══════════════════════════════════════════════ */}
-                {tab === 'live' && (
+                {tab === 'process' && (
                     <div className="space-y-4">
-
-                        {/* Stats row */}
-                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                        <div className={`p-4 rounded-xl border ${
+                            processBias === 'BULLISH'
+                                ? 'border-emerald-500/40 bg-emerald-500/10'
+                                : processBias === 'BEARISH'
+                                  ? 'border-rose-500/40 bg-rose-500/10'
+                                  : 'border-cyan-500/20 bg-cyan-500/5'
+                        }`}>
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                    <p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                                        Process signal
+                                    </p>
+                                    <p className={`text-2xl font-black ${
+                                        processBias === 'BULLISH'
+                                            ? 'text-emerald-400'
+                                            : processBias === 'BEARISH'
+                                              ? 'text-rose-400'
+                                              : 'text-zinc-300'
+                                    }`}>
+                                        {processBias === 'NONE' ? 'NO SIGNAL YET' : `${processBias} SIGNAL`}
+                                    </p>
+                                    <p className="text-[11px] text-zinc-400 mt-0.5">
+                                        {processBulls} bullish · {processBears} bearish
+                                        {scanLoading ? ' · scores update when this scan finishes' : ''}
+                                    </p>
+                                </div>
+                                <div className="flex gap-2">
+                                    <span className="px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-300 text-xs font-black">
+                                        BULL {processBulls}
+                                    </span>
+                                    <span className="px-3 py-1.5 rounded-lg bg-rose-500/15 text-rose-300 text-xs font-black">
+                                        BEAR {processBears}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                             {[
-                                { label: 'Symbols Scanned', value: scanData?.scanned ?? '—', color: 'text-zinc-300' },
-                                { label: 'Flagged Contracts', value: scanData?.total_flagged ?? '—', color: 'text-blue-400' },
-                                { label: 'High Conviction (≥70)', value: highConviction, color: 'text-emerald-400' },
-                                { label: 'Calls / Puts', value: `${callCount} / ${putCount}`, color: 'text-amber-400' },
-                                { label: 'Active Alerts', value: alerts.length, color: 'text-rose-400' },
+                                { label: 'Confirmed MTF', value: scanData?.idea_counts?.confirmed ?? scanData?.ideas_confirmed?.length ?? 0, color: 'text-emerald-400' },
+                                { label: 'HQ Pullback', value: scanData?.idea_counts?.pullbacks ?? scanData?.ideas_pullbacks?.length ?? 0, color: 'text-amber-400' },
+                                { label: 'Watch', value: scanData?.idea_counts?.watch ?? scanData?.ideas_watch?.length ?? 0, color: 'text-zinc-300' },
+                                { label: 'Conflict / no trade', value: scanData?.idea_counts?.conflict ?? scanData?.ideas_conflict?.length ?? 0, color: 'text-rose-400' },
                             ].map(s => (
                                 <div key={s.label} className="bg-[#0e1420] border border-zinc-800 rounded-xl p-3 text-center">
                                     <p className={`text-2xl font-black ${s.color}`}>{s.value}</p>
                                     <p className="text-[9px] font-bold text-zinc-600 uppercase mt-0.5">{s.label}</p>
                                 </div>
                             ))}
+                        </div>
+
+                        {((scanData?.ideas_confirmed || scanData?.ideas || []).length > 0) ? (
+                            <div className="space-y-3">
+                                <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Confirmed momentum — 4H side locked</h3>
+                                {(scanData?.ideas_confirmed?.length ? scanData.ideas_confirmed : (scanData?.ideas || []).filter(i => !i.hq_pullback)).map(idea => (
+                                    <ProcessIdeaCard
+                                        key={`act-${idea.symbol}`}
+                                        idea={idea}
+                                        onOpen={(it) => {
+                                            setSelectedContract({
+                                                timestamp: it.locked_at || new Date().toISOString(),
+                                                symbol: it.symbol,
+                                                name: it.name,
+                                                expiry: '',
+                                                strike: it.strike,
+                                                type: (it.opt_type as 'CE' | 'PE') || 'CE',
+                                                ltp: 0,
+                                                ltp_change_pct: 0,
+                                                oi: 0,
+                                                oi_change_pct: 0,
+                                                volume: 0,
+                                                vol_3day_avg: 0,
+                                                vol_spike_ratio: 0,
+                                                iv: null,
+                                                delta: null,
+                                                gamma: null,
+                                                theta: null,
+                                                vega: null,
+                                                greek_interpretation: null,
+                                                spot: it.spot || 0,
+                                                spot_change_pct: 0,
+                                                vwap_dev_pct: 0,
+                                                above_ema20: true,
+                                                atm_dist_pct: 0,
+                                                lis: it.lis || 0,
+                                                signal: { signal: it.signal || '', label: it.label, icon: '', color: '' },
+                                                conviction: { level: 'HIGH', icon: '🔒', label: 'Locked' },
+                                                unusual_flags: it.location_tags || [],
+                                                process_locked: true,
+                                                idea: it,
+                                            });
+                                            setTab('flow');
+                                            loadFlow(it.symbol);
+                                        }}
+                                    />
+                                ))}
+                            </div>
+                        ) : (scanData?.ideas_pullbacks || []).length === 0 ? (
+                            <div className="flex flex-col items-center justify-center py-14 text-center border border-zinc-800 rounded-xl bg-[#0e1420]">
+                                <p className="text-sm font-bold text-zinc-400">No confirmed MTF momentum yet</p>
+                                <p className="text-xs text-zinc-600 mt-1 max-w-md">
+                                    Daily+4H+1H must agree (or 1H must be a closed-bar turn). 15m only times the entry.
+                                    First 15 minutes and 0–2 DTE cannot open a new confirm.
+                                </p>
+                            </div>
+                        ) : null}
+
+                        {(scanData?.ideas_pullbacks || []).length > 0 && (
+                            <div className="space-y-3">
+                                <h3 className="text-[10px] font-black text-amber-400 uppercase tracking-widest">
+                                    High-quality pullback — often the best entry
+                                </h3>
+                                {(scanData?.ideas_pullbacks || []).map(idea => (
+                                    <ProcessIdeaCard
+                                        key={`pb-${idea.symbol}`}
+                                        idea={idea}
+                                        onOpen={(it) => {
+                                            setTab('flow');
+                                            loadFlow(it.symbol);
+                                        }}
+                                    />
+                                ))}
+                            </div>
+                        )}
+
+                        {(scanData?.ideas_watch || []).length > 0 && (
+                            <div className="space-y-2">
+                                <h3 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Watch — not sure yet</h3>
+                                {(scanData?.ideas_watch || []).slice(0, 6).map(idea => (
+                                    <ProcessIdeaCard
+                                        key={`w-${idea.symbol}`}
+                                        idea={idea}
+                                        onOpen={(it) => {
+                                            setTab('flow');
+                                            loadFlow(it.symbol);
+                                        }}
+                                    />
+                                ))}
+                            </div>
+                        )}
+
+                        {(scanData?.ideas_conflict || []).length > 0 && (
+                            <div className="space-y-2">
+                                <h3 className="text-[10px] font-black text-rose-400/70 uppercase tracking-widest">Conflict — stand aside</h3>
+                                {(scanData?.ideas_conflict || []).slice(0, 4).map(idea => (
+                                    <ProcessIdeaCard key={`c-${idea.symbol}`} idea={idea} onOpen={(it) => { setTab('flow'); loadFlow(it.symbol); }} />
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {tab === 'live' && (
+                    <div className="space-y-4">
+
+                        {/* Stats row */}
+                        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                            {[
+                                { label: 'Symbols Scanned', value: scanData?.scanned ?? '—', color: 'text-zinc-300' },
+                                { label: 'Grade A / A+', value: scanData?.total_flagged ?? sortedContracts.length, color: 'text-emerald-400' },
+                                { label: 'Alert Box', value: alertBoxRows.length, color: 'text-rose-400' },
+                                { label: 'Watch (B)', value: watchRows.length, color: 'text-amber-400' },
+                                {
+                                    label: 'A+ / A / B',
+                                    value: gradeCounts
+                                        ? `${gradeCounts['A+'] || 0}/${gradeCounts.A || 0}/${gradeCounts.B || 0}`
+                                        : '—',
+                                    color: 'text-cyan-400',
+                                },
+                                { label: 'CE / PE (A board)', value: `${callCount}/${putCount}`, color: 'text-blue-400' },
+                            ].map(s => (
+                                <div key={s.label} className="bg-[#0e1420] border border-zinc-800 rounded-xl p-3 text-center">
+                                    <p className={`text-2xl font-black ${s.color}`}>{s.value}</p>
+                                    <p className="text-[9px] font-bold text-zinc-600 uppercase mt-0.5">{s.label}</p>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="p-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 text-[11px] text-zinc-400">
+                            <strong className="text-cyan-400">v3 multi-layer:</strong> CE/PE flow matrix → vol ≥1.5× &amp; OI ≥8% →
+                            ATM ≤7% + Greek quality → underlying context → <strong>Grade A+/A</strong> on this board.
+                            Unusual size goes to <strong>Alert Box</strong> (does not auto-trade). Grade B is Watch only.
                         </div>
 
                         {/* Filters */}
@@ -1098,7 +1821,9 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                     onChange={e => setSortBy(e.target.value as typeof sortBy)}
                                     className="bg-zinc-900 border border-zinc-700 text-zinc-300 text-xs rounded-lg px-2 py-1"
                                 >
+                                    <option value="composite_score">Composite</option>
                                     <option value="lis">LIS Score</option>
+                                    <option value="unusual_score">Unusual Score</option>
                                     <option value="oi_change_pct">OI Change %</option>
                                     <option value="volume">Volume</option>
                                 </select>
@@ -1113,16 +1838,8 @@ export default function OptionFlowRadar({ onBack }: Props) {
                             </div>
                         )}
 
-                        {/* Loading */}
-                        {scanLoading && (
-                            <div className="flex items-center gap-3 p-4 bg-[#0e1420] border border-zinc-800 rounded-xl">
-                                <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                                <p className="text-xs text-zinc-400">Scanning option chains across watchlist...</p>
-                            </div>
-                        )}
-
-                        {/* Main table */}
-                        {!scanLoading && sortedContracts.length > 0 && (
+                        {/* Main table — stay visible while a new scan updates scores */}
+                        {sortedContracts.length > 0 && (
                             <div className="bg-[#0e1420] border border-zinc-800 rounded-xl overflow-hidden">
                                 <div className="overflow-x-auto">
                                     <table className="w-full">
@@ -1132,10 +1849,10 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                                 <th className="py-2 text-left">Symbol</th>
                                                 <th className="py-2 text-center">Strike</th>
                                                 <th className="py-2 text-center">Type</th>
+                                                <th className="py-2 text-center">Grade</th>
                                                 <th className="py-2 text-right">OI Chg%</th>
-                                                <th className="py-2 text-right">Volume</th>
-                                                <th className="py-2 text-right">Option LTP</th>
-                                                <th className="py-2 text-right">IV</th>
+                                                <th className="py-2 text-right">Vol×</th>
+                                                <th className="py-2 text-right">GQ</th>
                                                 <th className="py-2 text-right">Spot Chg%</th>
                                                 <th className="py-2 text-center">Signal</th>
                                                 <th className="py-2 text-center">LIS</th>
@@ -1158,9 +1875,17 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                                     </td>
                                                     <td className="py-2.5">
                                                         <div>
-                                                            <p className="text-sm font-black text-white">{c.name}</p>
+                                                            <p className="text-sm font-black text-white flex items-center gap-1.5">
+                                                                {c.name}
+                                                                {c.process_locked && (
+                                                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                                                                        LOCKED
+                                                                    </span>
+                                                                )}
+                                                            </p>
                                                             <p className="text-[9px] text-zinc-500">
                                                                 Exp: {formatExpiryText(c.expiry)} • ATM dist: {c.atm_dist_pct?.toFixed(1)}%
+                                                                {c.location_score != null ? ` • loc ${c.location_score}` : ''}
                                                             </p>
                                                         </div>
                                                     </td>
@@ -1176,20 +1901,19 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                                             {c.type}
                                                         </span>
                                                     </td>
+                                                    <td className="py-2.5 text-center">
+                                                        <GradeBadge grade={c.grade} />
+                                                    </td>
                                                     <td className={`py-2.5 text-right text-sm font-bold tabular-nums ${oiColor(c.oi_change_pct)}`}>
                                                         {c.oi_change_pct > 0 ? '+' : ''}{c.oi_change_pct?.toFixed(1)}%
                                                     </td>
                                                     <td className="py-2.5 text-right text-xs text-zinc-300 tabular-nums">
-                                                        {formatNum(c.volume)}
+                                                        {(c.vol_spike_ratio ?? 0).toFixed(1)}×
                                                     </td>
-                                                    <td className="py-2.5 text-right">
-                                                        <p className="text-sm font-bold text-zinc-200">₹{c.ltp?.toFixed(1)}</p>
-                                                        <p className={`text-[10px] font-bold ${c.ltp_change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                                            {c.ltp_change_pct >= 0 ? '+' : ''}{c.ltp_change_pct?.toFixed(1)}%
-                                                        </p>
-                                                    </td>
-                                                    <td className="py-2.5 text-right text-xs text-zinc-400">
-                                                        {c.iv ? `${c.iv.toFixed(1)}%` : '—'}
+                                                    <td className="py-2.5 text-right text-xs font-mono text-purple-300">
+                                                        {c.greek_quality?.score != null
+                                                            ? `${c.greek_quality.score}/20`
+                                                            : '—'}
                                                     </td>
                                                     <td className={`py-2.5 text-right text-xs font-bold ${c.spot_change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                                         {c.spot_change_pct >= 0 ? '+' : ''}{c.spot_change_pct?.toFixed(2)}%
@@ -1216,13 +1940,130 @@ export default function OptionFlowRadar({ onBack }: Props) {
                             </div>
                         )}
 
-                        {!scanLoading && sortedContracts.length === 0 && !scanError && (
+                        {sortedContracts.length === 0 && !scanError && (
                             <div className="flex flex-col items-center justify-center py-16 text-center">
                                 <p className="text-4xl mb-3">🔍</p>
-                                <p className="text-sm font-bold text-zinc-400">No signals found</p>
+                                <p className="text-sm font-bold text-zinc-400">No Grade A/A+ signals</p>
                                 <p className="text-xs text-zinc-600 mt-1">
-                                    {minLis > 0 ? `Try lowering Min LIS below ${minLis}` : 'Market may be closed or no unusual activity detected'}
+                                    {watchRows.length || alertBoxRows.length
+                                        ? `Check Alert Box (${alertBoxRows.length}) or Watch (${watchRows.length}) — multi-layer filter is strict by design.`
+                                        : minLis > 0
+                                          ? `Try lowering Min LIS below ${minLis}`
+                                          : 'No multi-layer confirmed flow right now (or market closed).'}
                                 </p>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* ══════════════════════════════════════════════
+                    TAB: ALERT BOX (unusual / big player)
+                ══════════════════════════════════════════════ */}
+                {tab === 'alerts' && (
+                    <div className="space-y-4">
+                        <div className="p-3 rounded-xl border border-rose-500/30 bg-rose-500/5 text-[11px] text-zinc-400">
+                            <strong className="text-rose-400">Alert Box</strong> — unusual / institutional-size footprint.
+                            Sorted by Unusual Score. Does <strong>not</strong> auto-promote to trade; review manually.
+                        </div>
+                        {alertBoxRows.length === 0 ? (
+                            <div className="py-16 text-center text-zinc-500 text-sm">No unusual alerts this scan.</div>
+                        ) : (
+                            <div className="bg-[#0e1420] border border-zinc-800 rounded-xl overflow-x-auto">
+                                <table className="w-full text-xs">
+                                    <thead>
+                                        <tr className="border-b border-zinc-800 text-[10px] text-zinc-500 uppercase">
+                                            <th className="py-2 pl-4 text-left">Symbol</th>
+                                            <th className="py-2 text-center">Strike</th>
+                                            <th className="py-2 text-center">Grade</th>
+                                            <th className="py-2 text-right">Unusual</th>
+                                            <th className="py-2 text-right">OI add</th>
+                                            <th className="py-2 text-right">Vol×</th>
+                                            <th className="py-2 text-center">Signal</th>
+                                            <th className="py-2 text-center">LIS</th>
+                                            <th className="py-2 text-left">Why</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {alertBoxRows.map((c, i) => (
+                                            <tr
+                                                key={`ab-${c.symbol}-${c.strike}-${c.type}-${i}`}
+                                                onClick={() => { handleSelectContract(c); setTab('flow'); }}
+                                                className="border-b border-zinc-800/50 cursor-pointer hover:bg-zinc-800/30"
+                                            >
+                                                <td className="py-2.5 pl-4 font-black text-white">{c.name}</td>
+                                                <td className="py-2.5 text-center font-bold">{c.strike} {c.type}</td>
+                                                <td className="py-2.5 text-center"><GradeBadge grade={c.grade} /></td>
+                                                <td className="py-2.5 text-right font-black text-rose-400">{c.unusual_score ?? '—'}</td>
+                                                <td className="py-2.5 text-right font-mono text-zinc-300">{formatNum(c.oi_added || 0)}</td>
+                                                <td className="py-2.5 text-right">{(c.vol_spike_ratio ?? 0).toFixed(1)}×</td>
+                                                <td className="py-2.5 text-center"><SignalBadge signal={c.signal} /></td>
+                                                <td className="py-2.5 text-center font-black text-emerald-400">{Math.round(c.lis)}</td>
+                                                <td className="py-2.5 text-[10px] text-zinc-500 max-w-[220px]">
+                                                    {(c.unusual_flags || []).slice(0, 3).join(' · ')}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* ══════════════════════════════════════════════
+                    TAB: WATCH (Grade B)
+                ══════════════════════════════════════════════ */}
+                {tab === 'watch' && (
+                    <div className="space-y-4">
+                        <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/5 text-[11px] text-zinc-400">
+                            <strong className="text-amber-400">Watch list</strong> — Grade B: decent flow missing 1–2 confirmation layers.
+                            Not high-conviction; monitor only.
+                        </div>
+                        {watchRows.length === 0 ? (
+                            <div className="py-16 text-center text-zinc-500 text-sm">No Grade B watches this scan.</div>
+                        ) : (
+                            <div className="bg-[#0e1420] border border-zinc-800 rounded-xl overflow-x-auto">
+                                <table className="w-full text-xs">
+                                    <thead>
+                                        <tr className="border-b border-zinc-800 text-[10px] text-zinc-500 uppercase">
+                                            <th className="py-2 pl-4 text-left">Symbol</th>
+                                            <th className="py-2 text-center">Strike</th>
+                                            <th className="py-2 text-center">Layers</th>
+                                            <th className="py-2 text-right">GQ</th>
+                                            <th className="py-2 text-center">Signal</th>
+                                            <th className="py-2 text-center">LIS</th>
+                                            <th className="py-2 text-left">Missing</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {watchRows.map((c, i) => {
+                                            const layers = c.layers || {};
+                                            const missing = Object.entries(layers)
+                                                .filter(([, v]) => !v)
+                                                .map(([k]) => k)
+                                                .join(', ');
+                                            return (
+                                                <tr
+                                                    key={`w-${c.symbol}-${c.strike}-${c.type}-${i}`}
+                                                    onClick={() => { handleSelectContract(c); setTab('flow'); }}
+                                                    className="border-b border-zinc-800/50 cursor-pointer hover:bg-zinc-800/30"
+                                                >
+                                                    <td className="py-2.5 pl-4 font-black text-white">{c.name}</td>
+                                                    <td className="py-2.5 text-center font-bold">{c.strike} {c.type}</td>
+                                                    <td className="py-2.5 text-center font-mono text-amber-300">
+                                                        {c.layers_passed ?? '—'}/6
+                                                    </td>
+                                                    <td className="py-2.5 text-right text-purple-300">
+                                                        {c.greek_quality?.score != null ? `${c.greek_quality.score}/20` : '—'}
+                                                    </td>
+                                                    <td className="py-2.5 text-center"><SignalBadge signal={c.signal} /></td>
+                                                    <td className="py-2.5 text-center font-black">{Math.round(c.lis)}</td>
+                                                    <td className="py-2.5 text-[10px] text-zinc-500">{missing || '—'}</td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
                             </div>
                         )}
                     </div>
@@ -1244,6 +2085,18 @@ export default function OptionFlowRadar({ onBack }: Props) {
                             </div>
                         ) : (
                             <>
+                                {flowError && (
+                                    <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-200">
+                                        {flowError}
+                                        <button
+                                            type="button"
+                                            onClick={() => selectedContract && loadFlow(selectedContract.symbol)}
+                                            className="ml-3 underline"
+                                        >
+                                            Retry
+                                        </button>
+                                    </div>
+                                )}
                                 {/* Selected contract header */}
                                 <div className="flex items-start gap-4 p-4 bg-[#0e1420] border border-zinc-800 rounded-xl">
                                     <LISRing lis={selectedContract.lis} />
@@ -1313,6 +2166,71 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                     </div>
                                 ) : flowData ? (
                                     <>
+                                        {(flowData.idea || selectedContract.idea) && (
+                                            <div className={`p-4 rounded-xl border ${
+                                                (flowData.idea || selectedContract.idea)?.status === 'ACTIVE'
+                                                    ? 'border-cyan-500/40 bg-cyan-500/8'
+                                                    : 'border-zinc-700 bg-[#0e1420]'
+                                            }`}>
+                                                <p className="text-[10px] font-black uppercase text-cyan-400 mb-1">
+                                                    Process idea · {(flowData.idea || selectedContract.idea)?.status}
+                                                </p>
+                                                <p className="text-sm text-zinc-200">
+                                                    {(flowData.idea || selectedContract.idea)?.thesis}
+                                                </p>
+                                                <div className="flex flex-wrap gap-4 mt-2 text-[11px] text-zinc-400">
+                                                    <span>Entry zone <b className="text-zinc-100">
+                                                        {(flowData.idea || selectedContract.idea)?.entry_zone?.from != null
+                                                            ? `${fmtPx((flowData.idea || selectedContract.idea)?.entry_zone?.from)}–${fmtPx((flowData.idea || selectedContract.idea)?.entry_zone?.to)}`
+                                                            : `${(flowData.idea || selectedContract.idea)?.entry_label || ''} ${fmtPx((flowData.idea || selectedContract.idea)?.entry)}`}
+                                                    </b></span>
+                                                    <span>Stop <b className="text-rose-300">{fmtPx((flowData.idea || selectedContract.idea)?.stop)}</b></span>
+                                                    <span>Target <b className="text-emerald-300">{(flowData.idea || selectedContract.idea)?.target_label || ''} {fmtPx((flowData.idea || selectedContract.idea)?.target)}</b></span>
+                                                    <span>Inv <b className="text-zinc-200">{fmtPx((flowData.idea || selectedContract.idea)?.invalidation)}</b></span>
+                                                    <span>Health {(flowData.idea || selectedContract.idea)?.cluster_health || '—'}</span>
+                                                </div>
+                                                {((flowData.idea || selectedContract.idea)?.exit_warnings || []).length > 0 && (
+                                                    <p className="text-[11px] font-bold text-rose-400 mt-1">
+                                                        {(flowData.idea || selectedContract.idea)?.exit_warnings?.join(' · ')}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {flowData.levels && (
+                                            <div className="p-4 bg-[#0e1420] border border-zinc-800 rounded-xl">
+                                                <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-3">
+                                                    Institutional levels
+                                                </h3>
+                                                <div className="grid grid-cols-3 md:grid-cols-6 gap-2 text-[10px]">
+                                                    {[
+                                                        ['P', flowData.levels.day?.pivots?.P],
+                                                        ['S1', flowData.levels.day?.pivots?.S1],
+                                                        ['R1', flowData.levels.day?.pivots?.R1],
+                                                        ['VWAP', flowData.levels.session?.vwap],
+                                                        ['Put wall', flowData.levels.structure?.put_wall],
+                                                        ['Call wall', flowData.levels.structure?.call_wall],
+                                                        ['PDH', flowData.levels.day?.pdh],
+                                                        ['PDL', flowData.levels.day?.pdl],
+                                                        ['Cam S3', flowData.levels.day?.camarilla?.S3],
+                                                        ['Cam R3', flowData.levels.day?.camarilla?.R3],
+                                                        ['CPR TC', flowData.levels.day?.cpr?.TC],
+                                                        ['Max pain', flowData.levels.structure?.max_pain],
+                                                    ].map(([k, v]) => (
+                                                        <div key={String(k)} className="p-2 rounded-lg bg-zinc-900/70 border border-zinc-800">
+                                                            <p className="text-zinc-500 uppercase font-bold">{k}</p>
+                                                            <p className="text-zinc-100 font-black">{fmtPx(v as number)}</p>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                                <p className="text-[10px] text-zinc-500 mt-2">
+                                                    {flowData.levels.pivot_side} · {flowData.levels.camarilla_regime}
+                                                    {flowData.levels.futures?.label ? ` · ${flowData.levels.futures.label}` : ''}
+                                                    {flowData.levels.structure?.pcr_regime ? ` · PCR ${flowData.levels.structure.pcr_regime}` : ''}
+                                                </p>
+                                            </div>
+                                        )}
+
                                         {/* Underlying meta */}
                                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                             {[

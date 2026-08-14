@@ -22,6 +22,15 @@ interface ConfluenceCard {
     source_names: string[];
     sources: ConfluenceSource[];
     tradeable: boolean;
+    process_locked?: boolean;
+    process_idea?: {
+        status?: string;
+        recipe?: string;
+        invalidation?: number;
+        target?: number;
+        entry?: number;
+        stop?: number;
+    } | null;
 }
 
 interface ConfluenceData {
@@ -74,6 +83,15 @@ export default function ConfluencePanel() {
     const summary = data?.summary;
     const cards = (data?.actionable?.length ? data.actionable : data?.cards || []).slice(0, 8);
 
+    const triggerRadar = async () => {
+        try {
+            await api.confluence.triggerRadar();
+            await refetch();
+        } catch {
+            await refetch();
+        }
+    };
+
     return (
         <div className="p-5 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-sm">
             <div className="flex items-start justify-between gap-3 mb-4">
@@ -85,12 +103,20 @@ export default function ConfluencePanel() {
                         MA + Radar + Intelligence agree before tradeable
                     </p>
                 </div>
-                <button
-                    onClick={() => refetch()}
-                    className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
-                >
-                    {isFetching ? '…' : 'Refresh'}
-                </button>
+                <div className="flex items-center gap-1">
+                    <button
+                        onClick={triggerRadar}
+                        className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-violet-500/15 text-violet-400 border border-violet-500/30 hover:bg-violet-500/25"
+                    >
+                        Run radar
+                    </button>
+                    <button
+                        onClick={() => refetch()}
+                        className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                    >
+                        {isFetching ? '…' : 'Refresh'}
+                    </button>
+                </div>
             </div>
 
             {/* Summary chips */}
@@ -178,6 +204,11 @@ export default function ConfluencePanel() {
                                 <span className="text-sm font-bold text-zinc-900 dark:text-white">
                                     {card.name}
                                 </span>
+                                {card.process_locked && (
+                                    <span className="px-1.5 py-0.5 text-[9px] font-black rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">
+                                        LOCKED {card.process_idea?.recipe || ''}
+                                    </span>
+                                )}
                                 <span
                                     className={`text-[10px] font-black uppercase ${dirStyle[card.direction] || 'text-zinc-500'}`}
                                 >
@@ -205,6 +236,14 @@ export default function ConfluencePanel() {
                             {card.sources?.[0]?.detail && (
                                 <p className="text-[10px] text-zinc-500 mt-1 truncate">
                                     {card.sources[0].detail}
+                                </p>
+                            )}
+                            {card.process_idea && (card.process_idea.entry != null || card.process_idea.target != null) && (
+                                <p className="text-[10px] text-cyan-500/80 mt-1">
+                                    {card.process_idea.entry != null ? `Entry ${card.process_idea.entry}` : ''}
+                                    {card.process_idea.stop != null ? ` · SL ${card.process_idea.stop}` : ''}
+                                    {card.process_idea.target != null ? ` · Tgt ${card.process_idea.target}` : ''}
+                                    {card.process_idea.invalidation != null ? ` · Inv ${card.process_idea.invalidation}` : ''}
                                 </p>
                             )}
                         </div>

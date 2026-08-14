@@ -962,6 +962,72 @@ async def get_live_trade_signal(symbol: str):
             symbol, spot_price, atm_strike,
             oi_analysis, greeks_analysis, intel_analysis
         )
+
+        process_idea = None
+        try:
+            from app.services.idea_book import get_idea_book
+
+            process_idea = get_idea_book().get(symbol)
+        except Exception:
+            process_idea = None
+
+        # Locked process trade overrides the flickering live-signal card
+        if process_idea and process_idea.get("status") == "ACTIVE":
+            ex = process_idea.get("execution") or {}
+            inst = ex.get("instrument") or {}
+            side = process_idea.get("side")
+            opt = (
+                process_idea.get("trade_opt_type")
+                or inst.get("opt_type")
+                or process_idea.get("opt_type")
+                or ("CE" if side == "LONG" else "PE")
+            )
+            strike = (
+                process_idea.get("trade_strike")
+                or inst.get("strike")
+                or process_idea.get("strike")
+            )
+            entry = (
+                process_idea.get("entry")
+                if process_idea.get("entry") is not None
+                else ex.get("entry")
+            )
+            stop = (
+                process_idea.get("stop")
+                if process_idea.get("stop") is not None
+                else ex.get("stop")
+            )
+            target = (
+                process_idea.get("target")
+                if process_idea.get("target") is not None
+                else ex.get("target")
+            )
+            entry_label = process_idea.get("entry_label") or ex.get("entry_label")
+            trade_rec = {
+                "action": "ACTIONABLE",
+                "bias": process_idea.get("direction"),
+                "option_type": opt,
+                "strike": strike,
+                "confidence": "HIGH",
+                "expert_note": process_idea.get("thesis"),
+                "trades": [
+                    {
+                        "action": "BUY",
+                        "type": "PROCESS",
+                        "option_type": opt,
+                        "strike": strike,
+                        "entry_zone": (
+                            f"{entry_label} {entry}"
+                            if entry is not None
+                            else f"spot {spot_price}"
+                        ),
+                        "stop_loss": stop,
+                        "target": target,
+                        "confidence": "HIGH",
+                        "reason": process_idea.get("thesis"),
+                    }
+                ],
+            }
         
         return {
             "symbol": symbol,
@@ -971,8 +1037,12 @@ async def get_live_trade_signal(symbol: str):
             "oi_analysis": oi_analysis,
             "greeks_analysis": greeks_analysis,
             "intel_state": intel_analysis.get("state"),
-            "tradable": intel_analysis.get("tradable"),
+            "tradable": bool(
+                (process_idea and process_idea.get("status") == "ACTIVE")
+                or intel_analysis.get("tradable")
+            ),
             "trade_recommendation": trade_rec,
+            "process_idea": process_idea,
             "timestamp": chain_data.get("timestamp")
         }
     except HTTPException:

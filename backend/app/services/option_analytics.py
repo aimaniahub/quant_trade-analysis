@@ -743,6 +743,10 @@ def compute_premium_dislocation(
 
 
 def compute_oi_magnets(chain: List[Dict], spot: float) -> Dict[str, Any]:
+    """
+    Call wall = highest Call OI at or above spot (resistance).
+    Put wall  = highest Put OI at or below spot (support).
+    """
     call_levels = []
     put_levels = []
     for row in chain:
@@ -756,8 +760,16 @@ def compute_oi_magnets(chain: List[Dict], spot: float) -> Dict[str, Any]:
 
     call_levels.sort(key=lambda x: x["oi"], reverse=True)
     put_levels.sort(key=lambda x: x["oi"], reverse=True)
-    res = call_levels[0] if call_levels else None
-    sup = put_levels[0] if put_levels else None
+
+    # Side-of-spot walls (tolerance ~0.2% so ATM counts)
+    lo_band = spot * 0.998 if spot else 0
+    hi_band = spot * 1.002 if spot else 0
+    res = next((x for x in call_levels if x["strike"] >= lo_band), None)
+    sup = next((x for x in put_levels if x["strike"] <= hi_band), None)
+    if res is None and call_levels:
+        res = call_levels[0]
+    if sup is None and put_levels:
+        sup = put_levels[0]
 
     return {
         "resistance": res["strike"] if res else None,

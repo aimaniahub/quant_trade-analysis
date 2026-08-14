@@ -82,7 +82,7 @@ class RadarScheduler:
                 SCHEDULE_SYMBOLS,
                 0,       # min_lis
                 None,    # opt type
-                6,       # strike_count (lighter)
+                10,      # strike_count — enough for ±10% OI clusters
             )
             if result.get("success"):
                 self._publish_hits(result.get("flagged") or [])

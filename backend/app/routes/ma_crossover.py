@@ -126,17 +126,20 @@ async def get_nearing(limit: int = 50):
 
 @router.post("/ma-crossover/start")
 async def start_service():
-    """Start the MA crossover scan loop."""
-    svc = get_ma_crossover_service()
-    if svc.get_status()["running"]:
-        return {"status": "already_running"}
-    await svc.start()
-    return {"status": "started"}
+    """Legacy multi-TF MA scanner — disabled (use 7/200 strategy instead)."""
+    return {
+        "status": "disabled",
+        "success": False,
+        "message": (
+            "Legacy MA crossover is disabled to protect Fyers rate limits. "
+            "Use 7/200 Cross: GET /api/v1/strategies/ma7200/scan"
+        ),
+    }
 
 
 @router.post("/ma-crossover/stop")
 async def stop_service():
-    """Stop the MA crossover scan loop."""
+    """Stop the MA crossover scan loop if it was running."""
     svc = get_ma_crossover_service()
     await svc.stop()
     return {"status": "stopped"}
@@ -144,15 +147,13 @@ async def stop_service():
 
 @router.post("/ma-crossover/scan")
 async def trigger_scan():
-    """Trigger a manual MA crossover scan immediately in the background."""
-    svc = get_ma_crossover_service()
-    if not svc.market_service._get_fyers():
-        raise HTTPException(status_code=400, detail="Fyers API is not authenticated. Please log in first.")
-    
-    triggered = await svc.trigger_manual_scan()
-    if not triggered:
-        return {"status": "already_scanning", "message": "A scan is already in progress."}
-    return {"status": "scanning", "message": "Manual scan triggered successfully."}
+    """Legacy manual scan — disabled. Redirect clients to ma7200."""
+    return {
+        "status": "disabled",
+        "success": False,
+        "message": "Use /api/v1/strategies/ma7200/scan for 15m 7/200 EMA + option confirmation.",
+        "redirect": "/api/v1/strategies/ma7200/scan",
+    }
 
 
 

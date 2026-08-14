@@ -29,7 +29,7 @@ class ScanRequest(BaseModel):
     symbols: Optional[List[str]] = None
     min_lis: float = 0
     option_type: Optional[str] = None   # "CE" | "PE" | None
-    strike_count: int = 8
+    strike_count: int = 12
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -45,27 +45,98 @@ async def get_watchlist():
     return {"success": True, "watchlist": service.get_watchlist()}
 
 
+@router.get("/radar/last")
+async def get_last_radar_scan():
+    """
+    Last completed radar snapshot + locked ideas.
+    Used to paint the UI immediately without wiping it during a new scan.
+    """
+    service = get_radar_service()
+    last = service.get_last_scan() or service.get_cached_scan(max_age_seconds=7200) or {}
+    board = service.get_process_board(limit=8)
+    if not last:
+        return {
+            "success": True,
+            "has_data": False,
+            "engine": "v4-process",
+            **board,
+        }
+    return {
+        "success": True,
+        "has_data": True,
+        **last,
+        "ideas": last.get("ideas") or board.get("active") or [],
+        "ideas_confirmed": last.get("ideas_confirmed") or board.get("confirmed") or [],
+        "ideas_pullbacks": last.get("ideas_pullbacks") or board.get("pullbacks") or [],
+        "ideas_watch": last.get("ideas_watch") or board.get("watch") or [],
+        "ideas_conflict": last.get("ideas_conflict") or board.get("conflict") or [],
+        "idea_counts": last.get("idea_counts") or board.get("counts") or {},
+    }
+
+
 def _publish_radar_hits(result: dict) -> None:
+    """Notify locked process trades first; fall back to Grade A / A+."""
     try:
         from app.services.signal_bus import get_signal_bus
 
         bus = get_signal_bus()
-        for row in (result.get("flagged") or [])[:5]:
-            lis = float(row.get("lis") or 0)
-            conviction = (row.get("conviction") or {}).get("level") or ""
-            if lis >= 70 or conviction == "HIGH":
+        ideas = list(result.get("ideas") or [])
+        if ideas:
+            for idea in ideas[:5]:
+                if idea.get("status") != "ACTIVE":
+                    continue
                 bus.publish(
-                    source="radar",
+                    source="process",
                     message=(
-                        f"LIS {lis:.0f} {row.get('symbol')} "
-                        f"{row.get('strike')}{row.get('type')} — "
-                        f"{(row.get('signal') or {}).get('label') or row.get('signal') or 'flow'}"
+                        f"[LOCKED {idea.get('side')}] {idea.get('symbol')} "
+                        f"{idea.get('strike')}{idea.get('opt_type')} — "
+                        f"{(idea.get('recipe') or {}).get('name') or idea.get('label')} "
+                        f"inv {idea.get('invalidation')} tgt {idea.get('target')}"
                     ),
                     level="signal",
-                    symbol=row.get("symbol"),
-                    score=lis,
-                    meta={"strike": row.get("strike"), "type": row.get("type")},
+                    symbol=idea.get("symbol"),
+                    score=float(idea.get("composite") or idea.get("lis") or 0),
+                    meta={
+                        "strike": idea.get("strike"),
+                        "type": idea.get("opt_type"),
+                        "direction": idea.get("direction"),
+                        "status": "ACTIVE",
+                        "invalidation": idea.get("invalidation"),
+                        "target": idea.get("target"),
+                    },
                 )
+            return
+        rows = list(result.get("flagged") or [])
+        if not rows:
+            rows = [
+                r
+                for r in (result.get("all_hits") or [])
+                if r.get("grade") in ("A", "A+")
+            ]
+        for row in rows[:8]:
+            grade = row.get("grade") or ""
+            if grade not in ("A", "A+") and not row.get("actionable"):
+                continue
+            lis = float(row.get("lis") or 0)
+            bus.publish(
+                source="radar",
+                message=(
+                    f"[{grade}] LIS {lis:.0f} {row.get('symbol')} "
+                    f"{row.get('strike')}{row.get('type')} — "
+                    f"{(row.get('signal') or {}).get('label') or 'flow'} "
+                    f"({row.get('direction') or ''})"
+                ),
+                level="signal",
+                symbol=row.get("symbol"),
+                score=lis,
+                meta={
+                    "strike": row.get("strike"),
+                    "type": row.get("type"),
+                    "grade": grade,
+                    "direction": row.get("direction"),
+                    "unusual_score": row.get("unusual_score"),
+                },
+            )
     except Exception:
         pass
 
@@ -74,7 +145,7 @@ def _publish_radar_hits(result: dict) -> None:
 async def scan_all_symbols(
     min_lis: float = Query(0, description="Minimum LIS score to include (0–100)"),
     option_type: Optional[str] = Query(None, description="Filter: CE | PE | null for both"),
-    strike_count: int = Query(8, description="Strikes above/below ATM per symbol"),
+    strike_count: int = Query(12, description="Strikes above/below ATM per symbol (±10–15%)"),
 ):
     """
     Blocking radar scan (legacy). Prefer POST /radar/scan/start for live progress.
@@ -119,7 +190,7 @@ async def scan_custom_symbols(body: ScanRequest):
 async def start_radar_scan_job(
     min_lis: float = Query(0),
     option_type: Optional[str] = Query(None),
-    strike_count: int = Query(8, ge=4, le=20),
+    strike_count: int = Query(12, ge=4, le=20),
 ):
     """Start background radar scan. Poll GET /radar/scan/jobs/{job_id}."""
     import asyncio
@@ -190,6 +261,7 @@ async def start_radar_scan_job(
                 status="completed",
                 extra_meta={
                     "summary": {
+                        "engine": result.get("engine"),
                         "scanned": result.get("scanned"),
                         "universe_requested": result.get("universe_requested"),
                         "total_flagged": result.get("total_flagged"),
@@ -198,6 +270,16 @@ async def start_radar_scan_job(
                         "market_hours": result.get("market_hours"),
                         "timestamp": result.get("timestamp"),
                         "flagged": flagged,
+                        "watch": result.get("watch") or [],
+                        "alert_box": result.get("alert_box") or [],
+                        "ideas": result.get("ideas") or [],
+                        "ideas_confirmed": result.get("ideas_confirmed") or [],
+                        "ideas_pullbacks": result.get("ideas_pullbacks") or [],
+                        "ideas_watch": result.get("ideas_watch") or [],
+                        "ideas_conflict": result.get("ideas_conflict") or [],
+                        "idea_counts": result.get("idea_counts") or {},
+                        "grade_counts": result.get("grade_counts"),
+                        "rules": result.get("rules"),
                         "errors": result.get("errors"),
                         "rate_limited_skips": result.get("rate_limited_skips"),
                     }
@@ -234,9 +316,13 @@ async def get_radar_scan_job(job_id: str):
     meta = snap.get("meta") or {}
     summary = meta.get("summary") or {}
     flagged = summary.get("flagged") or snap.get("results") or []
+    watch = summary.get("watch") or []
+    alert_box = summary.get("alert_box") or []
+    ideas = summary.get("ideas") or []
 
     return {
         "success": True,
+        "engine": summary.get("engine") or "v4-process",
         "job_id": job_id,
         "status": snap["status"],
         "total": snap["total"],
@@ -253,6 +339,16 @@ async def get_radar_scan_job(job_id: str):
         "universe_requested": summary.get("universe_requested", snap["total"]),
         "total_flagged": summary.get("total_flagged", len(flagged)),
         "flagged": flagged,
+        "watch": watch,
+        "alert_box": alert_box,
+        "ideas": ideas,
+        "ideas_confirmed": summary.get("ideas_confirmed") or [],
+        "ideas_pullbacks": summary.get("ideas_pullbacks") or [],
+        "ideas_watch": summary.get("ideas_watch") or [],
+        "ideas_conflict": summary.get("ideas_conflict") or [],
+        "idea_counts": summary.get("idea_counts") or {},
+        "grade_counts": summary.get("grade_counts"),
+        "rules": summary.get("rules"),
         "errors": summary.get("errors") or snap.get("errors"),
         "market_hours": summary.get("market_hours"),
         "timestamp": summary.get("timestamp")
@@ -264,7 +360,7 @@ async def get_radar_scan_job(job_id: str):
 @router.get("/radar/flow/{symbol:path}")
 async def get_symbol_flow(
     symbol: str,
-    strike_count: int = Query(10, description="Strikes above/below ATM"),
+    strike_count: int = Query(14, description="Strikes above/below ATM"),
 ):
     """
     Get detailed option flow data for a single symbol.
@@ -293,6 +389,52 @@ async def get_candles(
     if not result.get("success", True):
         raise HTTPException(status_code=400, detail=result.get("error", "Failed"))
     return result
+
+
+@router.get("/radar/ideas")
+async def get_process_ideas(limit: int = Query(8, ge=1, le=25)):
+    """Locked Active Ideas board — the headline process trades."""
+    return get_radar_service().get_process_board(limit=limit)
+
+
+@router.get("/radar/ideas/{symbol:path}")
+async def get_symbol_idea(symbol: str):
+    """Single-symbol process idea + cached day map."""
+    return get_radar_service().get_symbol_idea(symbol)
+
+
+@router.get("/radar/levels/{symbol:path}")
+async def get_institutional_levels(
+    symbol: str,
+    strike_count: int = Query(14, ge=4, le=20),
+):
+    """
+    Full institutional map: pivots, Camarilla, CPR, PDH/PDL, VWAP, OR,
+    OI walls, max pain, gamma, futures buildup.
+    """
+    import asyncio
+
+    from app.services.levels import get_levels_service
+
+    service = get_radar_service()
+
+    def _build():
+        ul = service._get_underlying_data(symbol, light=False)
+        chain_resp = service.market_service.get_option_chain(symbol, strike_count)
+        spot = float(
+            (ul or {}).get("ltp")
+            or chain_resp.get("spot_price")
+            or 0
+        )
+        return get_levels_service().build_full_map(
+            symbol,
+            spot,
+            chain=chain_resp.get("chain") or [],
+            candles_5m=(ul or {}).get("candles_5min") or [],
+        )
+
+    full = await asyncio.to_thread(_build)
+    return {"success": True, "symbol": symbol, **full}
 
 
 @router.post("/radar/backtest")

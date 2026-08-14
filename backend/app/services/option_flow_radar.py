@@ -1,16 +1,14 @@
 """
-Option Flow Radar Service v2
+Option Flow Radar Service v3
 ============================
-Detects early institutional accumulation in options before the underlying
-stock shows a significant price move.
+Spec: Option_Flow_Radar_Complete_Specification_v3.txt
 
-v2 Changes:
-- Full 180-stock NSE FNO watchlist
-- ONE best strike per stock (not multiple duplicates)
-- 3-day rolling average volume per option strike for baseline comparison
-- Volume spike REQUIRED alongside OI spike (both must confirm)
-- LIS v2: Volume spike gets 25% weight
-- Full Greek analysis with interpretation (Delta bias, Gamma risk, Theta drain, Vega sensitivity)
+- Full CE/PE flow matrix + direction-aware LIS momentum
+- Greek Quality Score (0–20) as quality filter
+- Multi-layer confirmation → Grade A+/A/B/C
+- Alert Box (unusual / big-player) separate from Normal Radar
+- Hard filters: ATM ≤7%, vol ≥1.5×, |OI| ≥8%
+- Performance: light underlying on scan, vol cache, chain-relative baseline
 """
 
 from typing import List, Dict, Any, Optional, Tuple
@@ -30,6 +28,25 @@ from app.services.fno_stocks import (
     mark_invalid_symbol,
 )
 from app.utils.market_hours import is_market_open
+from app.services.radar_signal_engine import (
+    MAX_ATM_DISTANCE_PCT,
+    MIN_VOL_SPIKE,
+    MIN_OI_CHANGE_PCT,
+    MIN_OPTION_VOLUME,
+    classify_signal,
+    compute_momentum_score,
+    compute_lis_v2,
+    compute_greek_quality_score,
+    compute_unusual_score,
+    evaluate_layers,
+    chain_relative_vol_spike,
+    count_cluster_hits,
+    interpret_greeks,
+    build_scored_contract,
+)
+from app.services.levels import get_levels_service
+from app.services.idea_book import get_idea_book, snapshot_from_contract
+from app.services.mtf_service import get_mtf_service
 
 logger = logging.getLogger(__name__)
 
@@ -63,178 +80,6 @@ def _sym_name(symbol: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# LIS v2 Calculation  (volume spike included)
-# ─────────────────────────────────────────────────────────────────
-
-def compute_lis_v2(
-    oi_change_pct: float,           # % OI change from prev day
-    vol_spike_ratio: float,         # current_vol / 3day_avg_vol  (1.0 = normal)
-    option_price_change_pct: float, # % LTP change from prev close
-    underlying_vwap_dev_pct: float, # % deviation of spot from 5-min VWAP
-    delivery_ratio: float,          # delivery vol / 5-day avg (1.0 = normal)
-    above_ema20: bool,              # underlying above 20-period EMA on 5-min
-) -> float:
-    """
-    Leading Indicator Score v2 (0–100):
-      OI change:        30%  (requires OI spike alongside volume)
-      Volume spike:     25%  (NEW – must confirm OI signal)
-      Option momentum:  15%
-      VWAP deviation:   15%
-      EMA trigger:      10%
-      Delivery ratio:    5%
-    """
-    # 1. OI score – 20% OI change → full 30 pts
-    oi_score = min(abs(oi_change_pct) / 20.0, 1.0) * 30.0
-
-    # 2. Volume spike score – 5x average → full 25 pts
-    #    vol_spike_ratio must be > 1 to contribute
-    vol_excess = max(vol_spike_ratio - 1.0, 0.0)
-    vol_score = min(vol_excess / 4.0, 1.0) * 25.0
-
-    # 3. Option price momentum – only positive counts as bullish
-    momentum_score = min(max(option_price_change_pct, 0.0) / 5.0, 1.0) * 15.0
-
-    # 4. VWAP deviation – low deviation = stock coiling → good signal
-    vwap_score = (1.0 - min(abs(underlying_vwap_dev_pct) / 2.0, 1.0)) * 15.0
-
-    # 5. EMA trigger
-    trigger = 10.0 if above_ema20 else 0.0
-
-    # 6. Delivery ratio
-    delivery_score = min(delivery_ratio / 2.0, 1.0) * 5.0
-
-    total = oi_score + vol_score + momentum_score + vwap_score + trigger + delivery_score
-    return round(min(total, 100.0), 1)
-
-
-# ─────────────────────────────────────────────────────────────────
-# Signal Classification (OI × Price × Underlying matrix)
-# ─────────────────────────────────────────────────────────────────
-
-def classify_signal(
-    oi_change_pct: float,
-    option_price_change_pct: float,
-    underlying_price_change_pct: float,
-) -> Dict[str, str]:
-    """
-    OI▲ + Price▲ + Underlying▲/flat  →  Fresh Long Call Buying  (Strong Bullish)
-    OI▲ + Price▲ + Underlying▼       →  Bearish hedge / spec      (Weak Bullish)
-    OI▲ + Price▼ + Underlying▼       →  Call Writing (Bearish)    (Bearish)
-    OI▼ + Price▲ + Underlying▲       →  Long Unwinding            (Exhaustion)
-    OI▲ + Volume spike only           →  Smart Money Accumulation  (Neutral/Watch)
-    """
-    oi_up = oi_change_pct > 5
-    oi_dn = oi_change_pct < -5
-    pr_up = option_price_change_pct > 2
-    pr_dn = option_price_change_pct < -2
-    ul_dn = underlying_price_change_pct < 0
-
-    if oi_up and pr_up and not ul_dn:
-        return {"signal": "STRONG_BULLISH", "label": "Fresh Long Buying", "icon": "🟢", "color": "emerald"}
-    elif oi_up and pr_up and ul_dn:
-        return {"signal": "WEAK_BULLISH", "label": "Bearish Hedge/Spec", "icon": "🟡", "color": "amber"}
-    elif oi_up and pr_dn and ul_dn:
-        return {"signal": "BEARISH", "label": "Call Writing", "icon": "🔴", "color": "rose"}
-    elif oi_dn and pr_up:
-        return {"signal": "EXHAUSTION", "label": "Long Unwinding", "icon": "🔴", "color": "rose"}
-    elif oi_up:
-        return {"signal": "ACCUMULATION", "label": "Smart Money Accum.", "icon": "🔵", "color": "blue"}
-    else:
-        return {"signal": "NEUTRAL", "label": "Neutral/Inconclusive", "icon": "⚪", "color": "zinc"}
-
-
-def get_conviction(lis: float, signal_type: str, vol_spike_ratio: float) -> Dict[str, str]:
-    """
-    HIGH conviction: LIS ≥ 70 + STRONG_BULLISH + vol spike ≥ 2×
-    MEDIUM: LIS 40–69 or vol spike 1.5–2×
-    LOW: below thresholds
-    """
-    high_vol = vol_spike_ratio >= 2.0
-    if lis >= 70 and signal_type in ("STRONG_BULLISH", "ACCUMULATION") and high_vol:
-        return {"level": "HIGH", "icon": "🔴", "label": "High Conviction"}
-    elif lis >= 40 or (lis >= 30 and high_vol):
-        return {"level": "MEDIUM", "icon": "🟡", "label": "Medium"}
-    else:
-        return {"level": "LOW", "icon": "⚪", "label": "Low"}
-
-
-# ─────────────────────────────────────────────────────────────────
-# Greek Interpretation
-# ─────────────────────────────────────────────────────────────────
-
-def interpret_greeks(
-    delta: Optional[float],
-    gamma: Optional[float],
-    theta: Optional[float],
-    vega: Optional[float],
-    opt_type: str,
-) -> Dict[str, Any]:
-    """
-    Produces human-readable Greek interpretation for display.
-    """
-    d = delta or 0.0
-    g = gamma or 0.0
-    t = theta or 0.0
-    v = vega or 0.0
-
-    # Delta bias
-    abs_d = abs(d)
-    if abs_d >= 0.6:
-        delta_bias = "DEEP_ITM"
-        delta_label = "Deep ITM"
-    elif abs_d >= 0.4:
-        delta_bias = "ATM"
-        delta_label = "Near ATM"
-    elif abs_d >= 0.2:
-        delta_bias = "OTM"
-        delta_label = "OTM"
-    else:
-        delta_bias = "DEEP_OTM"
-        delta_label = "Deep OTM"
-
-    # Gamma risk
-    if g >= 0.01:
-        gamma_risk = "HIGH"
-    elif g >= 0.003:
-        gamma_risk = "MEDIUM"
-    else:
-        gamma_risk = "LOW"
-
-    # Theta daily decay
-    theta_daily = abs(t)
-    if theta_daily >= 5:
-        theta_label = f"-₹{theta_daily:.1f}/day"
-        theta_risk = "HIGH"
-    elif theta_daily >= 1:
-        theta_label = f"-₹{theta_daily:.1f}/day"
-        theta_risk = "MEDIUM"
-    else:
-        theta_label = f"-₹{theta_daily:.2f}/day"
-        theta_risk = "LOW"
-
-    # Vega sensitivity
-    if v >= 10:
-        vega_sens = "HIGH"
-    elif v >= 3:
-        vega_sens = "MEDIUM"
-    else:
-        vega_sens = "LOW"
-
-    return {
-        "delta_bias": delta_bias,
-        "delta_label": delta_label,
-        "delta_value": round(d, 4),
-        "gamma_risk": gamma_risk,
-        "gamma_value": round(g, 6),
-        "theta_risk": theta_risk,
-        "theta_label": theta_label,
-        "theta_value": round(t, 2),
-        "vega_sensitivity": vega_sens,
-        "vega_value": round(v, 2),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────
 # Utility: EMA + VWAP (no pandas)
 # ─────────────────────────────────────────────────────────────────
 
@@ -265,11 +110,7 @@ def compute_vwap(candles: List[Dict]) -> Optional[float]:
 
 class OptionFlowRadarService:
     """
-    Option Flow Radar v2 – detects early institutional accumulation.
-    - 180 FNO stocks
-    - Best single strike per stock
-    - 3-day volume baseline
-    - Full Greek analysis
+    Option Flow Radar v3 – multi-layer flow, Greek quality, Alert Box.
     """
 
     def __init__(self):
@@ -278,6 +119,9 @@ class OptionFlowRadarService:
         # In-memory cache for 3-day vol averages  {option_symbol: (avg_vol, fetched_at)}
         self._vol_cache: Dict[str, Tuple[float, datetime]] = {}
         self._VOL_CACHE_TTL = 3600  # 1 hour
+        # Underlying quote/history short cache (scan speed)
+        self._ul_cache: Dict[str, Tuple[Dict[str, Any], datetime]] = {}
+        self._UL_CACHE_TTL = 90
         # Last scan cache (used by confluence + UI without re-hitting Fyers)
         self._last_scan: Optional[Dict[str, Any]] = None
         self._last_scan_at: Optional[datetime] = None
@@ -350,24 +194,61 @@ class OptionFlowRadarService:
 
     # ── Underlying spot + 5-min history ──────────────────────────
 
-    def _get_underlying_data(self, symbol: str) -> Dict[str, Any]:
+    def _get_underlying_data(self, symbol: str, *, light: bool = False) -> Dict[str, Any]:
+        """
+        light=True (scan path): spot only + inferred EMA/VWAP context — fewer API calls.
+        light=False (detail): full 5m history for chart + accurate VWAP/EMA.
+        """
+        now = datetime.now()
+        cached = self._ul_cache.get(symbol)
+        if cached:
+            data, ts = cached
+            age = (now - ts).total_seconds()
+            if age < self._UL_CACHE_TTL and (light or data.get("candles_5min")):
+                return data
+
+        stale = cached[0] if cached else {}
         spot_resp = self.market_service.get_spot_price(symbol)
-        if not spot_resp.get("success"):
-            return {}
+        ltp = float(spot_resp.get("ltp") or 0) if spot_resp.get("success") else 0.0
+        chg_p = float(spot_resp.get("change_percent") or 0) if spot_resp.get("success") else 0.0
+        if ltp <= 0:
+            ltp = float(stale.get("ltp") or 0)
+            chg_p = float(stale.get("change_pct") or 0)
+        if ltp <= 0:
+            return stale if stale else {}
 
-        ltp = spot_resp.get("ltp") or 0
-        chg_p = spot_resp.get("change_percent") or 0
+        if light:
+            # Infer soft context from day change only (no second history call)
+            above = chg_p >= 0
+            data = {
+                "ltp": ltp,
+                "change_pct": chg_p,
+                "vwap": ltp,
+                "ema20": ltp * (0.998 if above else 1.002),
+                "vwap_dev_pct": 0.0,
+                "above_ema20": above,
+                "candles_5min": stale.get("candles_5min") or [],
+                "light": True,
+            }
+            self._ul_cache[symbol] = (data, now)
+            return data
 
-        hist = self.market_service.get_historical_data(
-            symbol=symbol, resolution="5", days=1,
-        )
-        candles = hist.get("candles", [])
-        closes = [c["close"] for c in candles]
+        candles: List[Any] = []
+        try:
+            hist = self.market_service.get_historical_data(
+                symbol=symbol, resolution="5", days=1,
+            )
+            candles = hist.get("candles") or []
+        except Exception as exc:
+            logger.debug("5m history failed for %s: %s", symbol, exc)
+        if not candles:
+            candles = stale.get("candles_5min") or []
+        closes = [c["close"] for c in candles if c.get("close")]
         vwap = compute_vwap(candles) or ltp
         ema20 = compute_ema(closes, 20) or ltp
         vwap_dev = ((ltp - vwap) / vwap * 100) if vwap else 0
 
-        return {
+        data = {
             "ltp": ltp,
             "change_pct": chg_p,
             "vwap": vwap,
@@ -375,7 +256,10 @@ class OptionFlowRadarService:
             "vwap_dev_pct": round(vwap_dev, 3),
             "above_ema20": ltp > ema20,
             "candles_5min": candles[-60:],
+            "light": False,
         }
+        self._ul_cache[symbol] = (data, now)
+        return data
 
     # ── 3-day average volume for a specific option contract ──────
 
@@ -415,22 +299,22 @@ class OptionFlowRadarService:
             logger.debug(f"3-day vol avg failed for {option_symbol}: {e}")
             return 0.0
 
-    # ── Process option chain → best single strike ─────────────────
+    # ── Process option chain → best single strike (v3 multi-layer) ─
 
     def _process_option_chain(
         self,
         symbol: str,
         underlying: Dict[str, Any],
         strike_count: int = 10,
+        *,
+        fetch_vol_history: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """
-        Fetch option chain for symbol, compute LIS v2, return the SINGLE
-        best-scoring strike (highest LIS) that satisfies ALL of:
-          1. OI change ≥ 5% (unusual OI activity)
-          2. Volume ≥ minimum threshold (not zero)
-          3. Volume spike ratio ≥ 1.2× 3-day average (confirmed unusual volume)
+        v3 pipeline:
+          chain → CE/PE classify → hard filters → vol spike → Greek quality
+          → underlying context → grade A+/A/B/C → optional Alert Box flags
 
-        Returns None if no qualifying strike found.
+        Returns best composite contract or None.
         """
         chain_resp = self.market_service.get_option_chain(symbol, strike_count)
         if not chain_resp.get("success"):
@@ -440,7 +324,6 @@ class OptionFlowRadarService:
         spot = chain_resp.get("spot_price") or underlying.get("ltp", 0)
         expiries = chain_resp.get("expiries", [])
 
-        # Normalize expiry to string
         if expiries:
             first_exp = expiries[0]
             nearest_expiry = (
@@ -450,46 +333,56 @@ class OptionFlowRadarService:
         else:
             nearest_expiry = "N/A"
 
-        ul_chg_pct = underlying.get("change_pct", 0)
-        vwap_dev = underlying.get("vwap_dev_pct", 0)
-        above_ema = underlying.get("above_ema20", False)
+        ul_chg_pct = float(underlying.get("change_pct") or 0)
+        vwap_dev = float(underlying.get("vwap_dev_pct") or 0)
+        above_ema = bool(underlying.get("above_ema20", False))
         sym_name = _sym_name(symbol)
 
-        # ── Phase 1: Collect all candidate contracts with basic filters ──
-        candidates = []
+        # Peer volumes for chain-relative spike (fast, no API)
+        peer_vols_ce: List[float] = []
+        peer_vols_pe: List[float] = []
+        for row in chain:
+            st = row.get("strike_price")
+            if not st or not spot:
+                continue
+            if abs(st - spot) / spot * 100 > MAX_ATM_DISTANCE_PCT:
+                continue
+            if row.get("call") and (row["call"].get("volume") or 0) > 0:
+                peer_vols_ce.append(float(row["call"]["volume"]))
+            if row.get("put") and (row["put"].get("volume") or 0) > 0:
+                peer_vols_pe.append(float(row["put"]["volume"]))
 
+        candidates: List[Dict[str, Any]] = []
         for row in chain:
             strike = row.get("strike_price")
             if not strike or strike <= 0:
                 continue
-
             atm_dist_pct = abs(strike - spot) / spot * 100 if spot else 999
-            # Skip very deep OTM (> 20% away from spot) — unlikely institutional
-            if atm_dist_pct > 20:
+            if atm_dist_pct > MAX_ATM_DISTANCE_PCT:
                 continue
 
             for opt_type, key in [("CE", "call"), ("PE", "put")]:
                 opt = row.get(key)
                 if not opt:
                     continue
+                oi_change_pct = float(opt.get("oi_change_pct") or 0)
+                ltp_chg_pct = float(opt.get("chg_pct") or 0)
+                oi = float(opt.get("oi") or 0)
+                volume = float(opt.get("volume") or 0)
+                ltp = float(opt.get("ltp") or 0)
+                iv = float(opt.get("iv") or 0)
 
-                oi_change_pct = opt.get("oi_change_pct") or 0
-                ltp_chg_pct = opt.get("chg_pct") or 0
-                oi = opt.get("oi") or 0
-                volume = opt.get("volume") or 0
-                ltp = opt.get("ltp") or 0
-                iv = opt.get("iv") or 0
-
-                # HARD FILTER 1: both OI and volume must be non-zero
-                if oi == 0 or volume == 0:
+                if oi <= 0 or volume <= 0:
+                    continue
+                if abs(oi_change_pct) < MIN_OI_CHANGE_PCT:
+                    continue
+                if volume < MIN_OPTION_VOLUME:
                     continue
 
-                # HARD FILTER 2: OI must show meaningful change
-                if abs(oi_change_pct) < 5:
-                    continue
-
-                # HARD FILTER 3: Option must have traded (min 100 contracts)
-                if volume < 100:
+                prelim_sig = classify_signal(
+                    oi_change_pct, ltp_chg_pct, ul_chg_pct, opt_type=opt_type
+                )
+                if prelim_sig.get("signal") == "NEUTRAL":
                     continue
 
                 candidates.append({
@@ -503,109 +396,216 @@ class OptionFlowRadarService:
                     "volume": volume,
                     "ltp": ltp,
                     "iv": iv,
+                    "prelim_signal": prelim_sig,
                 })
 
         if not candidates:
             return None
 
-        # ── Phase 2: Sort by OI change × volume to prioritize best candidates ──
-        # Score = abs(OI%) * log(volume+1) — quick pre-rank without API calls
-        def prelim_score(c):
-            return abs(c["oi_change_pct"]) * math.log(c["volume"] + 1)
+        def prelim_score(c: Dict) -> float:
+            atm_boost = max(0.0, 1.0 - (c["atm_dist_pct"] / MAX_ATM_DISTANCE_PCT))
+            return abs(c["oi_change_pct"]) * math.log(c["volume"] + 1) * (1.0 + atm_boost)
 
         candidates.sort(key=prelim_score, reverse=True)
-        # Evaluate at most top 5 to avoid too many API calls
-        top_candidates = candidates[:5]
-
-        # ── Phase 3: Fetch 3-day vol avg for top candidates & compute LIS v2 ──
-        scored = []
+        # Score top 4 only — balance quality vs API budget for 3d vol
+        top_candidates = candidates[:4]
+        scored: List[Dict[str, Any]] = []
 
         for cand in top_candidates:
             opt = cand["opt"]
-            opt_sym = opt.get("symbol", "")
-            vol_3day_avg = self._get_3day_vol_avg(opt_sym) if opt_sym else 0.0
+            opt_sym = opt.get("symbol") or ""
+            peers = peer_vols_ce if cand["opt_type"] == "CE" else peer_vols_pe
+            chain_spike = chain_relative_vol_spike(cand["volume"], peers)
 
-            # Volume spike ratio
-            vol_spike_ratio = (
-                cand["volume"] / vol_3day_avg if vol_3day_avg > 0 else 1.0
+            vol_3day_avg = 0.0
+            vol_spike_ratio = chain_spike
+            vol_src = "chain_median"
+
+            # Prefer cached / real 3-day history when available
+            if fetch_vol_history and opt_sym:
+                cached = self._vol_cache.get(opt_sym)
+                now = datetime.now()
+                need_fetch = True
+                if cached:
+                    vol_3day_avg, fetched_at = cached
+                    if (now - fetched_at).total_seconds() < self._VOL_CACHE_TTL:
+                        need_fetch = False
+                # Only hit API for top-2 prelims to keep scan smooth
+                if need_fetch and len(scored) < 2:
+                    vol_3day_avg = self._get_3day_vol_avg(opt_sym)
+                elif not need_fetch:
+                    pass
+                if vol_3day_avg > 0:
+                    hist_spike = cand["volume"] / vol_3day_avg
+                    # Use stronger of history vs chain-relative (real unusualness)
+                    if hist_spike >= chain_spike:
+                        vol_spike_ratio = hist_spike
+                        vol_src = "3day_hist"
+                    else:
+                        vol_spike_ratio = max(chain_spike, hist_spike)
+                        vol_src = "hybrid"
+
+            # Hard volume filter when we have a real baseline
+            if vol_src in ("3day_hist", "hybrid") and vol_3day_avg > 0:
+                if vol_spike_ratio < MIN_VOL_SPIKE:
+                    continue
+            elif vol_src == "chain_median":
+                if vol_spike_ratio < MIN_VOL_SPIKE and cand["volume"] < MIN_OPTION_VOLUME * 3:
+                    continue
+
+            signal = cand.get("prelim_signal") or classify_signal(
+                cand["oi_change_pct"],
+                cand["ltp_chg_pct"],
+                ul_chg_pct,
+                opt_type=cand["opt_type"],
+            )
+            direction = signal.get("direction") or "NEUTRAL"
+            cluster = count_cluster_hits(
+                candidates, cand["strike"], cand["opt_type"], direction
             )
 
-            # HARD FILTER 4: volume must be ≥ 1.2× the 3-day average
-            # (If 3-day avg is 0, use current volume as reference — still include)
-            if vol_3day_avg > 0 and vol_spike_ratio < 1.2:
-                continue
-
-            lis = compute_lis_v2(
-                oi_change_pct=cand["oi_change_pct"],
+            row = build_scored_contract(
+                symbol=symbol,
+                name=sym_name,
+                nearest_expiry=nearest_expiry,
+                cand=cand,
+                signal=signal,
+                vol_3day_avg=vol_3day_avg,
                 vol_spike_ratio=vol_spike_ratio,
-                option_price_change_pct=cand["ltp_chg_pct"],
-                underlying_vwap_dev_pct=vwap_dev,
-                # Delivery ratio is not available intraday from Fyers OC;
-                # keep neutral 1.0 so LIS delivery weight does not invent a spike.
-                delivery_ratio=1.0,
-                above_ema20=above_ema,
+                vol_spike_source=vol_src,
+                spot=float(spot or 0),
+                ul_chg_pct=ul_chg_pct,
+                vwap_dev=vwap_dev,
+                above_ema=above_ema,
+                cluster_hits=cluster,
             )
-
-            signal = classify_signal(cand["oi_change_pct"], cand["ltp_chg_pct"], ul_chg_pct)
-            conviction = get_conviction(lis, signal["signal"], vol_spike_ratio)
-
-            # Greeks from option data
-            delta = opt.get("delta")
-            gamma = opt.get("gamma")
-            theta = opt.get("theta")
-            vega = opt.get("vega")
-            greek_interp = interpret_greeks(delta, gamma, theta, vega, cand["opt_type"])
-
-            # Unusual flags
-            unusual_flags = []
-            if abs(cand["oi_change_pct"]) > 20:
-                unusual_flags.append(f"OI spike {cand['oi_change_pct']:+.1f}%")
-            if vol_spike_ratio >= 3:
-                unusual_flags.append(f"Vol {vol_spike_ratio:.1f}× avg")
-            elif vol_spike_ratio >= 2:
-                unusual_flags.append(f"Vol {vol_spike_ratio:.1f}× avg")
-            if cand["iv"] and cand["iv"] > 40:
-                unusual_flags.append(f"High IV {cand['iv']:.0f}%")
-            if abs(cand["atm_dist_pct"]) < 1:
-                unusual_flags.append("ATM Strike")
-
-            scored.append({
-                "timestamp": datetime.now().isoformat(),
-                "symbol": symbol,
-                "name": sym_name,
-                "expiry": nearest_expiry,
-                "strike": cand["strike"],
-                "type": cand["opt_type"],
-                "ltp": round(cand["ltp"], 2),
-                "ltp_change_pct": round(cand["ltp_chg_pct"], 2),
-                "oi": cand["oi"],
-                "oi_change_pct": round(cand["oi_change_pct"], 2),
-                "volume": cand["volume"],
-                "vol_3day_avg": round(vol_3day_avg, 0),
-                "vol_spike_ratio": round(vol_spike_ratio, 2),
-                "iv": round(cand["iv"], 2) if cand["iv"] else None,
-                "delta": delta,
-                "gamma": gamma,
-                "theta": theta,
-                "vega": vega,
-                "greek_interpretation": greek_interp,
-                "spot": round(spot, 2),
-                "spot_change_pct": round(ul_chg_pct, 2),
-                "vwap_dev_pct": round(vwap_dev, 2),
-                "above_ema20": above_ema,
-                "atm_dist_pct": round(cand["atm_dist_pct"], 2),
-                "lis": lis,
-                "signal": signal,
-                "conviction": conviction,
-                "unusual_flags": unusual_flags,
-            })
+            if row:
+                scored.append(row)
 
         if not scored:
+            try:
+                get_idea_book().ingest_neutral(symbol, float(spot or 0))
+            except Exception:
+                pass
             return None
 
-        # Return the single highest-LIS contract
-        scored.sort(key=lambda x: x["lis"], reverse=True)
-        return scored[0]
+        # Best by composite (LIS + greek + unusual), then grade, then LIS
+        _g = {"A+": 4, "A": 3, "B": 2, "C": 1}
+        scored.sort(
+            key=lambda x: (
+                float(x.get("composite_score") or 0),
+                _g.get(x.get("grade") or "C", 0),
+                float(x.get("lis") or 0),
+                -float(x.get("atm_dist_pct") or 99),
+            ),
+            reverse=True,
+        )
+        best = scored[0]
+        opposing = False
+        if len(scored) >= 2:
+            d0 = (scored[0].get("direction") or "").upper()
+            d1 = (scored[1].get("direction") or "").upper()
+            if (
+                d0 in ("BULLISH", "BEARISH")
+                and d1 in ("BULLISH", "BEARISH")
+                and d0 != d1
+                and float(scored[1].get("lis") or 0) >= 45
+            ):
+                opposing = True
+
+        # Real VWAP / OR / 5m for any symbol that produced fuel
+        if underlying.get("light"):
+            rich = self._get_underlying_data(symbol, light=False)
+            if rich:
+                underlying = rich
+                best["vwap_dev_pct"] = rich.get("vwap_dev_pct", best.get("vwap_dev_pct"))
+                best["above_ema20"] = rich.get("above_ema20", best.get("above_ema20"))
+                best["spot"] = rich.get("ltp") or best.get("spot")
+
+        return self._attach_process_trade(
+            symbol,
+            best,
+            chain=chain,
+            underlying=underlying,
+            opposing=opposing,
+        )
+
+    def _attach_process_trade(
+        self,
+        symbol: str,
+        row: Dict[str, Any],
+        *,
+        chain: Optional[List[Dict[str, Any]]] = None,
+        underlying: Optional[Dict[str, Any]] = None,
+        opposing: bool = False,
+        fetch_day: bool = True,
+        fetch_futures: bool = True,
+    ) -> Dict[str, Any]:
+        """Institutional map + persistence lock. Headline unit becomes the idea."""
+        underlying = underlying or {}
+        spot = float(row.get("spot") or underlying.get("ltp") or 0)
+        candles = underlying.get("candles_5min") or []
+        try:
+            levels_svc = get_levels_service()
+            full = levels_svc.build_full_map(
+                symbol,
+                spot,
+                chain=chain,
+                candles_5m=candles,
+                fetch_day=fetch_day,
+                fetch_futures=fetch_futures,
+            )
+            try:
+                full["mtf"] = get_mtf_service().evaluate(symbol)
+            except Exception as mtf_exc:
+                logger.debug("MTF evaluate failed %s: %s", symbol, mtf_exc)
+                full["mtf"] = {}
+            full["chain"] = chain or []
+            book = get_idea_book()
+            snap = snapshot_from_contract(row, opposing=opposing)
+            result = book.ingest(snap, full, candles_5m=candles)
+            row = book.attach_to_contract(symbol, row)
+            loc = (result.get("eval") or {}).get("location") or {}
+            row["location_score"] = loc.get("score")
+            row["location_tags"] = loc.get("tags") or []
+            row["process_composite"] = (result.get("eval") or {}).get("composite")
+            row["process_recipe"] = ((result.get("eval") or {}).get("recipe") or {}).get("id")
+            row["levels_map"] = {
+                "day": full.get("day"),
+                "session": full.get("session"),
+                "structure": full.get("structure"),
+                "futures": full.get("futures"),
+                "zones": full.get("zones"),
+                "pivot_side": full.get("pivot_side"),
+                "camarilla_regime": full.get("camarilla_regime"),
+                "atr": full.get("atr"),
+                "mtf": full.get("mtf"),
+                "execution": (result.get("eval") or {}).get("execution"),
+            }
+            row["idea_transition"] = result.get("transition")
+        except Exception as exc:
+            logger.warning("process-trade attach failed for %s: %s", symbol, exc)
+        return row
+
+    def get_process_board(self, limit: int = 8) -> Dict[str, Any]:
+        board = get_idea_book().board(limit=limit)
+        return {
+            "success": True,
+            "engine": "v4-process",
+            **board,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def get_symbol_idea(self, symbol: str) -> Dict[str, Any]:
+        idea = get_idea_book().get(symbol)
+        day = get_levels_service().peek_day_map(symbol)
+        return {
+            "success": True,
+            "symbol": symbol,
+            "idea": idea,
+            "day_map": day,
+            "timestamp": datetime.now().isoformat(),
+        }
 
     # ── Public: Full scan (180 stocks, 1 per stock) ───────────────
 
@@ -614,12 +614,17 @@ class OptionFlowRadarService:
         symbols: Optional[List[str]] = None,
         min_lis: float = 0,
         opt_type_filter: Optional[str] = None,
-        strike_count: int = 10,
+        strike_count: int = 12,
         progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
-        Scan all FNO stocks, return ONE best strike per stock.
-        Processes in batches to respect API rate limits.
+        Scan FNO universe — ONE best strike per stock (v3 graded).
+
+        Returns:
+          flagged     → Grade A / A+ (main Normal Radar, actionable)
+          watch       → Grade B (watch only)
+          alert_box   → Unusual / big-player (sorted by unusual_score)
+          all_hits    → every non-C row for logs
 
         progress_callback(scanned, total, current_symbol, flagged_row|None, error|None)
         """
@@ -628,17 +633,20 @@ class OptionFlowRadarService:
                 "success": False,
                 "error": "Not authenticated with Fyers API",
                 "flagged": [],
+                "watch": [],
+                "alert_box": [],
             }
 
+        self._scan_running = True
         watch = filter_valid_symbols(symbols or ALL_FNO_WATCHLIST)
         total = len(watch)
-        all_flagged: List[Dict] = []
+        all_hits: List[Dict] = []
         errors: List[str] = []
         scanned = 0
         rate_limited_skips = 0
         aborted_rate_limit = False
-        BATCH_SIZE = 10
-        BATCH_SLEEP = 0.5  # seconds between batches
+        BATCH_SIZE = 12
+        BATCH_SLEEP = 0.35
 
         def _progress(sym: str, flagged_row=None, err=None):
             if progress_callback:
@@ -647,89 +655,143 @@ class OptionFlowRadarService:
                 except Exception:
                     pass
 
-        for batch_start in range(0, len(watch), BATCH_SIZE):
-            batch = watch[batch_start: batch_start + BATCH_SIZE]
-            for sym in batch:
-                if not is_valid_symbol(sym):
-                    scanned += 1
-                    _progress(sym, err="invalid_symbol")
-                    continue
-                try:
-                    underlying = self._get_underlying_data(sym)
-                    if not underlying:
+        try:
+            for batch_start in range(0, len(watch), BATCH_SIZE):
+                batch = watch[batch_start: batch_start + BATCH_SIZE]
+                for sym in batch:
+                    if not is_valid_symbol(sym):
                         scanned += 1
-                        _progress(sym, err="no_underlying")
+                        _progress(sym, err="invalid_symbol")
                         continue
-
-                    best = self._process_option_chain(sym, underlying, strike_count)
-                    if best is None:
-                        scanned += 1
-                        _progress(sym)
-                        continue
-
-                    # Apply filters
-                    if opt_type_filter and best["type"] != opt_type_filter:
-                        scanned += 1
-                        _progress(sym)
-                        continue
-                    if min_lis > 0 and best["lis"] < min_lis:
-                        scanned += 1
-                        _progress(sym)
-                        continue
-
-                    all_flagged.append(best)
-                    scanned += 1
-                    _progress(sym, flagged_row=best)
-
-                except Exception as exc:
-                    msg = str(exc)
-                    if "invalid symbol" in msg.lower():
-                        mark_invalid_symbol(sym)
                     try:
-                        from app.services.rate_limiter import is_rate_limit_error
-                        if is_rate_limit_error(exc) or is_rate_limit_error(msg):
-                            rate_limited_skips += 1
+                        # Light underlying on bulk scan — real spot, soft context
+                        underlying = self._get_underlying_data(sym, light=True)
+                        if not underlying:
+                            scanned += 1
+                            _progress(sym, err="no_underlying")
+                            continue
+
+                        best = self._process_option_chain(
+                            sym, underlying, strike_count, fetch_vol_history=True
+                        )
+                        if best is None:
+                            scanned += 1
+                            _progress(sym)
+                            continue
+
+                        if opt_type_filter and best["type"] != opt_type_filter:
+                            scanned += 1
+                            _progress(sym)
+                            continue
+                        if min_lis > 0 and best["lis"] < min_lis:
+                            scanned += 1
+                            _progress(sym)
+                            continue
+
+                        all_hits.append(best)
+                        scanned += 1
+                        # Stream A/A+ to job progress UI immediately
+                        if best.get("actionable") or best.get("alert_box"):
+                            _progress(sym, flagged_row=best)
+                        else:
+                            _progress(sym)
+
+                    except Exception as exc:
+                        msg = str(exc)
+                        if "invalid symbol" in msg.lower():
+                            mark_invalid_symbol(sym)
+                        try:
+                            from app.services.rate_limiter import is_rate_limit_error
+                            if is_rate_limit_error(exc) or is_rate_limit_error(msg):
+                                rate_limited_skips += 1
+                        except Exception:
+                            pass
+                        logger.warning(f"Radar scan error for {sym}: {exc}")
+                        errors.append(f"{sym}: {msg}")
+                        scanned += 1
+                        _progress(sym, err=msg)
+
+                if batch_start + BATCH_SIZE < len(watch):
+                    try:
+                        from app.services.rate_limiter import get_fyers_limiter
+                        lim = get_fyers_limiter()
+                        if lim.in_cooldown:
+                            time.sleep(min(lim.cooldown_remaining, 30))
+                            remaining = watch[batch_start + BATCH_SIZE :]
+                            rate_limited_skips += len(remaining)
+                            for rsym in remaining:
+                                scanned += 1
+                                errors.append(f"{rsym}: rate_limited")
+                                _progress(rsym, err="rate_limited")
+                            aborted_rate_limit = True
+                            break
                     except Exception:
                         pass
-                    logger.warning(f"Radar scan error for {sym}: {exc}")
-                    errors.append(f"{sym}: {msg}")
-                    scanned += 1
-                    _progress(sym, err=msg)
+                    time.sleep(BATCH_SLEEP)
+        finally:
+            self._scan_running = False
 
-            # Rate-limit protection between batches (longer when under pressure)
-            if batch_start + BATCH_SIZE < len(watch):
-                try:
-                    from app.services.rate_limiter import get_fyers_limiter
-                    lim = get_fyers_limiter()
-                    if lim.in_cooldown:
-                        time.sleep(min(lim.cooldown_remaining, 30))
-                        # Mark remaining symbols as skipped so progress is honest
-                        remaining = watch[batch_start + BATCH_SIZE :]
-                        rate_limited_skips += len(remaining)
-                        for rsym in remaining:
-                            scanned += 1
-                            errors.append(f"{rsym}: rate_limited")
-                            _progress(rsym, err="rate_limited")
-                        aborted_rate_limit = True
-                        break
-                except Exception:
-                    pass
-                time.sleep(BATCH_SLEEP)
+        # Partition per v3 product rules
+        radar = [h for h in all_hits if h.get("grade") in ("A", "A+")]
+        watch_list = [h for h in all_hits if h.get("grade") == "B"]
+        alert_box = [h for h in all_hits if h.get("alert_box")]
 
-        all_flagged.sort(key=lambda x: x["lis"], reverse=True)
+        radar.sort(
+            key=lambda x: (
+                1 if x.get("grade") == "A+" else 0,
+                float(x.get("composite_score") or 0),
+                float(x.get("lis") or 0),
+            ),
+            reverse=True,
+        )
+        watch_list.sort(key=lambda x: float(x.get("composite_score") or 0), reverse=True)
+        alert_box.sort(key=lambda x: float(x.get("unusual_score") or 0), reverse=True)
+        all_hits.sort(key=lambda x: float(x.get("composite_score") or 0), reverse=True)
 
+        # flagged = actionable main radar (backward compatible primary list)
+        # include watch when user wants full board — keep flagged = A/A+ only for quality
+        flagged = list(radar)
+
+        board = get_idea_book().board(limit=8)
         result = {
             "success": True,
+            "engine": "v5-mtf",
             "scanned": scanned,
             "universe_requested": total,
-            "total_flagged": len(all_flagged),
-            "flagged": all_flagged,
+            "total_flagged": len(flagged),
+            "flagged": flagged,
+            "watch": watch_list,
+            "alert_box": alert_box,
+            "all_hits": all_hits,
+            "ideas": board.get("active") or [],
+            "ideas_confirmed": board.get("confirmed") or [],
+            "ideas_pullbacks": board.get("pullbacks") or [],
+            "ideas_watch": board.get("watch") or [],
+            "ideas_conflict": board.get("conflict") or [],
+            "idea_counts": board.get("counts") or {},
+            "grade_counts": {
+                "A+": sum(1 for h in all_hits if h.get("grade") == "A+"),
+                "A": sum(1 for h in all_hits if h.get("grade") == "A"),
+                "B": sum(1 for h in all_hits if h.get("grade") == "B"),
+                "C": sum(1 for h in all_hits if h.get("grade") == "C"),
+            },
             "errors": errors,
             "rate_limited_skips": rate_limited_skips,
             "partial": aborted_rate_limit or scanned < total,
             "completion_pct": round(100.0 * min(scanned, total) / max(total, 1), 1),
             "timestamp": datetime.now().isoformat(),
             "market_hours": self._is_market_hours(),
+            "rules": {
+                "max_atm_pct": MAX_ATM_DISTANCE_PCT,
+                "min_vol_spike": MIN_VOL_SPIKE,
+                "min_oi_change_pct": MIN_OI_CHANGE_PCT,
+                "min_volume": MIN_OPTION_VOLUME,
+                "description": (
+                    "v4 process: CE/PE matrix → institutional levels (pivot/CPR/"
+                    "Camarilla/OI walls/VWAP) → persistence + hysteresis lock. "
+                    "Headline is the Active Idea, not the last snapshot."
+                ),
+            },
         }
         self._last_scan = result
         self._last_scan_at = datetime.now()
@@ -747,13 +809,75 @@ class OptionFlowRadarService:
             return {"success": False, "error": "Not authenticated", "flagged": []}
 
         try:
-            underlying = self._get_underlying_data(symbol)
+            underlying = self._get_underlying_data(symbol, light=False)
             if not underlying:
-                return {"success": False, "error": f"Failed to get data for {symbol}", "flagged": []}
+                underlying = self._get_underlying_data(symbol, light=True)
 
-            # Get all flagged contracts for this symbol (no 1-per-stock limit)
-            chain_resp = self.market_service.get_option_chain(symbol, strike_count)
-            spot = chain_resp.get("spot_price") or underlying.get("ltp", 0)
+            chain_resp: Dict[str, Any] = {}
+            try:
+                chain_resp = self.market_service.get_option_chain(symbol, strike_count)
+            except Exception as exc:
+                logger.debug("option chain failed for %s: %s", symbol, exc)
+                chain_resp = {}
+
+            spot = chain_resp.get("spot_price") or (underlying or {}).get("ltp") or 0
+            if (not underlying or not underlying.get("ltp")) and spot:
+                underlying = {
+                    **(underlying or {}),
+                    "ltp": spot,
+                    "change_pct": (underlying or {}).get("change_pct") or 0,
+                    "vwap": spot,
+                    "ema20": spot,
+                    "vwap_dev_pct": 0.0,
+                    "above_ema20": True,
+                    "candles_5min": (underlying or {}).get("candles_5min") or [],
+                    "light": True,
+                }
+
+            if not underlying or not underlying.get("ltp"):
+                idea = get_idea_book().get(symbol)
+                last = self.get_last_scan() or {}
+                row = next(
+                    (
+                        r
+                        for r in (last.get("flagged") or [])
+                        + (last.get("watch") or [])
+                        + (last.get("ideas") or [])
+                        if r.get("symbol") == symbol
+                    ),
+                    None,
+                )
+                if idea or row:
+                    px = float((idea or {}).get("spot") or (row or {}).get("spot") or 0)
+                    return {
+                        "success": True,
+                        "symbol": symbol,
+                        "name": _sym_name(symbol),
+                        "underlying": {
+                            "ltp": px,
+                            "change_pct": 0,
+                            "vwap": px,
+                            "ema20": px,
+                            "vwap_dev_pct": 0,
+                            "above_ema20": True,
+                            "candles_5min": [],
+                            "light": True,
+                        },
+                        "chain": [],
+                        "spot_price": px,
+                        "pcr": None,
+                        "india_vix": None,
+                        "atm_strike": None,
+                        "expiries": [],
+                        "flagged_contracts": [row] if row and row.get("strike") else [],
+                        "candles_5min": [],
+                        "idea": idea,
+                        "levels": (row or {}).get("levels_map") if row else None,
+                        "partial": True,
+                        "warning": "Live quote unavailable — showing last process idea",
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                return {"success": False, "error": f"Failed to get data for {symbol}", "flagged": []}
             expiries = chain_resp.get("expiries", [])
 
             normalized_expiries = [
@@ -762,8 +886,24 @@ class OptionFlowRadarService:
             ]
 
             # Get best contract (reuse _process_option_chain)
-            best = self._process_option_chain(symbol, underlying, strike_count)
+            best = None
+            try:
+                best = self._process_option_chain(symbol, underlying, strike_count)
+            except Exception as exc:
+                logger.warning("process attach in flow failed for %s: %s", symbol, exc)
             flagged = [best] if best else []
+            idea = get_idea_book().get(symbol)
+            levels_map = (best or {}).get("levels_map")
+            if levels_map is None:
+                try:
+                    levels_map = get_levels_service().build_full_map(
+                        symbol,
+                        float(spot or underlying.get("ltp") or 0),
+                        chain=chain_resp.get("chain") or [],
+                        candles_5m=underlying.get("candles_5min") or [],
+                    )
+                except Exception:
+                    levels_map = None
 
             return {
                 "success": True,
@@ -778,6 +918,8 @@ class OptionFlowRadarService:
                 "expiries": normalized_expiries,
                 "flagged_contracts": flagged,
                 "candles_5min": underlying.get("candles_5min", []),
+                "idea": idea,
+                "levels": levels_map,
                 "timestamp": datetime.now().isoformat(),
             }
 

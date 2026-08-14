@@ -7,6 +7,7 @@ from app.routes import health, market_data, option_chain, websocket, auth, mcp
 from app.routes import ma_crossover as ma_crossover_routes
 from app.routes import option_flow_radar as radar_routes
 from app.routes import confluence as confluence_routes
+from app.routes import ma7200 as ma7200_routes
 from app.services.candle_aggregator import get_candle_aggregator
 from app.services.strategies.ma_crossover import get_ma_crossover_service
 from app.services.fyers_websocket import get_websocket_manager
@@ -41,19 +42,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[REDIS] init skipped: {e}")
 
-    # Start candle aggregator and hook it into the Fyers tick stream
+    # Candle aggregator (ticks) — old multi-TF MA crossover service is DISABLED
+    # so it no longer burns Fyers quota. Use 7/200 MA + OC strategy instead.
     aggregator = get_candle_aggregator()
-    ma_svc = get_ma_crossover_service()
-    aggregator.register_callback(ma_svc.on_candle_closed)
     aggregator.start()
 
     ws_mgr = get_websocket_manager()
     ws_mgr.add_subscriber("market_data", aggregator.on_tick)
 
-    # Auto-start MA scanner + radar scheduler
     import asyncio as _asyncio
     radar_sched = get_radar_scheduler()
-    _asyncio.create_task(ma_svc.start())
+    # Intentionally NOT starting get_ma_crossover_service().start()
+    print("[MA] Legacy multi-TF MA crossover auto-scan DISABLED (use /strategies/ma7200)")
     _asyncio.create_task(radar_sched.start())
 
     yield
@@ -61,7 +61,12 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ───────────────────────────────────────────────────────
     print(f"[STOP] Shutting down {settings.app_name}")
     await radar_sched.stop()
-    await ma_svc.stop()
+    try:
+        ma_svc = get_ma_crossover_service()
+        if getattr(ma_svc, "_running", False):
+            await ma_svc.stop()
+    except Exception:
+        pass
     aggregator.stop()
     ws_mgr.remove_subscriber("market_data", aggregator.on_tick)
     try:
@@ -107,6 +112,7 @@ def create_app() -> FastAPI:
     # Strategies
     from app.routes import strategies
     app.include_router(strategies.router, prefix=settings.api_prefix, tags=["Strategies"])
+    app.include_router(ma7200_routes.router, prefix=settings.api_prefix, tags=["MA 7/200 + OC"])
     
     return app
 

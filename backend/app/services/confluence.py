@@ -22,6 +22,7 @@ from app.services.fno_stocks import TOP_FNO_STOCKS, FNO_INDICES
 from app.services.signal_bus import get_signal_bus
 from app.services.strategies.ma_crossover import get_ma_crossover_service
 from app.services.option_flow_radar import get_radar_service
+from app.services.idea_book import get_idea_book
 from app.services.fyers_market import get_market_service
 from app.services.fno_intelligence import get_intelligence_engine, MarketState
 from app.services.news_context import get_news_service
@@ -39,11 +40,11 @@ WEIGHT_NEWS = 10
 BULLISH_TOKENS = {
     "BUY", "GOLDEN", "GOLDEN_CROSS", "BULL", "BULLISH", "LONG",
     "STRONG_BULLISH", "ACCUMULATION", "WEAK_BULLISH", "INTENT",
-    "TREND", "CALL", "CE",
+    "TREND", "CALL BUYING", "PUT WRITING", "FRESH CALL",
 }
 BEARISH_TOKENS = {
     "SELL", "DEATH", "DEATH_CROSS", "BEAR", "BEARISH", "SHORT",
-    "STRONG_BEARISH", "PUT", "PE", "CALL_WRITING",
+    "STRONG_BEARISH", "CALL WRITING", "PUT BUYING", "FRESH PUT",
 }
 
 
@@ -84,6 +85,7 @@ class ConfluenceEngine:
 
         ma_by_sym = self._index_ma()
         radar_by_sym = self._index_radar()
+        ideas_by_sym = self._index_ideas()
         bus_by_sym = self._index_bus()
         news = self.news.get_market_bias()
 
@@ -101,6 +103,7 @@ class ConfluenceEngine:
                 nifty_intel if "NIFTY" in sym.upper() or "INDEX" in sym.upper() else None,
                 news=news,
                 min_sources=min_sources,
+                idea=ideas_by_sym.get(sym),
             )
             if card["sources_count"] > 0 or card.get("status") != "IDLE":
                 cards.append(card)
@@ -188,6 +191,18 @@ class ConfluenceEngine:
                 out[sym] = row
         return out
 
+    def _index_ideas(self) -> Dict[str, Dict]:
+        out: Dict[str, Dict] = {}
+        try:
+            board = get_idea_book().board(limit=40)
+            for row in (board.get("active") or []) + (board.get("watch") or []) + (board.get("conflict") or []):
+                sym = row.get("symbol")
+                if sym:
+                    out[sym] = row
+        except Exception:
+            pass
+        return out
+
     def _index_bus(self) -> Dict[str, List[Dict]]:
         out: Dict[str, List[Dict]] = {}
         for ev in self.bus.recent(limit=50):
@@ -221,6 +236,7 @@ class ConfluenceEngine:
         intel: Optional[Dict],
         news: Optional[Dict],
         min_sources: int,
+        idea: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         sources: List[Dict[str, Any]] = []
         directions: List[str] = []
@@ -254,21 +270,54 @@ class ConfluenceEngine:
             })
             score += pts
 
-        # Radar
+        # Locked process idea owns direction — snapshot radar cannot flip it
+        if idea and idea.get("status") == "ACTIVE" and idea.get("direction") in ("BULLISH", "BEARISH"):
+            d = idea["direction"]
+            directions.append(d)
+            pts = WEIGHT_RADAR
+            sources.append({
+                "name": "process_idea",
+                "direction": d,
+                "detail": (
+                    f"LOCKED {idea.get('side')} {idea.get('strike')}{idea.get('opt_type')} "
+                    f"{(idea.get('recipe') or {}).get('name') or idea.get('label')} "
+                    f"loc {idea.get('location_score')} inv {idea.get('invalidation')}"
+                ),
+                "weight": pts,
+                "locked": True,
+            })
+            score += pts
+            radar_row = None  # do not double-count flipping snapshot
+        elif idea and idea.get("status") == "CONFLICT":
+            directions.append("MIXED")
+            sources.append({
+                "name": "process_idea",
+                "direction": "MIXED",
+                "detail": "dual-side flow — no trade",
+                "weight": 0,
+                "locked": False,
+            })
+
+        # Radar — prefer classified stock direction (CE/PE matrix), not CE=bull default
         if radar_row:
             lis = float(radar_row.get("lis") or 0)
             sig = radar_row.get("signal") or {}
             if isinstance(sig, dict):
                 sig_label = sig.get("signal") or sig.get("label") or ""
+                d = (sig.get("direction") or "").upper() or None
             else:
                 sig_label = str(sig)
-            d = _dir_from_text(sig_label, radar_row.get("type"))
-            # CE-heavy bullish default for accumulation signals
+                d = None
+            if not d:
+                d = (radar_row.get("direction") or "").upper() or None
+            if not d or d not in ("BULLISH", "BEARISH"):
+                d = _dir_from_text(sig_label, radar_row.get("type"))
+            # Last resort only for accumulation without direction
             if not d and radar_row.get("type") == "CE":
                 d = "BULLISH"
             elif not d and radar_row.get("type") == "PE":
                 d = "BEARISH"
-            if d:
+            if d and d in ("BULLISH", "BEARISH"):
                 directions.append(d)
             pts = WEIGHT_RADAR * min(lis / 100.0, 1.0)
             sources.append({
@@ -339,16 +388,21 @@ class ConfluenceEngine:
             score += pts
 
         # Aggregate direction
-        bulls = directions.count("BULLISH")
-        bears = directions.count("BEARISH")
-        if bulls > bears:
-            direction = "BULLISH"
-        elif bears > bulls:
-            direction = "BEARISH"
-        elif bulls and bears:
+        if idea and idea.get("status") == "CONFLICT":
             direction = "CONFLICT"
+        elif idea and idea.get("status") == "ACTIVE" and idea.get("direction") in ("BULLISH", "BEARISH"):
+            direction = idea["direction"]
         else:
-            direction = "NEUTRAL"
+            bulls = directions.count("BULLISH")
+            bears = directions.count("BEARISH")
+            if bulls > bears:
+                direction = "BULLISH"
+            elif bears > bulls:
+                direction = "BEARISH"
+            elif bulls and bears:
+                direction = "CONFLICT"
+            else:
+                direction = "NEUTRAL"
 
         # Unique source labels for UI keys / display (preserve order)
         source_names: List[str] = []
@@ -385,6 +439,15 @@ class ConfluenceEngine:
             "source_names": source_names,
             "sources": sources,
             "tradeable": status == "ACTIONABLE",
+            "process_locked": bool(idea and idea.get("status") == "ACTIVE"),
+            "process_idea": {
+                "status": (idea or {}).get("status"),
+                "recipe": ((idea or {}).get("recipe") or {}).get("name"),
+                "invalidation": (idea or {}).get("invalidation"),
+                "entry": (idea or {}).get("entry"),
+                "stop": (idea or {}).get("stop"),
+                "target": (idea or {}).get("target"),
+            } if idea else None,
         }
 
     def _market_bias(

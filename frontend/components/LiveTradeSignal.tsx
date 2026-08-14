@@ -58,6 +58,25 @@ interface TradeSignalData {
     intel_state: string;
     tradable: boolean;
     trade_recommendation: TradeRecommendation;
+    process_idea?: {
+        status?: string;
+        thesis?: string;
+        invalidation?: number;
+        stop?: number;
+        target?: number;
+        entry?: number;
+        entry_label?: string;
+        trade_strike?: number;
+        trade_opt_type?: string;
+        recipe?: { name?: string } | string;
+        execution?: {
+            action_label?: string;
+            entry?: number;
+            stop?: number;
+            target?: number;
+            instrument?: { strike?: number; opt_type?: string };
+        };
+    } | null;
     timestamp: string;
 }
 
@@ -123,6 +142,34 @@ export default function LiveTradeSignal({ symbol, autoRefresh = true, refreshInt
                     </p>
                 </div>
             </div>
+
+            {data.process_idea?.status === 'ACTIVE' && (
+                <div className="mb-3 p-3 rounded-xl border border-cyan-500/40 bg-cyan-500/10 text-[11px] text-cyan-200 space-y-1">
+                    <div>
+                        Locked process trade
+                        {typeof data.process_idea.recipe === 'string'
+                            ? ` · ${data.process_idea.recipe}`
+                            : data.process_idea.recipe?.name
+                              ? ` · ${data.process_idea.recipe.name}`
+                              : ''}
+                        {data.process_idea.execution?.action_label
+                            ? ` · ${data.process_idea.execution.action_label}`
+                            : ''}
+                        . Thesis does not flip on the next snapshot.
+                    </div>
+                    {data.process_idea.thesis ? <div>{data.process_idea.thesis}</div> : null}
+                    <div className="flex flex-wrap gap-3 text-[10px] text-cyan-300/80">
+                        {data.process_idea.entry != null && (
+                            <span>Entry {data.process_idea.entry_label || ''} {data.process_idea.entry}</span>
+                        )}
+                        {data.process_idea.stop != null && <span>SL {data.process_idea.stop}</span>}
+                        {data.process_idea.target != null && <span>Tgt {data.process_idea.target}</span>}
+                        {data.process_idea.invalidation != null && (
+                            <span>Inv {data.process_idea.invalidation}</span>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Trade Signal */}
             {rec.action === 'ACTIONABLE' && rec.trades && rec.trades.length > 0 ? (

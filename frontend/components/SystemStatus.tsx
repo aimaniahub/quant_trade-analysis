@@ -11,6 +11,7 @@ interface ReadyResponse {
     fyers_api?: string;
     grok_api?: string;
     mcp_trading?: string;
+    redis?: string;
   };
 }
 
@@ -29,6 +30,7 @@ export default function SystemStatus() {
   const trading =
     data?.dependencies?.mcp_trading === 'enabled' ? 'ARMED' : 'OFF';
   const grok = data?.dependencies?.grok_api || '—';
+  const redis = data?.dependencies?.redis || '—';
 
   return (
     <div className="flex flex-wrap items-center gap-4">
@@ -51,6 +53,9 @@ export default function SystemStatus() {
       </span>
       <span className="flex items-center gap-1 text-zinc-500">
         News {grok === 'configured' ? 'Key Set' : 'Off'}
+      </span>
+      <span className="flex items-center gap-1 text-zinc-500">
+        Redis {redis === 'ok' ? 'OK' : redis === 'down' ? 'Down' : 'Off'}
       </span>
     </div>
   );

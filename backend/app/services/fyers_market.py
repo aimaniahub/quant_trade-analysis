@@ -28,6 +28,8 @@ TTL_QUOTES = 3.0
 TTL_SPOT = 3.0
 TTL_OPTION_CHAIN = 8.0
 TTL_HISTORY = 45.0
+# Longer history TTL for 15m bars used by MA scanners (reduces re-fetch storms)
+TTL_HISTORY_15M = 180.0
 
 
 class FyersMarketService:
@@ -191,22 +193,16 @@ class FyersMarketService:
         resolution: str = "D",
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
-        days: int = 30
+        days: int = 30,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         """
-        Get historical OHLCV data.
-        
-        Args:
-            symbol: Symbol e.g., "NSE:SBIN-EQ"
-            resolution: Timeframe - "1", "5", "15", "30", "60", "D", "W", "M"
-            from_date: Start date (YYYY-MM-DD) or None for auto
-            to_date: End date (YYYY-MM-DD) or None for today
-            days: Number of days back if from_date not specified
-            
-        Returns:
-            Dict with OHLCV candles
+        Get historical OHLCV data from Fyers.
+
+        force_refresh=True always hits the API (used by 7/200 scanner).
         """
         key = make_key("history", symbol, resolution, from_date, to_date, days)
+        ttl = TTL_HISTORY_15M if str(resolution) in ("15", "5", "30") else TTL_HISTORY
 
         def _fetch():
             fyers = self._get_fyers()
@@ -263,7 +259,33 @@ class FyersMarketService:
             except Exception as e:
                 return {"success": False, "error": str(e), "candles": []}
 
-        return self.cache.cached_call(key, TTL_HISTORY, _fetch)
+        if force_refresh:
+            value = _fetch()
+            if isinstance(value, dict) and value.get("success"):
+                self.cache.set(key, value, ttl)
+            return value
+
+        return self.cache.cached_call(key, ttl, _fetch)
+
+    def peek_historical_data(
+        self,
+        symbol: str,
+        resolution: str = "15",
+        days: int = 30,
+    ) -> Optional[Dict[str, Any]]:
+        """Return cached history only (no Fyers call). Used by shared-pool scanners."""
+        key = make_key("history", symbol, resolution, None, None, days)
+        hit = self.cache.get(key)
+        if hit is None:
+            # Try common day windows other strategies may have warmed
+            for d in (8, 5, 10, 20, 25, 30, 45, 60):
+                if d == days:
+                    continue
+                alt = self.cache.get(make_key("history", symbol, resolution, None, None, d))
+                if alt is not None and (alt.get("candles") or []):
+                    return alt
+            return None
+        return hit
     
     def get_option_chain(
         self,
