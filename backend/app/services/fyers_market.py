@@ -21,15 +21,16 @@ except ImportError:
 from app.core.config import get_settings
 from app.services.fyers_auth import get_auth_service
 from app.services.market_cache import get_market_cache, make_key
+from app.services.rate_limiter import get_fyers_limiter, is_rate_limit_error
 
 
-# Default TTLs (seconds) — short enough for trading UI, long enough to collapse polls
-TTL_QUOTES = 3.0
-TTL_SPOT = 3.0
-TTL_OPTION_CHAIN = 8.0
+# Default TTLs (seconds) — last-resort L1/L2 only. The symbol store is the book.
+TTL_QUOTES = 15.0
+TTL_SPOT = 15.0
+TTL_OPTION_CHAIN = 90.0
 TTL_HISTORY = 45.0
-# Longer history TTL for 15m bars used by MA scanners (reduces re-fetch storms)
-TTL_HISTORY_15M = 180.0
+# 15m bar only changes once per bar; 900s is the harvest contract
+TTL_HISTORY_15M = 900.0
 
 
 class FyersMarketService:
@@ -43,6 +44,30 @@ class FyersMarketService:
     def _get_fyers(self) -> Optional[fyersModel.FyersModel]:
         """Get authenticated Fyers model."""
         return self.auth_service.get_fyers_model()
+
+    def _invoke(self, api_name: str, fn):
+        """Pace Fyers REST and trip cooldown on 429 / empty gateway bodies."""
+        lim = get_fyers_limiter()
+        lim.acquire_sync()
+        try:
+            resp = fn()
+        except Exception as exc:
+            if is_rate_limit_error(exc):
+                lim.trip_limit(f"{api_name}: {str(exc)[:80]}")
+            raise
+        if isinstance(resp, dict):
+            code = resp.get("code")
+            msg = resp.get("message") or resp.get("error") or ""
+            nested = resp.get("Error") or {}
+            if isinstance(nested, dict):
+                code = code if code is not None else nested.get("code")
+                msg = msg or nested.get("message") or nested.get("error") or ""
+            blob = f"{code} {msg} {resp}"
+            if is_rate_limit_error(blob) or code == 429:
+                lim.trip_limit(f"{api_name}: {msg or code}")
+            elif resp.get("s") in ("ok", "OK") or resp.get("code") == 200:
+                lim.clear_soft()
+        return resp
     
     def _calculate_greeks(
         self,
@@ -122,14 +147,29 @@ class FyersMarketService:
     def get_quotes(self, symbols: List[str]) -> Dict[str, Any]:
         """
         Get real-time quotes for multiple symbols.
-        
-        Args:
-            symbols: List of symbols (max 50), e.g., ["NSE:NIFTY50-INDEX", "NSE:SBIN-EQ"]
-            
-        Returns:
-            Dict with quote data for each symbol
+
+        Readers serve the Redis symbol store when fresh. Only the harvest
+        writer (or a hard-stale escape hatch) hits Fyers.
         """
+        from app.services import symbol_store as store
+
         syms = list(symbols[:50])
+        if not store.is_harvest_writer():
+            spots = store.get_spots(syms)
+            missing = []
+            for s in syms:
+                if s not in spots or not spots[s].get("ltp"):
+                    missing.append(s)
+                    continue
+                if not store.is_fresh(s, "spot", store.quotes_ttl()):
+                    age = store.age(s, "spot")
+                    if age is None or age > store.stale_hard():
+                        missing.append(s)
+            if not missing:
+                store.note_reader_hit("quotes", ",".join(syms[:3]))
+                return store.quotes_response_from_spots(syms, spots)
+            store.note_reader_miss("quotes", f"n={len(missing)}")
+
         key = make_key("quotes", sorted(syms))
 
         def _fetch():
@@ -138,7 +178,7 @@ class FyersMarketService:
                 return {"success": False, "error": "Not authenticated", "data": []}
             try:
                 symbols_str = ",".join(syms)
-                response = fyers.quotes({"symbols": symbols_str})
+                response = self._invoke("quotes", lambda: fyers.quotes({"symbols": symbols_str}))
                 if response.get("s") == "ok":
                     return {
                         "success": True,
@@ -153,7 +193,13 @@ class FyersMarketService:
             except Exception as e:
                 return {"success": False, "error": str(e), "data": []}
 
-        return self.cache.cached_call(key, TTL_QUOTES, _fetch)
+        result = self.cache.cached_call(key, TTL_QUOTES, _fetch)
+        if result.get("success"):
+            for item in result.get("data") or []:
+                spot = store.spot_from_quote_item(item)
+                if spot and spot.get("symbol"):
+                    store.put_spot(spot["symbol"], spot)
+        return result
     
     def get_market_depth(self, symbol: str) -> Dict[str, Any]:
         """
@@ -199,10 +245,41 @@ class FyersMarketService:
         """
         Get historical OHLCV data from Fyers.
 
-        force_refresh=True always hits the API (used by 7/200 scanner).
+        force_refresh=True always hits the API (escape hatch only).
+        Readers serve the Redis symbol store (15m / D harvested; 60/240 derived).
         """
+        from app.services import symbol_store as store
+
+        res = str(resolution)
+        ttl = TTL_HISTORY_15M if res in ("15", "5", "30") else TTL_HISTORY
+        store_res = res
+        if res.upper() in ("D", "1D", "DAY", "DAILY"):
+            store_res = "D"
+
+        if not force_refresh:
+            min_bars = 1
+            if store_res in ("15", "D", "60", "240"):
+                cached = store.get_history(symbol, store_res, min_bars=min_bars, days=days)
+                fresh = False
+                if cached:
+                    if store_res == "15":
+                        fresh = store.is_fresh(symbol, "history.15", store.history_15_ttl())
+                    elif store_res == "D":
+                        fresh = store.is_fresh(symbol, "history.D")
+                    else:
+                        # derived from 15m
+                        fresh = store.is_fresh(symbol, "history.15", store.history_15_ttl())
+                    if fresh or (
+                        not store.is_harvest_writer()
+                        and (store.age(symbol, f"history.{store_res if store_res in ('15', 'D') else '15'}") or 0)
+                        < store.stale_hard() * 20
+                    ):
+                        store.note_reader_hit(f"history.{store_res}", symbol)
+                        return store.history_as_response(symbol, res, cached, days)
+                if not store.is_harvest_writer() and not cached:
+                    store.note_reader_miss(f"history.{store_res}", symbol)
+
         key = make_key("history", symbol, resolution, from_date, to_date, days)
-        ttl = TTL_HISTORY_15M if str(resolution) in ("15", "5", "30") else TTL_HISTORY
 
         def _fetch():
             fyers = self._get_fyers()
@@ -222,14 +299,14 @@ class FyersMarketService:
                 range_from = str(int(from_dt.timestamp()))
                 range_to = str(int(to_dt.timestamp()))
 
-                response = fyers.history({
+                response = self._invoke("history", lambda: fyers.history({
                     "symbol": symbol,
                     "resolution": resolution,
                     "date_format": "0",
                     "range_from": range_from,
                     "range_to": range_to,
                     "cont_flag": "1",
-                })
+                }))
 
                 if response.get("s") == "ok":
                     candles = response.get("candles", [])
@@ -261,11 +338,22 @@ class FyersMarketService:
 
         if force_refresh:
             value = _fetch()
-            if isinstance(value, dict) and value.get("success"):
-                self.cache.set(key, value, ttl)
-            return value
+        else:
+            value = self.cache.cached_call(key, ttl, _fetch)
 
-        return self.cache.cached_call(key, ttl, _fetch)
+        if isinstance(value, dict) and value.get("success"):
+            candles = value.get("candles") or []
+            if store_res in ("15", "D") and candles:
+                store.put_history(symbol, store_res, candles, days)
+                if store_res == "D":
+                    # stamp IST date so next reader treats D as fresh today
+                    snap = store.get(symbol) or {}
+                    hist = (snap.get("history") or {}).get("D") or {}
+                    hist["ist_date"] = datetime.now().strftime("%Y-%m-%d")
+                    store.put(symbol, {"history": {"D": hist}})
+            if force_refresh:
+                self.cache.set(key, value, ttl)
+        return value
 
     def peek_historical_data(
         self,
@@ -274,6 +362,11 @@ class FyersMarketService:
         days: int = 30,
     ) -> Optional[Dict[str, Any]]:
         """Return cached history only (no Fyers call). Used by shared-pool scanners."""
+        from app.services import symbol_store as store
+
+        stored = store.get_history(symbol, resolution, min_bars=1, days=days)
+        if stored:
+            return store.history_as_response(symbol, resolution, stored, days)
         key = make_key("history", symbol, resolution, None, None, days)
         hit = self.cache.get(key)
         if hit is None:
@@ -290,24 +383,56 @@ class FyersMarketService:
     def get_option_chain(
         self,
         symbol: str,
-        strike_count: int = 10
+        strike_count: int = 14,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         """
         Get option chain data for an index/stock.
-        
-        Args:
-            symbol: Underlying symbol e.g., "NSE:NIFTY50-INDEX" or "NSE:SBIN-EQ"
-            strike_count: Number of strikes above/below ATM
-            
-        Returns:
-            Dict with option chain data including OI, IV, Greeks
+
+        Store-first: if the harvest snapshot is wide enough and not stale,
+        slice it. Never key the cache by strike_count.
         """
-        key = make_key("oc", symbol, strike_count)
+        from app.services import symbol_store as store
+
+        want = int(strike_count or store.canonical_strike_count(symbol))
+        stored = store.get_chain(symbol, want)
+        if stored:
+            width = store.chain_width(stored.get("chain") or [], stored.get("atm_strike"))
+            fresh = store.is_fresh(symbol, "chain", store.oc_ttl())
+            age = store.age(symbol, "chain") or 0
+            if width >= want and fresh:
+                store.note_reader_hit("chain", symbol)
+                return stored
+            if (
+                width >= want
+                and not store.is_harvest_writer()
+                and age <= store.stale_hard()
+            ):
+                store.note_reader_hit("chain.stale", symbol)
+                return stored
+
+        if not store.is_harvest_writer():
+            store.note_reader_miss("chain", symbol, extra=f"want={want}")
+            # Hard-stale or missing: one escape-hatch Fyers fetch (flow click / first paint)
+
+        fetch_width = max(want, store.canonical_strike_count(symbol))
+        # Key WITHOUT strike_count — one chain per symbol
+        key = make_key("oc", symbol)
 
         def _fetch():
-            return self._get_option_chain_uncached(symbol, strike_count)
+            return self._get_option_chain_uncached(symbol, fetch_width)
 
-        return self.cache.cached_call(key, TTL_OPTION_CHAIN, _fetch)
+        if force_refresh:
+            self.cache.delete(key)
+            result = _fetch()
+        else:
+            result = self.cache.cached_call(key, TTL_OPTION_CHAIN, _fetch)
+        if result.get("success"):
+            store.put_chain(symbol, result)
+            sliced = store.get_chain(symbol, want)
+            if sliced:
+                return sliced
+        return result
 
     def _get_option_chain_uncached(self, symbol: str, strike_count: int = 10) -> Dict[str, Any]:
         fyers = self._get_fyers()
@@ -319,7 +444,7 @@ class FyersMarketService:
                 "symbol": symbol,
                 "strikecount": strike_count
             }
-            response = fyers.optionchain(data)
+            response = self._invoke("optionchain", lambda: fyers.optionchain(data))
             
             if response.get("code") == 200 or response.get("s") == "ok":
                 chain_data = response.get("data", {})
@@ -517,6 +642,19 @@ class FyersMarketService:
         Returns:
             Dict with spot price details
         """
+        from app.services import symbol_store as store
+
+        stored = store.get_spot(symbol)
+        if stored and stored.get("ltp"):
+            fresh = store.is_fresh(symbol, "spot", store.quotes_ttl())
+            age = store.age(symbol, "spot") or 0
+            if fresh or (not store.is_harvest_writer() and age <= store.stale_hard()):
+                store.note_reader_hit("spot", symbol)
+                return store.spot_response(symbol, stored)
+
+        if not store.is_harvest_writer():
+            store.note_reader_miss("spot", symbol)
+
         key = make_key("spot", symbol)
 
         def _fetch():
@@ -541,7 +679,6 @@ class FyersMarketService:
                 "symbol": symbol,
             }
 
-        # get_quotes already cached; spot cache is thin layer for shape stability
         hit = self.cache.get(key)
         if hit is not None:
             if isinstance(hit, dict):
@@ -552,6 +689,7 @@ class FyersMarketService:
         value = _fetch()
         if value.get("success"):
             self.cache.set(key, value, TTL_SPOT)
+            store.put_spot(symbol, value)
         if isinstance(value, dict):
             value = dict(value)
             value["_cache"] = "miss"

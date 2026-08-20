@@ -1,8 +1,8 @@
 """
 Cached Daily / 4H / 1H / 15m history for the MTF engine.
 
-Only called for symbols that already produced option-flow fuel so we
-do not burn Fyers quota on the full book every scan.
+Reads the Redis symbol store. 4H and 1H are derived from stored 15m —
+this service must not call Fyers on the reader path.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ from app.utils.market_hours import IST
 
 logger = logging.getLogger(__name__)
 
-# Resolution → (fyers code, days, ttl seconds)
+# Resolution → (store code, min_bars, ttl seconds) — ttl is memory only
 _SPECS = {
-    "D": ("D", 30, 6 * 3600),
-    "240": ("240", 45, 3 * 3600),
-    "60": ("60", 15, 50 * 60),
-    "15": ("15", 6, 90),
+    "D": ("D", 20, 6 * 3600),
+    "240": ("240", 20, 3 * 3600),
+    "60": ("60", 20, 50 * 60),
+    "15": ("15", 20, 90),
 }
 
 
@@ -31,21 +31,25 @@ class MTFService:
         self._cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 
     def _candles(self, symbol: str, key: str) -> List[Dict[str, Any]]:
-        res, days, ttl = _SPECS[key]
+        res, min_bars, ttl = _SPECS[key]
         ck = f"{symbol}:{res}"
         now = time.time()
         hit = self._cache.get(ck)
         if hit and hit[0] > now:
             return hit[1]
-        try:
-            from app.services.fyers_market import get_market_service
 
-            hist = get_market_service().get_historical_data(
-                symbol, resolution=res, days=days
-            )
-            bars = hist.get("candles") or []
-        except Exception as exc:
-            logger.debug("MTF history %s %s failed: %s", symbol, res, exc)
+        from app.services import symbol_store as store
+
+        bars: List[Dict[str, Any]] = []
+        if res in ("240", "60"):
+            src = store.get_history(symbol, "15", min_bars=20) or []
+            if src:
+                bars = store.aggregate_ohlcv(src, 240 if res == "240" else 60)
+        else:
+            bars = store.get_history(symbol, res, min_bars=min_bars) or []
+
+        if not bars:
+            logger.debug("MTF store miss %s %s — no Fyers fallback", symbol, res)
             bars = hit[1] if hit else []
         if bars:
             self._cache[ck] = (now + ttl, bars)
@@ -57,18 +61,20 @@ class MTFService:
         *,
         daily_candles: Optional[List[Dict[str, Any]]] = None,
         m15_candles: Optional[List[Dict[str, Any]]] = None,
+        h4_candles: Optional[List[Dict[str, Any]]] = None,
+        h1_candles: Optional[List[Dict[str, Any]]] = None,
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         daily = daily_candles if daily_candles is not None else self._candles(symbol, "D")
-        h4 = self._candles(symbol, "240")
-        h1 = self._candles(symbol, "60")
         m15 = m15_candles if m15_candles is not None else self._candles(symbol, "15")
-        # If caller passed 5m session bars, still fetch 15m for a real 7/20 stack
-        if m15_candles is not None and m15_candles:
-            # Prefer dedicated 15m if we have enough bars; else derive nothing — fetch
-            fetched = self._candles(symbol, "15")
-            if len(fetched) >= 20:
-                m15 = fetched
+        if h4_candles is not None:
+            h4 = h4_candles
+        else:
+            h4 = self._candles(symbol, "240")
+        if h1_candles is not None:
+            h1 = h1_candles
+        else:
+            h1 = self._candles(symbol, "60")
         packed = evaluate_mtf(
             daily_candles=daily or [],
             h4_candles=h4 or [],

@@ -8,6 +8,7 @@ from app.routes import ma_crossover as ma_crossover_routes
 from app.routes import option_flow_radar as radar_routes
 from app.routes import confluence as confluence_routes
 from app.routes import ma7200 as ma7200_routes
+from app.routes import rsi as rsi_routes
 from app.services.candle_aggregator import get_candle_aggregator
 from app.services.strategies.ma_crossover import get_ma_crossover_service
 from app.services.fyers_websocket import get_websocket_manager
@@ -113,6 +114,7 @@ def create_app() -> FastAPI:
     from app.routes import strategies
     app.include_router(strategies.router, prefix=settings.api_prefix, tags=["Strategies"])
     app.include_router(ma7200_routes.router, prefix=settings.api_prefix, tags=["MA 7/200 + OC"])
+    app.include_router(rsi_routes.router, prefix=settings.api_prefix, tags=["RSI Desk"])
     
     return app
 

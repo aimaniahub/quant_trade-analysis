@@ -77,10 +77,11 @@ class NiftySentimentService:
         except Exception as e:
             return {"error": str(e), "value": None}
     
-    def get_nifty_pcr(self) -> Dict[str, Any]:
+    def get_nifty_pcr(self, chain_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Get Nifty 50 Put-Call Ratio from option chain."""
         try:
-            chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
+            if chain_data is None:
+                chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
             if not chain_data.get("success"):
                 return {"error": "Unable to fetch Nifty OC", "pcr": None}
             
@@ -122,21 +123,30 @@ class NiftySentimentService:
             return {"error": str(e), "pcr": None}
     
     def get_market_breadth(self) -> Dict[str, Any]:
-        """Calculate advances/declines for FNO stocks."""
+        """Calculate advances/declines from stored spots (one batched quotes if cold)."""
         try:
             advances = 0
             declines = 0
             unchanged = 0
             errors = 0
-            
-            # Sample top 50 FNO stocks for breadth
+
             sample_stocks = FNO_STOCKS[:50]
-            
+            from app.services import symbol_store as store
+
+            spots = store.get_spots(sample_stocks)
+            if len(spots) < 15:
+                # one batched quotes call — store-first will fill idx:quotes
+                try:
+                    self.market_service.get_quotes(sample_stocks[:50])
+                    spots = store.get_spots(sample_stocks)
+                except Exception:
+                    pass
+
             for symbol in sample_stocks:
                 try:
-                    quote = self.market_service.get_spot_price(symbol)
-                    if quote.get("success"):
-                        change = quote.get("change", 0) or 0
+                    quote = spots.get(symbol) or store.get_spot(symbol) or {}
+                    if quote.get("ltp") is not None:
+                        change = quote.get("chg") or quote.get("change") or 0
                         if change > 0:
                             advances += 1
                         elif change < 0:
@@ -145,7 +155,7 @@ class NiftySentimentService:
                             unchanged += 1
                     else:
                         errors += 1
-                except:
+                except Exception:
                     errors += 1
             
             total = advances + declines + unchanged
@@ -183,10 +193,11 @@ class NiftySentimentService:
         except Exception as e:
             return {"error": str(e), "advances": 0, "declines": 0}
     
-    def get_nifty_oi_change(self) -> Dict[str, Any]:
+    def get_nifty_oi_change(self, chain_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Get Nifty OI change analysis."""
         try:
-            chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=15)
+            if chain_data is None:
+                chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
             if not chain_data.get("success"):
                 return {"error": "Unable to fetch OC", "call_oi_change": 0, "put_oi_change": 0}
             
@@ -237,10 +248,11 @@ class NiftySentimentService:
         except Exception as e:
             return {"error": str(e), "call_oi_change": 0, "put_oi_change": 0}
     
-    def get_nifty_levels(self) -> Dict[str, Any]:
+    def get_nifty_levels(self, chain_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Get current Nifty spot with support/resistance from OI."""
         try:
-            chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
+            if chain_data is None:
+                chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
             if not chain_data.get("success"):
                 return {"error": "Unable to fetch OC"}
             
@@ -277,13 +289,14 @@ class NiftySentimentService:
             return {"error": str(e)}
     
     def get_full_sentiment(self) -> Dict[str, Any]:
-        """Get complete Nifty sentiment dashboard data."""
+        """One stored Nifty chain reused for PCR / OI / levels."""
+        chain = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
         return {
             "vix": self.get_vix_data(),
-            "pcr": self.get_nifty_pcr(),
+            "pcr": self.get_nifty_pcr(chain),
             "breadth": self.get_market_breadth(),
-            "oi_change": self.get_nifty_oi_change(),
-            "levels": self.get_nifty_levels(),
+            "oi_change": self.get_nifty_oi_change(chain),
+            "levels": self.get_nifty_levels(chain),
             "timestamp": datetime.now().isoformat()
         }
 

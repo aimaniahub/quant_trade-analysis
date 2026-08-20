@@ -59,6 +59,14 @@ async def readiness_check():
     if redis_stats.get("enabled"):
         redis_dep = "ok" if redis_stats.get("connected") else "down"
 
+    harvest = {}
+    try:
+        from app.services.symbol_store import status as store_status
+
+        harvest = store_status()
+    except Exception as e:
+        harvest = {"error": str(e)}
+
     return {
         "status": "ready" if fyers_ok else "degraded",
         "dependencies": {
@@ -72,4 +80,5 @@ async def readiness_check():
         "rate_limit": rate,
         "redis": redis_stats,
         "scan_jobs": job_stats,
+        "harvest": harvest,
     }

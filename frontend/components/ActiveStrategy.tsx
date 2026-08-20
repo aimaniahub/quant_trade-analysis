@@ -119,7 +119,7 @@ function deriveStrategy(data: MarketStateData | null | undefined) {
 
 export default function ActiveStrategy() {
     const { data, isLoading } = useApiQuery<MarketStateData>(
-        ['market', 'state'],
+        ['market', 'state', 'NIFTY'],
         () => api.market.getMarketState() as Promise<MarketStateData>,
         { refetchInterval: 45000 },
     );

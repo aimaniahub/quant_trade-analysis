@@ -34,14 +34,17 @@ export default function QuantDashboard({ onBack }: QuantDashboardProps) {
             setLoadingStocks(true);
             setStocksError(null);
             try {
-                const response = await api.market.scanHighVolume('60', 8);
+                const response = await api.market.scanHighVolume('15', 8);
                 if (cancelled) return;
                 if (response.success && response.top_stocks?.length) {
                     setTopStocks(response.top_stocks);
                     setSelectedStock(response.top_stocks[0].symbol);
+                    if (response.waiting_harvest) {
+                        setStocksError(`15m book ${response.total_scanned - (response.waiting_harvest || 0)}/${response.total_scanned} — waiting harvest`);
+                    }
                 } else {
                     setTopStocks([]);
-                    setStocksError(response.error || 'No high-volume names returned');
+                    setStocksError(response.error || '15m book warming — waiting harvest');
                 }
             } catch (error: any) {
                 if (!cancelled) {
@@ -100,8 +103,8 @@ export default function QuantDashboard({ onBack }: QuantDashboardProps) {
             <main className="max-w-7xl mx-auto p-4 space-y-6">
                 <LoadingBanner
                     active={loadingStocks}
-                    label="Scanning high-volume F&O names"
-                    detail="Relative volume · buying pressure · top composite scores"
+                    label="Reading high-volume names from the harvest book"
+                    detail="CPU on stored 15m · no Fyers walk"
                 />
                 {stocksError && !loadingStocks && (
                     <div className="p-3 rounded-xl border border-rose-500/30 bg-rose-500/10 text-xs text-rose-300">

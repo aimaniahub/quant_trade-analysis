@@ -175,6 +175,85 @@ class HighVolumeScannerService:
             "close_position": round(close_position, 2)
         }
     
+    def scan_from_store(
+        self,
+        timeframe: str = "15",
+        top_count: int = 5,
+        progress_callback=None,
+    ) -> Dict[str, Any]:
+        """CPU-only HV scan over harvested 15m (derive 60m). No Fyers."""
+        from app.services import symbol_store as store
+
+        res = "15"
+        want_60 = str(timeframe) in ("60", "60m", "1h", "1H")
+        all_stocks = FNO_STOCKS
+        total_stocks = len(all_stocks)
+        scanned = 0
+        results = []
+        errors = []
+        waiting = 0
+
+        for symbol in all_stocks:
+            scanned += 1
+            try:
+                candles = store.get_history(symbol, "15", min_bars=8)
+                if not candles:
+                    waiting += 1
+                    errors.append({"symbol": symbol, "error": "15m book not harvested yet"})
+                    if progress_callback:
+                        progress_callback(scanned, total_stocks)
+                    continue
+                if want_60:
+                    candles = store.aggregate_ohlcv(candles, 60) or candles
+
+                volume_data = self._calculate_relative_volume(candles)
+                buying_data = self._detect_buying_pressure(candles)
+                last_candle = candles[-1]
+                open_price, high, low, close, volume = self._extract_candle_ohlc(last_candle)
+                current_price = close
+                price_change = ((close - open_price) / open_price * 100) if open_price else 0
+                volume_score = min(100, volume_data["relative_volume"] * 25)
+                buying_score = buying_data["strength"]
+                composite_score = (volume_score * 0.6) + (buying_score * 0.4)
+                if volume_data["relative_volume"] >= 1.5 or buying_data["is_buying"]:
+                    results.append({
+                        "symbol": symbol,
+                        "name": symbol.replace("NSE:", "").replace("-EQ", ""),
+                        "cap": self.classify_stock_cap(symbol).value,
+                        "price": round(current_price, 2),
+                        "price_change_pct": round(price_change, 2),
+                        "volume": volume_data,
+                        "buying_pressure": buying_data,
+                        "composite_score": round(composite_score, 1),
+                    })
+                if progress_callback:
+                    progress_callback(scanned, total_stocks)
+            except Exception as e:
+                errors.append({"symbol": symbol, "error": f"{type(e).__name__}: {str(e)}"})
+
+        results.sort(key=lambda x: x["composite_score"], reverse=True)
+        top_stocks = results[:top_count]
+        out = {
+            "success": True,
+            "timeframe": f"{timeframe}min",
+            "total_scanned": scanned,
+            "high_volume_count": len(results),
+            "top_stocks": top_stocks,
+            "all_high_volume": results,
+            "errors_count": len(errors),
+            "errors": errors[:10] if errors else None,
+            "waiting_harvest": waiting,
+            "source": "store",
+            "timestamp": datetime.now().isoformat(),
+        }
+        try:
+            import time as _time
+            self._last_scan = out
+            self._last_scan_at = _time.time()
+        except Exception:
+            pass
+        return out
+
     async def scan_high_volume_stocks(
         self,
         timeframe: str = "15",
@@ -182,16 +261,45 @@ class HighVolumeScannerService:
         progress_callback: callable = None
     ) -> Dict[str, Any]:
         """
-        Scan all FNO stocks for high volume buying activity.
-        
-        Args:
-            timeframe: "15" for 15min or "60" for 1hr
-            top_count: Number of top stocks to return
-            progress_callback: Optional callback for progress updates
-            
-        Returns:
-            Dict with scanned stocks, top high volume stocks, progress info
+        Scan FNO stocks for high volume. Prefers harvested Redis 15m.
         """
+        from app.services import symbol_store as store
+
+        cached = store.get_hv_index(max_age=1800.0)
+        if cached and cached.get("top_stocks") and str(timeframe) in ("15", "15m"):
+            out = dict(cached)
+            out["success"] = True
+            out["source"] = "idx:hv"
+            out["top_stocks"] = (cached.get("top_stocks") or [])[:top_count]
+            return out
+
+        cpu = self.scan_from_store(timeframe=timeframe, top_count=top_count, progress_callback=progress_callback)
+        if cpu.get("top_stocks") or cpu.get("total_scanned"):
+            if cpu.get("top_stocks"):
+                store.set_hv_index(cpu)
+            return cpu
+
+        # Book empty — do not storm Fyers. Caller shows warming banner.
+        return {
+            "success": True,
+            "timeframe": f"{timeframe}min",
+            "total_scanned": 0,
+            "high_volume_count": 0,
+            "top_stocks": [],
+            "all_high_volume": [],
+            "waiting_harvest": len(FNO_STOCKS),
+            "source": "store_empty",
+            "error": "15m book warming — waiting harvest",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    async def _scan_high_volume_stocks_fyers_legacy(
+        self,
+        timeframe: str = "15",
+        top_count: int = 5,
+        progress_callback: callable = None
+    ) -> Dict[str, Any]:
+        """Unused Fyers walk — kept only so older imports don't break."""
         all_stocks = FNO_STOCKS
         total_stocks = len(all_stocks)
         scanned = 0
@@ -202,14 +310,13 @@ class HighVolumeScannerService:
             try:
                 scanned += 1
                 
-                # Offload blocking Fyers REST so the event loop can serve other clients
                 history = await asyncio.to_thread(
                     self.market_service.get_historical_data,
                     symbol,
                     timeframe,
                     None,
                     None,
-                    5,  # last 5 days of intraday data
+                    5,
                 )
                 
                 if not history.get("success") or not history.get("candles"):

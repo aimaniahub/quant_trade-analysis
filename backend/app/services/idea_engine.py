@@ -35,9 +35,12 @@ SNAPSHOT_MIN_GAP_SECONDS = 45.0  # refresh spam updates last row, does not count
 
 # Hysteresis
 ENTER_COMPOSITE = 70.0
+ENTER_VWAP_OC = 52.0  # VWAP side + option fuel is the confirmation stack
 EXIT_COMPOSITE = 45.0
 MIN_LOCATION_PROMOTE = 4.0
 MIN_LOCATION_A_PLUS_FAST = 6.0  # A+ can promote on 2/3 if location is rich
+VWAP_NEAR_PCT = 0.25  # within 0.25% counts as at-VWAP reclaim / reject
+VWAP_COMPOSITE_PTS = 15.0
 
 # Fuel labels that can become a process trade
 PROCESS_LABELS = {
@@ -199,12 +202,63 @@ def detect_dual_side(snapshots: List[FlowSnapshot], current_opposing: bool) -> b
     return len(dirs) >= 2
 
 
+def vwap_confirmation(
+    spot: float,
+    session: Optional[Dict[str, Any]],
+    direction: str,
+) -> Dict[str, Any]:
+    """
+    Session VWAP is the institutional mean (Zerodha / marketfeed / Choice).
+    Long only when spot is above or reclaiming VWAP.
+    Short only when spot is below or rejecting VWAP.
+    """
+    session = session or {}
+    vwap = session.get("vwap")
+    d = (direction or "").upper()
+    try:
+        spot_f = float(spot or 0)
+        vwap_f = float(vwap) if vwap is not None else 0.0
+    except (TypeError, ValueError):
+        spot_f, vwap_f = 0.0, 0.0
+    if vwap_f <= 0 or spot_f <= 0:
+        return {
+            "ok": False,
+            "side": "UNKNOWN",
+            "dev_pct": None,
+            "agree": False,
+            "near": False,
+            "vwap": None,
+        }
+    dev_pct = (spot_f - vwap_f) / vwap_f * 100.0
+    near = abs(dev_pct) <= VWAP_NEAR_PCT
+    side = "ABOVE" if spot_f >= vwap_f else "BELOW"
+    if d == "BULLISH":
+        agree = spot_f >= vwap_f or near
+    elif d == "BEARISH":
+        agree = spot_f <= vwap_f or near
+    else:
+        agree = False
+    return {
+        "ok": True,
+        "side": side,
+        "dev_pct": round(dev_pct, 3),
+        "agree": bool(agree),
+        "near": bool(near),
+        "vwap": round(vwap_f, 2),
+    }
+
+
+def fuel_ok_from_snap(snap: FlowSnapshot) -> bool:
+    return snap.label in PROCESS_LABELS or snap.signal in STRONG_FLOW
+
+
 def classify_recipe(
     *,
     direction: str,
     location: Dict[str, Any],
     label: str,
     cam_regime: str,
+    vwap_agree: bool = False,
 ) -> Dict[str, Any]:
     tags = set(location.get("tags") or [])
     d = (direction or "").upper()
@@ -213,6 +267,9 @@ def classify_recipe(
     def hit(*need: str) -> bool:
         return any(any(n in t for n in need) for t in tags)
 
+    # VWAP + option-chain fuel is itself a process recipe (marketfeed / Stoxra).
+    if d in ("BULLISH", "BEARISH") and (vwap_agree or hit("VWAP_LONG", "VWAP_SHORT")):
+        return {"id": "VWAP_OC", "name": "VWAP + option flow", "ok": True}
     if d == "BULLISH" and "Put Writing" in (label or "") and (
         hit("PUT_WALL", "PIVOT_SUPPORT", "INST_ZONE")
     ):
@@ -244,6 +301,8 @@ def hard_vetoes(
     now: Optional[datetime] = None,
     for_new_lock: bool = True,
     mtf: Optional[Dict[str, Any]] = None,
+    session: Optional[Dict[str, Any]] = None,
+    vwap: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     vetoes: List[str] = []
     now = now or now_ist()
@@ -272,6 +331,14 @@ def hard_vetoes(
     if location.get("htf_opposes"):
         vetoes.append("HTF_OPPOSE")
 
+    fuel_ok = fuel_ok_from_snap(snap)
+    vwap = vwap or vwap_confirmation(snap.spot, session, snap.direction)
+    vwap_oc_ready = bool(vwap.get("agree") and fuel_ok)
+
+    # Wrong side of session VWAP — do not lock a new directional trade.
+    if for_new_lock and vwap.get("ok") and not vwap.get("agree"):
+        vetoes.append("VWAP_OPPOSE")
+
     # PCR regime vs direction (structural ceiling / floor)
     pcr_bias = (structure.get("pcr_bias") or "").upper()
     if snap.direction == "BULLISH" and pcr_bias == "BEARISH" and (structure.get("pcr") or 1) <= 0.70:
@@ -295,19 +362,28 @@ def hard_vetoes(
     if dte is not None and dte <= 2 and cam == "INSIDE_CAM" and pain_dist is not None and pain_dist <= 0.4:
         vetoes.append("EXPIRY_PIN")
 
-    if for_new_lock and mtf and mtf.get("allowed_side"):
+    if for_new_lock and mtf and mtf.get("allowed_side") is not None:
         if mtf.get("daily_veto"):
             vetoes.append("DAILY_HARD_VETO")
         allowed = str(mtf.get("allowed_side") or "NONE").upper()
-        if snap.direction == "BULLISH" and allowed != "LONG":
+        opposite = (
+            (snap.direction == "BULLISH" and allowed == "SHORT")
+            or (snap.direction == "BEARISH" and allowed == "LONG")
+        )
+        # 4H firmly opposite remains a hard veto. MIXED 4H + VWAP/OC may trade.
+        if opposite:
             vetoes.append("MTF_SIDE_BLOCK")
-        elif snap.direction == "BEARISH" and allowed != "SHORT":
-            vetoes.append("MTF_SIDE_BLOCK")
-        if not mtf.get("confirmed_ready") and not mtf.get("hq_pullback"):
-            vetoes.append("MTF_NOT_READY")
+        elif not vwap_oc_ready:
+            if snap.direction == "BULLISH" and allowed != "LONG":
+                vetoes.append("MTF_SIDE_BLOCK")
+            elif snap.direction == "BEARISH" and allowed != "SHORT":
+                vetoes.append("MTF_SIDE_BLOCK")
+            if not mtf.get("confirmed_ready") and not mtf.get("hq_pullback"):
+                vetoes.append("MTF_NOT_READY")
 
     if for_new_lock and float(location.get("score") or 0) < MIN_LOCATION_PROMOTE:
-        vetoes.append("NO_LOCATION")
+        if not vwap_oc_ready:
+            vetoes.append("NO_LOCATION")
 
     if for_new_lock and persist.get("flips", 0) > 0:
         vetoes.append("DIRECTION_FLIPS")
@@ -324,6 +400,7 @@ def compute_composite(
     futures: Dict[str, Any],
     direction: str,
     grade: str,
+    vwap_agree: bool = False,
 ) -> float:
     pers = min(max(float(persist.get("score") or 0), 0.0), 1.0)
     loc = min(max(float(location_score) / 11.0, 0.0), 1.0)
@@ -336,6 +413,7 @@ def compute_composite(
     elif d == "BEARISH" and futures.get("agree_short"):
         fut_pts = 10.0
     grade_pts = 4.0 if grade == "A+" else 2.0 if grade == "A" else 0.0
+    vwap_pts = VWAP_COMPOSITE_PTS if vwap_agree else 0.0
     total = (
         pers * 25.0
         + loc * 30.0
@@ -343,6 +421,7 @@ def compute_composite(
         + uns * 10.0
         + fut_pts
         + grade_pts
+        + vwap_pts
     )
     return round(min(100.0, total), 1)
 
@@ -384,12 +463,16 @@ def evaluate_candidate(
         session=session,
         structure=structure,
     )
+    vwap = vwap_confirmation(snap.spot, session, snap.direction)
+    fuel_ok = fuel_ok_from_snap(snap)
+    vwap_oc_ready = bool(vwap.get("agree") and fuel_ok)
     dual = detect_dual_side(snapshots, snap.opposing)
     recipe = classify_recipe(
         direction=snap.direction,
         location=location,
         label=snap.label,
         cam_regime=location.get("camarilla_regime") or "",
+        vwap_agree=bool(vwap.get("agree")),
     )
     vetoes = hard_vetoes(
         snap=snap,
@@ -402,6 +485,8 @@ def evaluate_candidate(
         now=now,
         for_new_lock=True,
         mtf=mtf or None,
+        session=session,
+        vwap=vwap,
     )
     levels = invalidation_and_targets(
         spot=snap.spot,
@@ -426,31 +511,41 @@ def evaluate_candidate(
         if not recipe.get("ok"):
             recipe = {"id": "OI_CLUSTER", "name": "OI cluster entry", "ok": True}
     tag_roles = location_tags_for_role(location.get("tags") or [], snap.direction)
+    loc_score = float(location.get("score") or 0)
+    if vwap_oc_ready:
+        loc_score = max(loc_score, float(MIN_LOCATION_PROMOTE))
     composite = compute_composite(
         persist=persist,
-        location_score=float(location.get("score") or 0),
+        location_score=loc_score,
         lis=snap.lis,
         unusual_score=snap.unusual_score,
         futures=futures,
         direction=snap.direction,
         grade=snap.grade,
+        vwap_agree=bool(vwap.get("agree")),
     )
     loc_ok = (
         float(location.get("score") or 0) >= MIN_LOCATION_PROMOTE
         or bool((execution or {}).get("entry_cluster"))
+        or vwap_oc_ready
     )
     persist_ok = persist["ready"] or (
         persist.get("fast_ok")
         and float(location.get("score") or 0) >= MIN_LOCATION_A_PLUS_FAST
         and snap.grade in ("A", "A+")
     )
-    fuel_ok = snap.label in PROCESS_LABELS or snap.signal in STRONG_FLOW
+    if vwap_oc_ready and persist.get("flips", 0) == 0:
+        persist_ok = persist_ok or (
+            int(persist.get("same") or 0) >= 2
+            and float(persist.get("age_seconds") or 0) >= MIN_PERSIST_SECONDS
+        )
+    enter_bar = ENTER_VWAP_OC if vwap_oc_ready else ENTER_COMPOSITE
     can_promote = (
         persist_ok
         and loc_ok
         and fuel_ok
         and recipe.get("ok")
-        and composite >= ENTER_COMPOSITE
+        and composite >= enter_bar
         and not vetoes
         and snap.direction in ("BULLISH", "BEARISH")
     )
@@ -481,6 +576,8 @@ def evaluate_candidate(
         "dual_side": dual,
         "can_promote": can_promote,
         "fuel_ok": fuel_ok,
+        "vwap_oc_ready": vwap_oc_ready,
+        "vwap": vwap,
         "step": step,
         "mtf": mtf or None,
         "futures": {

@@ -12,21 +12,20 @@ import asyncio
 import logging
 from typing import Optional
 
-from app.services.fno_stocks import TOP_FNO_STOCKS, FNO_INDICES, filter_valid_symbols
-from app.services.option_flow_radar import get_radar_service
+from app.services.fno_stocks import filter_valid_symbols
+from app.services.option_flow_radar import ALL_FNO_WATCHLIST, get_radar_service
 from app.services.signal_bus import get_signal_bus
 from app.services.rate_limiter import get_fyers_limiter
 from app.utils.market_hours import is_market_open
 
 logger = logging.getLogger(__name__)
 
-# Lighter universe for scheduled scans (speed / rate limits)
-SCHEDULE_SYMBOLS = filter_valid_symbols(
-    list(dict.fromkeys([*TOP_FNO_STOCKS, *FNO_INDICES]))
-)
-INTERVAL_OPEN_SECS = 600      # 10 min while market open (was 5 — rate limit friendly)
+# Full F&O book — scheduler is the only universe Fyers writer
+SCHEDULE_SYMBOLS = filter_valid_symbols(list(ALL_FNO_WATCHLIST))
+INTERVAL_OPEN_SECS = 180      # 3 min full-book harvest while open
 INTERVAL_CLOSED_SECS = 180    # check again soon after open
 MIN_LIS_PUBLISH = 65
+STARTUP_DELAY_SECS = 5        # was 90 — book must warm at the open
 
 
 class RadarScheduler:
@@ -68,27 +67,23 @@ class RadarScheduler:
         logger.info("[RadarScheduler] stopped")
 
     async def run_once(self) -> dict:
-        """Manual / scheduled single pass over TOP symbols."""
+        """Manual / scheduled full-book harvest."""
         if self.radar._scan_running:
             return {"success": False, "error": "Scan already running"}
 
         if not self.radar._is_authenticated():
             return {"success": False, "error": "Not authenticated"}
 
-        self.radar._scan_running = True
-        try:
-            result = await asyncio.to_thread(
-                self.radar.scan_all,
-                SCHEDULE_SYMBOLS,
-                0,       # min_lis
-                None,    # opt type
-                10,      # strike_count — enough for ±10% OI clusters
-            )
-            if result.get("success"):
-                self._publish_hits(result.get("flagged") or [])
-            return result
-        finally:
-            self.radar._scan_running = False
+        result = await asyncio.to_thread(
+            self.radar.scan_all,
+            None,    # full ALL_FNO_WATCHLIST
+            0,       # min_lis
+            None,    # opt type
+            14,      # canonical equity width (indices harvested at 20 inside store)
+        )
+        if result.get("success"):
+            self._publish_hits(result.get("flagged") or [])
+        return result
 
     def _publish_hits(self, flagged: list):
         for row in flagged:
@@ -118,8 +113,7 @@ class RadarScheduler:
                 logger.debug(f"radar publish fail: {exc}")
 
     async def _loop(self):
-        # Delay past MA startup scan so both don't stampede Fyers together
-        await asyncio.sleep(90)
+        await asyncio.sleep(STARTUP_DELAY_SECS)
         limiter = get_fyers_limiter()
         while self._running:
             try:
@@ -139,7 +133,7 @@ class RadarScheduler:
                     await asyncio.sleep(max(wait, 10))
                     continue
 
-                logger.info("[RadarScheduler] starting scheduled TOP-FNO scan…")
+                logger.info("[RadarScheduler] starting full-book harvest…")
                 result = await self.run_once()
                 if result.get("success"):
                     logger.info(

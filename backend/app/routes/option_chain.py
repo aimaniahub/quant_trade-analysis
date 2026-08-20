@@ -13,7 +13,7 @@ intelligence_engine = get_intelligence_engine()
 @router.get("/options/chain/{symbol}")
 async def get_option_chain(
     symbol: str,
-    strike_count: int = Query(10, description="Number of strikes above/below ATM")
+    strike_count: int = Query(14, description="Number of strikes above/below ATM")
 ):
     """Get option chain for a symbol.
     
@@ -31,7 +31,7 @@ async def get_option_chain(
 @router.get("/options/analysis/{symbol}")
 async def analyze_option_structure(
     symbol: str,
-    strike_count: int = Query(10, ge=1, le=30),
+    strike_count: int = Query(14, ge=1, le=30),
 ):
     """Analyze option structure using the F&O Intelligence Engine."""
     result = await asyncio.to_thread(market_service.get_option_chain, symbol, strike_count)
@@ -75,7 +75,7 @@ async def analyze_option_structure(
 @router.get("/options/adjustments/{symbol}")
 async def detect_adjustments(
     symbol: str,
-    strike_count: int = Query(10, ge=1, le=30),
+    strike_count: int = Query(14, ge=1, le=30),
 ):
     """Detect adjustment / actionable trade setups from intelligence summary."""
     result = await asyncio.to_thread(market_service.get_option_chain, symbol, strike_count)

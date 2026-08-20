@@ -29,7 +29,7 @@ class ScanRequest(BaseModel):
     symbols: Optional[List[str]] = None
     min_lis: float = 0
     option_type: Optional[str] = None   # "CE" | "PE" | None
-    strike_count: int = 12
+    strike_count: int = 14
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -52,21 +52,62 @@ async def get_last_radar_scan():
     Used to paint the UI immediately without wiping it during a new scan.
     """
     service = get_radar_service()
-    last = service.get_last_scan() or service.get_cached_scan(max_age_seconds=7200) or {}
-    board = service.get_process_board(limit=8)
+    last = service.get_last_scan() or service.get_cached_scan(max_age_seconds=14400) or {}
+    from app.services.scan_jobs import get_scan_job_manager
+    from app.services.symbol_store import get_harvest_meta, status as store_status
+    from app.services.strategies.rsi_desk import weight_radar_rows
+
+    if last:
+        try:
+            last = dict(last)
+            def _need(rows):
+                chunk = rows or []
+                if not chunk:
+                    return False
+                return any(r.get("desk_score") is None for r in chunk[:12])
+
+            if _need(last.get("flagged")):
+                last["flagged"] = weight_radar_rows(last.get("flagged") or [])
+            if _need(last.get("watch")):
+                last["watch"] = weight_radar_rows(last.get("watch") or [])
+            if _need(last.get("alert_box")):
+                last["alert_box"] = weight_radar_rows(last.get("alert_box") or [])
+        except Exception:
+            pass
+
+    running = get_scan_job_manager().find_running("radar")
+    scan_running = bool(getattr(service, "_scan_running", False) or running)
+    harvest = get_harvest_meta() or {}
+    book = {}
+    try:
+        book = store_status()
+    except Exception:
+        book = {}
+    # Mid-scan the live idea book is half-built — never merge it over the last full board.
+    board = {} if scan_running else service.get_process_board(limit=8)
     if not last:
         return {
             "success": True,
             "has_data": False,
             "engine": "v4-process",
+            "scan_running": scan_running,
+            "active_job_id": running.id if running else None,
+            "harvest": harvest,
+            "book": book,
             **board,
         }
     return {
         "success": True,
         "has_data": True,
         **last,
+        "scan_running": scan_running,
+        "active_job_id": running.id if running else None,
+        "harvest": harvest,
+        "book": book,
         "ideas": last.get("ideas") or board.get("active") or [],
         "ideas_confirmed": last.get("ideas_confirmed") or board.get("confirmed") or [],
+        "ideas_bullish": last.get("ideas_bullish") or board.get("bullish") or board.get("ideas_bullish") or [],
+        "ideas_bearish": last.get("ideas_bearish") or board.get("bearish") or board.get("ideas_bearish") or [],
         "ideas_pullbacks": last.get("ideas_pullbacks") or board.get("pullbacks") or [],
         "ideas_watch": last.get("ideas_watch") or board.get("watch") or [],
         "ideas_conflict": last.get("ideas_conflict") or board.get("conflict") or [],
@@ -145,7 +186,7 @@ def _publish_radar_hits(result: dict) -> None:
 async def scan_all_symbols(
     min_lis: float = Query(0, description="Minimum LIS score to include (0–100)"),
     option_type: Optional[str] = Query(None, description="Filter: CE | PE | null for both"),
-    strike_count: int = Query(12, description="Strikes above/below ATM per symbol (±10–15%)"),
+    strike_count: int = Query(14, description="Strikes above/below ATM per symbol"),
 ):
     """
     Blocking radar scan (legacy). Prefer POST /radar/scan/start for live progress.
@@ -190,9 +231,9 @@ async def scan_custom_symbols(body: ScanRequest):
 async def start_radar_scan_job(
     min_lis: float = Query(0),
     option_type: Optional[str] = Query(None),
-    strike_count: int = Query(12, ge=4, le=20),
+    strike_count: int = Query(14, ge=4, le=20),
 ):
-    """Start background radar scan. Poll GET /radar/scan/jobs/{job_id}."""
+    """Nudge the harvest writer. Poll GET /radar/scan/jobs/{job_id} + /market/store/status."""
     import asyncio
     from app.services.fno_stocks import filter_valid_symbols
     from app.services.option_flow_radar import ALL_FNO_WATCHLIST
@@ -202,6 +243,28 @@ async def start_radar_scan_job(
     watch = filter_valid_symbols(list(ALL_FNO_WATCHLIST))
 
     mgr = get_scan_job_manager()
+    existing = mgr.find_running("radar")
+    if existing:
+        return {
+            "success": True,
+            "job_id": existing.id,
+            "status": "running",
+            "total": existing.total,
+            "reused": True,
+            "completed": existing.completed,
+            "completion_pct": existing.completion_pct,
+            "poll_url": f"/api/v1/radar/scan/jobs/{existing.id}",
+        }
+    if getattr(service, "_scan_running", False):
+        return {
+            "success": True,
+            "job_id": None,
+            "status": "blocked",
+            "total": len(watch),
+            "reused": True,
+            "message": "A scan is already running — board stays frozen",
+        }
+
     job = mgr.create(
         kind="radar",
         total=len(watch),
@@ -215,21 +278,42 @@ async def start_radar_scan_job(
     )
     mgr.mark_running(job.id)
 
-    def _on_progress(scanned, total, symbol, flagged_row, err):
+    def _on_progress(scanned, total, symbol, flagged_row, err, status="ok", ms=0):
+        import time as _time
+
+        job_obj = mgr.get(job.id)
+        meta = dict((job_obj.meta if job_obj else {}) or {})
+        log = list(meta.get("log") or [])
+        short = (symbol or "?").replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
+        if status != "start":
+            log.append({
+                "sym": short,
+                "status": status,
+                "ms": int(ms or 0),
+                "err": (str(err)[:80] if err else None),
+            })
+        meta["log"] = log[-28:]
+        meta["heartbeat_at"] = _time.time()
+        meta["last_status"] = status
+        meta["last_error"] = str(err)[:120] if err else None
+        meta["last_ms"] = int(ms or 0)
+        if status in ("wait", "retry", "retry_hit", "retry_start"):
+            meta["phase"] = "wait"
         mgr.set_current(job.id, symbol)
         mgr.update(
             job.id,
             completed=scanned,
             completion_pct=round(100.0 * scanned / max(total, 1), 1),
+            meta=meta,
         )
-        if flagged_row:
-            mgr.append_result_raw(job.id, flagged_row)
-        if err:
+        if status in ("hit", "retry_hit", "skip") and symbol:
+            mgr.clear_failed_symbol(job.id, symbol)
+        if err and status not in ("start", "wait", "retry", "retry_start"):
             mgr.note_error_only(
                 job.id,
                 symbol or "?",
                 str(err),
-                rate_limited=("rate_limit" in str(err).lower()),
+                rate_limited=("rate_limit" in str(err).lower() or str(err) == "timeout"),
             )
 
     async def _worker():
@@ -274,6 +358,8 @@ async def start_radar_scan_job(
                         "alert_box": result.get("alert_box") or [],
                         "ideas": result.get("ideas") or [],
                         "ideas_confirmed": result.get("ideas_confirmed") or [],
+                        "ideas_bullish": result.get("ideas_bullish") or [],
+                        "ideas_bearish": result.get("ideas_bearish") or [],
                         "ideas_pullbacks": result.get("ideas_pullbacks") or [],
                         "ideas_watch": result.get("ideas_watch") or [],
                         "ideas_conflict": result.get("ideas_conflict") or [],
@@ -282,6 +368,9 @@ async def start_radar_scan_job(
                         "rules": result.get("rules"),
                         "errors": result.get("errors"),
                         "rate_limited_skips": result.get("rate_limited_skips"),
+                        "retry_attempted": result.get("retry_attempted") or 0,
+                        "retry_recovered": result.get("retry_recovered") or 0,
+                        "failed_remaining": result.get("failed_remaining") or [],
                     }
                 },
             )
@@ -315,10 +404,13 @@ async def get_radar_scan_job(job_id: str):
 
     meta = snap.get("meta") or {}
     summary = meta.get("summary") or {}
-    flagged = summary.get("flagged") or snap.get("results") or []
-    watch = summary.get("watch") or []
-    alert_box = summary.get("alert_box") or []
-    ideas = summary.get("ideas") or []
+    done = snap["status"] in ("completed", "failed", "cancelled")
+    # While the job is running, return progress only. A half-finished
+    # flagged/idea list must not reach the board.
+    flagged = (summary.get("flagged") or []) if done else []
+    watch = (summary.get("watch") or []) if done else []
+    alert_box = (summary.get("alert_box") or []) if done else []
+    ideas = (summary.get("ideas") or []) if done else []
 
     return {
         "success": True,
@@ -335,25 +427,36 @@ async def get_radar_scan_job(job_id: str):
         or 0,
         "partial": snap.get("partial") or summary.get("partial", False),
         "error_message": snap.get("error_message"),
-        "scanned": summary.get("scanned", snap["completed"]),
+        "scanned": summary.get("scanned", snap["completed"]) if done else snap["completed"],
         "universe_requested": summary.get("universe_requested", snap["total"]),
-        "total_flagged": summary.get("total_flagged", len(flagged)),
+        "total_flagged": summary.get("total_flagged", len(flagged)) if done else 0,
         "flagged": flagged,
         "watch": watch,
         "alert_box": alert_box,
         "ideas": ideas,
-        "ideas_confirmed": summary.get("ideas_confirmed") or [],
-        "ideas_pullbacks": summary.get("ideas_pullbacks") or [],
-        "ideas_watch": summary.get("ideas_watch") or [],
-        "ideas_conflict": summary.get("ideas_conflict") or [],
-        "idea_counts": summary.get("idea_counts") or {},
-        "grade_counts": summary.get("grade_counts"),
-        "rules": summary.get("rules"),
-        "errors": summary.get("errors") or snap.get("errors"),
+        "ideas_confirmed": (summary.get("ideas_confirmed") or []) if done else [],
+        "ideas_bullish": (summary.get("ideas_bullish") or []) if done else [],
+        "ideas_bearish": (summary.get("ideas_bearish") or []) if done else [],
+        "ideas_pullbacks": (summary.get("ideas_pullbacks") or []) if done else [],
+        "ideas_watch": (summary.get("ideas_watch") or []) if done else [],
+        "ideas_conflict": (summary.get("ideas_conflict") or []) if done else [],
+        "idea_counts": (summary.get("idea_counts") or {}) if done else {},
+        "grade_counts": summary.get("grade_counts") if done else None,
+        "rules": summary.get("rules") if done else None,
+        "errors": (summary.get("errors") or snap.get("errors")) if done else [],
+        "retry_attempted": summary.get("retry_attempted") or 0,
+        "retry_recovered": summary.get("retry_recovered") or 0,
+        "failed_remaining": summary.get("failed_remaining") or snap.get("failed_symbols") or [],
         "market_hours": summary.get("market_hours"),
         "timestamp": summary.get("timestamp")
         or snap.get("finished_at")
         or snap.get("created_at"),
+        "log": (meta.get("log") or [])[-28:],
+        "last_status": meta.get("last_status"),
+        "last_error": meta.get("last_error"),
+        "last_ms": meta.get("last_ms"),
+        "heartbeat_at": meta.get("heartbeat_at"),
+        "phase": meta.get("phase"),
     }
 
 
@@ -392,7 +495,7 @@ async def get_candles(
 
 
 @router.get("/radar/ideas")
-async def get_process_ideas(limit: int = Query(8, ge=1, le=25)):
+async def get_process_ideas(limit: int = Query(12, ge=1, le=25)):
     """Locked Active Ideas board — the headline process trades."""
     return get_radar_service().get_process_board(limit=limit)
 

@@ -133,6 +133,7 @@ export const api = {
             api.fetch(`/market/greeks-heatmap/${symbol}?strike_count=${strikeCount}`),
         // Nifty sentiment
         getNiftySentiment: () => api.fetch('/market/nifty-sentiment'),
+        getStoreStatus: () => api.fetch('/market/store/status'),
         // Optional Grok news bias
         getNewsBias: (force = false) =>
             api.fetch(`/market/news-bias?force=${force ? 'true' : 'false'}`),
@@ -252,10 +253,21 @@ export const api = {
                 params.set('history_days', String(settings.history_days));
             return api.fetch(`/strategies/ma7200/scan?${params.toString()}`);
         },
-        analyze: (symbol: string, crossType: string, strikeCount = 12) =>
+        analyze: (symbol: string, crossType: string, strikeCount = 14) =>
             api.fetch(
                 `/strategies/ma7200/analyze?symbol=${encodeURIComponent(symbol)}&cross_type=${crossType}&strike_count=${strikeCount}`,
             ),
+    },
+
+    rsi: {
+        scan: (source: 'full' | 'top' = 'full', side: 'both' | 'oversold' | 'overbought' = 'both') =>
+            api.fetch(
+                `/strategies/rsi/scan?source=${source}&limit=200&side=${side}`,
+            ),
+        divergence: (tf: '15' | 'D' = '15', source: 'full' | 'top' = 'full') =>
+            api.fetch(`/strategies/rsi/divergence?tf=${tf}&source=${source}&limit=200`),
+        explain: (symbol: string) =>
+            api.fetch(`/strategies/rsi/symbol/${encodeURIComponent(symbol)}`),
     },
 
     /**
@@ -264,14 +276,14 @@ export const api = {
     radar: {
         getWatchlist: () => api.fetch('/radar/watchlist'),
         getLastScan: () => api.fetch('/radar/last'),
-        scan: (minLis = 0, optionType?: string, strikeCount = 12) => {
+        scan: (minLis = 0, optionType?: string, strikeCount = 14) => {
             const params = new URLSearchParams();
             params.set('min_lis', String(minLis));
             if (optionType) params.set('option_type', optionType);
             params.set('strike_count', String(strikeCount));
             return api.fetch(`/radar/scan?${params.toString()}`);
         },
-        startScan: (minLis = 0, optionType?: string, strikeCount = 12) => {
+        startScan: (minLis = 0, optionType?: string, strikeCount = 14) => {
             const params = new URLSearchParams();
             params.set('min_lis', String(minLis));
             if (optionType) params.set('option_type', optionType);

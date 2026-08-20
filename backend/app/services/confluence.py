@@ -217,7 +217,11 @@ class ConfluenceEngine:
 
     def _safe_nifty_intel(self) -> Optional[Dict[str, Any]]:
         try:
-            chain = self.market.get_option_chain("NSE:NIFTY50-INDEX", strike_count=8)
+            from app.services import symbol_store as store
+
+            chain = store.get_chain("NSE:NIFTY50-INDEX", 20)
+            if not chain or not chain.get("success"):
+                chain = self.market.get_option_chain("NSE:NIFTY50-INDEX", strike_count=20)
             if not chain.get("success"):
                 return None
             return self.intel.get_analysis_summary(chain, bypass_time_check=True)

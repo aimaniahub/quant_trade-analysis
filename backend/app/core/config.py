@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     redis_connect_timeout: float = 2.0
     # How often to flush large job payloads during a running scan
     redis_job_persist_interval: float = 1.5
+
+    # Harvest / Redis symbol store (one writer, many readers)
+    harvest_interval_secs: int = 180
+    harvest_oc_strikes: int = 14
+    harvest_oc_strikes_index: int = 20
+    harvest_history_15_days: int = 40
+    harvest_history_d_days: int = 30
+    harvest_oc_ttl_secs: int = 120
+    harvest_quotes_ttl_secs: int = 15
+    harvest_history_15_ttl_secs: int = 900
+    stale_soft_secs: int = 90
+    stale_hard_secs: int = 300
+    symbol_store_ttl_secs: int = 14400
     
     class Config:
         env_file = ".env"

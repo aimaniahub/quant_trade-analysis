@@ -50,11 +50,45 @@ function normalizeSettings(s: ScanSettings): ScanSettings {
     };
 }
 
+interface TicketVehicle {
+    style?: string;
+    instrument?: string;
+    strike?: number;
+    structure?: string;
+    why?: string;
+}
+
+interface Ticket {
+    side?: string;
+    trigger?: string;
+    sponsor?: string;
+    vehicle?: TicketVehicle;
+    entry?: string;
+    stop?: number;
+    stop_src?: string;
+    target1?: number;
+    target1_src?: string;
+    rr?: number;
+    time_stop?: string;
+    invalidation?: string;
+    adx?: number;
+    vwap?: number;
+    mtf_allowed?: string;
+    h4_bias?: string;
+}
+
+interface PermissionHit {
+    rule: string;
+    detail: string;
+    w?: number;
+}
+
 interface Candidate {
     symbol: string;
     name: string;
     ltp: number;
     cross_type: 'BULLISH' | 'BEARISH' | string;
+    kind?: string;
     cross_time?: string;
     volume_ratio: number;
     trend_15m: string;
@@ -67,7 +101,26 @@ interface Candidate {
     crosses_in_15d?: number;
     extension_from_200_pct?: number;
     momentum_score?: number;
+    approach_score?: number;
     body_strength?: number;
+    adx?: number;
+    vwap?: number;
+    permission?: number;
+    desk_score?: number;
+    board?: 'TRADE' | 'WATCH' | 'REJECT' | string;
+    board_reason?: string;
+    grade?: string;
+    h4_bias?: string;
+    mtf_allowed?: string;
+    mtf_gate?: string;
+    futures_state?: string;
+    buildup_note?: string;
+    atm_iv?: number;
+    put_wall?: number;
+    call_wall?: number;
+    ticket?: Ticket | null;
+    permission_hits?: PermissionHit[];
+    permission_miss?: string[];
 }
 
 interface SuggestedStrike {
@@ -75,6 +128,8 @@ interface SuggestedStrike {
     strike: number;
     instrument: string;
     structure: string;
+    style?: string;
+    why?: string;
 }
 
 interface RuleHit {
@@ -100,9 +155,16 @@ interface AnalyzeResult {
     primary_flow: string;
     secondary_flow?: string;
     oi_pcr: number;
-    max_pain?: number;
     suggested_strikes: SuggestedStrike[];
     report: string;
+    ticket?: Ticket | null;
+    board?: string;
+    board_reason?: string;
+    permission?: number;
+    desk_score?: number;
+    h4_bias?: string;
+    mtf_allowed?: string;
+    adx?: number;
 }
 
 interface Props {
@@ -111,6 +173,17 @@ interface Props {
 
 export default function MA7200Scanner({ onBack }: Props) {
     const [candidates, setCandidates] = useState<Candidate[]>([]);
+    const [tradeRows, setTradeRows] = useState<Candidate[]>([]);
+    const [watchRows, setWatchRows] = useState<Candidate[]>([]);
+    const [rejectRows, setRejectRows] = useState<Candidate[]>([]);
+    const [tab, setTab] = useState<'TRADE' | 'WATCH' | 'REJECT'>('TRADE');
+    const [selected, setSelected] = useState<Candidate | null>(null);
+    const [harvest, setHarvest] = useState<{
+        symbols?: number;
+        history_15_fresh?: number;
+        freshest_age?: number | null;
+        redis?: string;
+    } | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [scanned, setScanned] = useState(0);
@@ -159,6 +232,10 @@ export default function MA7200Scanner({ onBack }: Props) {
         setError(null);
         setAnalysis(null);
         setCandidates([]);
+        setTradeRows([]);
+        setWatchRows([]);
+        setRejectRows([]);
+        setSelected(null);
         setScanned(0);
         setProgress(0);
         setCurrentSym(null);
@@ -183,14 +260,37 @@ export default function MA7200Scanner({ onBack }: Props) {
                     setUniverse(snap.universe || snap.total || limit);
                     setCurrentSym(snap.current_symbol || null);
 
-                    const cands = snap.candidates || [];
-                    if (cands.length) setCandidates(cands);
+                    const trade = snap.trade || [];
+                    const watch = snap.watch || [];
+                    const reject = snap.reject || [];
+                    const cands =
+                        snap.candidates ||
+                        [...trade, ...watch, ...reject].filter(Boolean);
+                    if (cands.length) {
+                        setCandidates(cands);
+                        setTradeRows(
+                            trade.length
+                                ? trade
+                                : cands.filter((c: Candidate) => c.board === 'TRADE'),
+                        );
+                        setWatchRows(
+                            watch.length
+                                ? watch
+                                : cands.filter((c: Candidate) => c.board === 'WATCH'),
+                        );
+                        setRejectRows(
+                            reject.length
+                                ? reject
+                                : cands.filter((c: Candidate) => c.board === 'REJECT'),
+                        );
+                    }
+                    if (snap.harvest) setHarvest(snap.harvest);
 
                     if (snap.api) {
                         setApiInfo(
-                            `direct API · ok ${snap.api.ok ?? '—'} · fail ${snap.api.fail ?? 0}` +
-                                (snap.api.in_cooldown
-                                    ? ` · cooldown ${snap.api.cooldown_remaining}s`
+                            `store desk · ok ${snap.api.ok ?? '—'} · miss ${snap.api.fail ?? 0}` +
+                                (snap.harvest?.history_15_fresh != null
+                                    ? ` · 15m ${snap.harvest.history_15_fresh}/${snap.harvest.symbols ?? '—'}`
                                     : ''),
                         );
                     }
@@ -206,12 +306,31 @@ export default function MA7200Scanner({ onBack }: Props) {
                         setProgress(100);
                         setCurrentSym(null);
                         setCandidates(cands);
+                        const t =
+                            snap.trade ||
+                            cands.filter((c: Candidate) => c.board === 'TRADE');
+                        const w =
+                            snap.watch ||
+                            cands.filter((c: Candidate) => c.board === 'WATCH');
+                        setTradeRows(t);
+                        setWatchRows(w);
+                        setRejectRows(
+                            snap.reject ||
+                                cands.filter((c: Candidate) => c.board === 'REJECT'),
+                        );
+                        if (t[0]) {
+                            setSelected(t[0]);
+                            setTab('TRADE');
+                        } else if (w[0]) {
+                            setSelected(w[0]);
+                            setTab('WATCH');
+                        }
                         if (snap.status === 'failed') {
                             setError(snap.error_message || 'Scan job failed');
-                        } else if (cands.length === 0) {
+                        } else if (t.length === 0 && w.length === 0) {
                             const s = settingsRef.current;
                             setError(
-                                `Scanned ${snap.scanned || snap.completed || 0}/${snap.universe || limit} — no first-in-${s.window_days}d ${s.fast_ma}/${s.slow_ma} cross aged ≤${s.max_bars_ago + 1} bars (vol ≥${s.vol_mult}×).`,
+                                `Book scanned ${snap.scanned || snap.completed || 0}/${snap.universe || limit} — no TRADE/WATCH. Waiting harvest or 4H/OC gate empty. first-in-${s.window_days}d ${s.fast_ma}/${s.slow_ma}.`,
                             );
                         }
                     }
@@ -269,7 +388,16 @@ export default function MA7200Scanner({ onBack }: Props) {
         setDraft({ ...DEFAULT_SETTINGS });
     };
 
+    const selectRow = (c: Candidate) => {
+        setSelected(c);
+        setAnalyzeError(null);
+        if (c.ticket || c.board) {
+            setAnalysis(null);
+        }
+    };
+
     const analyzeChain = async (c: Candidate) => {
+        selectRow(c);
         setAnalyzing(c.symbol);
         setAnalyzeError(null);
         setAnalysis(null);
@@ -277,6 +405,7 @@ export default function MA7200Scanner({ onBack }: Props) {
             const data = (await api.ma7200.analyze(
                 c.symbol,
                 c.cross_type,
+                14,
             )) as AnalyzeResult;
             setAnalysis(data);
         } catch (e: any) {
@@ -287,12 +416,17 @@ export default function MA7200Scanner({ onBack }: Props) {
     };
 
     const statusColor = (s?: string) => {
-        if (s === 'CONFIRMED') return 'text-emerald-500 border-emerald-500/40 bg-emerald-500/10';
-        if (s === 'CONFLICT') return 'text-rose-500 border-rose-500/40 bg-rose-500/10';
+        if (s === 'CONFIRMED' || s === 'TRADE' || s === 'A-SETUP' || s === 'SETUP')
+            return 'text-emerald-500 border-emerald-500/40 bg-emerald-500/10';
+        if (s === 'CONFLICT' || s === 'REJECT')
+            return 'text-rose-500 border-rose-500/40 bg-rose-500/10';
         return 'text-amber-600 border-amber-500/40 bg-amber-500/10';
     };
 
     const maLabel = `${settings.fast_ma}/${settings.slow_ma}`;
+    const visibleRows =
+        tab === 'TRADE' ? tradeRows : tab === 'WATCH' ? watchRows : rejectRows;
+    const ticket = selected?.ticket || analysis?.ticket || null;
     const draftDirty =
         JSON.stringify(normalizeSettings(draft)) !== JSON.stringify(settings);
 
@@ -316,7 +450,7 @@ export default function MA7200Scanner({ onBack }: Props) {
                                 {maLabel} MA Cross<span className="text-cyan-500">.</span>
                             </h1>
                             <p className="text-xs font-bold text-zinc-500 uppercase tracking-widest">
-                                Direct Fyers 15m API · then option chain confirms
+                                15m first-cross · 4H allowed_side · OC/futures ticket
                             </p>
                         </div>
                     </div>
@@ -360,7 +494,7 @@ export default function MA7200Scanner({ onBack }: Props) {
                             disabled={loading || !settingsReady}
                             className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 text-white text-xs font-bold uppercase rounded-lg disabled:opacity-50"
                         >
-                            {loading ? 'Direct API scan…' : `↻ Scan ${maLabel}`}
+                            {loading ? 'Scoring book…' : `↻ Rescore ${maLabel}`}
                         </button>
                     </div>
                 </header>
@@ -527,35 +661,52 @@ export default function MA7200Scanner({ onBack }: Props) {
 
                 <LoadingBanner
                     active={loading}
-                    label={`Direct Fyers history API — ${maLabel} 15m per stock`}
+                    label={`Scoring harvest book — ${maLabel} 15m + stored chain`}
                     progress={progress}
                     detail={
                         currentSym
                             ? `Now: ${currentSym.replace('NSE:', '').replace('-EQ', '')} · ${scanned}/${universe}`
-                            : `Paced ~0.5s/call · full list ~1.5–2 min`
+                            : `CPU only · 4H gate · no Fyers walk`
                     }
                 />
 
+                {harvest && (
+                    <div className="mb-3 inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border border-zinc-700 bg-zinc-900/80 text-zinc-400">
+                        <span
+                            className={`w-1.5 h-1.5 rounded-full ${
+                                harvest.redis === 'ok' ? 'bg-emerald-500' : 'bg-amber-400'
+                            }`}
+                        />
+                        Book age{' '}
+                        {harvest.freshest_age != null
+                            ? `${Math.round(harvest.freshest_age)}s`
+                            : '—'}
+                        {' · '}
+                        15m {harvest.history_15_fresh ?? 0}/{harvest.symbols ?? 0}
+                        {' · '}
+                        {harvest.redis === 'ok' ? 'Redis' : 'Memory'}
+                    </div>
+                )}
+
                 <div className="mb-4 p-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 text-[11px] text-zinc-600 dark:text-zinc-400 space-y-1">
                     <div>
-                        <strong className="text-cyan-600">Active filters:</strong> first{' '}
+                        <strong className="text-cyan-600">Desk rules:</strong> first{' '}
                         <strong>
-                            {settings.fast_ma}/{settings.slow_ma} EMA
+                            {settings.fast_ma}/{settings.slow_ma}
                         </strong>{' '}
-                        cross in <strong>{settings.window_days} days</strong>, age ≤{' '}
-                        <strong>{settings.max_bars_ago + 1} closed 15m candles</strong>, volume ≥
-                        <strong>{settings.vol_mult}×</strong>. Sideways re-crosses hidden.
+                        in <strong>{settings.window_days}d</strong>, vol ≥
+                        <strong>{settings.vol_mult}×</strong>. Bar-2 only if ext ≤1.2% and P≥70.
+                        4H <strong>allowed_side</strong> is a hard gate. Max pain not used. IV
+                        picks outright vs debit spread.
                     </div>
                     <div>
-                        Direct Fyers 15m history per stock. Progress:{' '}
+                        Progress:{' '}
                         <span className="font-mono font-bold">
                             {scanned}/{universe || '—'}
                         </span>{' '}
-                        · momentum names: <span className="font-bold">{candidates.length}</span>
+                        · TRADE {tradeRows.length} · WATCH {watchRows.length} · REJECT{' '}
+                        {rejectRows.length}
                         {apiInfo ? ` · ${apiInfo}` : ''}
-                        {currentSym
-                            ? ` · ${currentSym.replace('NSE:', '').replace('-EQ', '')}`
-                            : ''}
                     </div>
                 </div>
 
@@ -567,13 +718,34 @@ export default function MA7200Scanner({ onBack }: Props) {
 
                 <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
                     <div className="lg:col-span-3 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden">
-                        <div className="px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex justify-between">
-                            <span className="text-xs font-black uppercase tracking-wider text-zinc-500">
-                                Step 1 · Momentum first-cross board
-                            </span>
+                        <div className="px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex flex-wrap gap-2 justify-between items-center">
+                            <div className="flex gap-1">
+                                {(
+                                    [
+                                        ['TRADE', tradeRows.length],
+                                        ['WATCH', watchRows.length],
+                                        ['REJECT', rejectRows.length],
+                                    ] as const
+                                ).map(([id, n]) => (
+                                    <button
+                                        key={id}
+                                        onClick={() => setTab(id)}
+                                        className={`px-3 py-1.5 text-[10px] font-black uppercase rounded-lg ${
+                                            tab === id
+                                                ? id === 'TRADE'
+                                                    ? 'bg-emerald-600 text-white'
+                                                    : id === 'WATCH'
+                                                      ? 'bg-amber-600 text-white'
+                                                      : 'bg-zinc-600 text-white'
+                                                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'
+                                        }`}
+                                    >
+                                        {id} {n}
+                                    </button>
+                                ))}
+                            </div>
                             <span className="text-[10px] text-zinc-400 font-bold">
-                                First in {settings.window_days}d · age ≤
-                                {settings.max_bars_ago + 1} · vol ≥{settings.vol_mult}×
+                                4H gate · first {settings.window_days}d · vol ≥{settings.vol_mult}×
                             </span>
                         </div>
                         <div className="overflow-x-auto max-h-[65vh] overflow-y-auto">
@@ -582,33 +754,38 @@ export default function MA7200Scanner({ onBack }: Props) {
                                     <tr>
                                         <th className="px-3 py-2">Stock</th>
                                         <th className="px-3 py-2">LTP</th>
-                                        <th className="px-3 py-2">Cross</th>
+                                        <th className="px-3 py-2">Side</th>
                                         <th className="px-3 py-2">Age</th>
-                                        <th className="px-3 py-2">
-                                            {settings.window_days}d
-                                        </th>
-                                        <th className="px-3 py-2">Vol</th>
-                                        <th className="px-3 py-2">Score</th>
-                                        <th className="px-3 py-2">Action</th>
+                                        <th className="px-3 py-2">ADX</th>
+                                        <th className="px-3 py-2">4H</th>
+                                        <th className="px-3 py-2">P</th>
+                                        <th className="px-3 py-2">Desk</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {!loading && candidates.length === 0 && (
+                                    {!loading && visibleRows.length === 0 && (
                                         <tr>
                                             <td
                                                 colSpan={8}
                                                 className="px-4 py-12 text-center text-zinc-500"
                                             >
                                                 {scanned > 0
-                                                    ? `No first-in-${settings.window_days}d ${maLabel} cross aged ≤${settings.max_bars_ago + 1} bars (momentum filter). Try ⚙ Settings.`
-                                                    : 'Start a scan — direct API walks F&O names.'}
+                                                    ? tab === 'TRADE'
+                                                        ? 'No permissioned tickets. Check WATCH (NEAR / 4H mixed / thin OC) or wait for harvest.'
+                                                        : `No ${tab} rows.`
+                                                    : 'Rescore the harvest book to fill the desk.'}
                                             </td>
                                         </tr>
                                     )}
-                                    {candidates.map(c => (
+                                    {visibleRows.map(c => (
                                         <tr
-                                            key={c.symbol}
-                                            className="border-t border-zinc-100 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/40"
+                                            key={`${c.symbol}-${c.kind || c.fresh_label}`}
+                                            onClick={() => selectRow(c)}
+                                            className={`border-t border-zinc-100 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/40 cursor-pointer ${
+                                                selected?.symbol === c.symbol
+                                                    ? 'bg-cyan-500/10'
+                                                    : ''
+                                            }`}
                                         >
                                             <td className="px-3 py-2.5 font-black">{c.name}</td>
                                             <td className="px-3 py-2.5 font-mono">
@@ -624,6 +801,7 @@ export default function MA7200Scanner({ onBack }: Props) {
                                                             : 'bg-rose-500/15 text-rose-600'
                                                     }`}
                                                 >
+                                                    {c.kind === 'NEAR' ? 'NEAR ' : ''}
                                                     {c.cross_type}
                                                 </span>
                                             </td>
@@ -631,33 +809,25 @@ export default function MA7200Scanner({ onBack }: Props) {
                                                 <span className="text-[10px] font-black text-cyan-600">
                                                     {c.fresh_label ||
                                                         (c.bars_ago === 0
-                                                            ? '1 bar'
+                                                            ? 'just closed'
                                                             : c.bars_ago === 1
-                                                              ? '2 bars'
-                                                              : `${c.bars_ago} bars`)}
+                                                              ? '1 bar'
+                                                              : c.bars_ago === 2
+                                                                ? '2 bars'
+                                                                : `${c.bars_ago} bars`)}
                                                 </span>
                                             </td>
-                                            <td className="px-3 py-2.5 text-[10px] font-bold text-emerald-600">
-                                                {c.first_cross_in_15d !== false
-                                                    ? 'First ✓'
-                                                    : '—'}
+                                            <td className="px-3 py-2.5 font-mono text-[11px]">
+                                                {c.adx ?? '—'}
+                                            </td>
+                                            <td className="px-3 py-2.5 text-[10px] font-bold">
+                                                {c.h4_bias || c.mtf_allowed || '—'}
                                             </td>
                                             <td className="px-3 py-2.5 font-mono font-bold">
-                                                {c.volume_ratio}×
+                                                {c.permission ?? '—'}
                                             </td>
                                             <td className="px-3 py-2.5 font-black">
-                                                {c.momentum_score ?? '—'}
-                                            </td>
-                                            <td className="px-3 py-2.5">
-                                                <button
-                                                    onClick={() => analyzeChain(c)}
-                                                    disabled={analyzing === c.symbol || loading}
-                                                    className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase rounded-lg disabled:opacity-50 whitespace-nowrap"
-                                                >
-                                                    {analyzing === c.symbol
-                                                        ? '…'
-                                                        : 'Analyze Chain'}
-                                                </button>
+                                                {c.desk_score ?? c.momentum_score ?? '—'}
                                             </td>
                                         </tr>
                                     ))}
@@ -668,13 +838,13 @@ export default function MA7200Scanner({ onBack }: Props) {
 
                     <div className="lg:col-span-2 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4 min-h-[320px]">
                         <div className="text-xs font-black uppercase tracking-wider text-zinc-500">
-                            Step 2–3 · Chain confirmation
+                            Ticket
                         </div>
 
                         {analyzing && (
                             <LoadingBanner
                                 active
-                                label="Fetching live option chain"
+                                label="Re-scoring stored chain"
                                 detail={analyzing}
                             />
                         )}
@@ -685,73 +855,114 @@ export default function MA7200Scanner({ onBack }: Props) {
                             </div>
                         )}
 
-                        {!analysis && !analyzing && !analyzeError && (
+                        {!selected && !analysis && !analyzing && (
                             <p className="text-sm text-zinc-500 py-8 text-center">
-                                Wait for scan, then <strong>Analyze Chain</strong> on a candidate.
+                                Select a row. TRADE rows already have a ticket — no extra fetch.
                             </p>
                         )}
 
-                        {analysis && (
+                        {(selected || analysis) && (
                             <div className="space-y-3">
                                 <div className="flex flex-wrap items-center gap-2">
-                                    <span className="text-lg font-black">{analysis.name}</span>
+                                    <span className="text-lg font-black">
+                                        {selected?.name || analysis?.name}
+                                    </span>
                                     <span
                                         className={`text-[10px] font-black uppercase px-2 py-1 rounded border ${statusColor(
-                                            analysis.status,
+                                            selected?.board || analysis?.status,
                                         )}`}
                                     >
-                                        {analysis.status}
+                                        {selected?.grade ||
+                                            selected?.board ||
+                                            analysis?.status}
                                     </span>
                                 </div>
                                 <div
                                     className={`p-3 rounded-xl border text-sm font-bold ${statusColor(
-                                        analysis.status,
+                                        selected?.board || analysis?.status,
                                     )}`}
                                 >
-                                    {analysis.decision}
+                                    {selected?.board_reason ||
+                                        analysis?.reason ||
+                                        analysis?.decision}
                                     <div className="text-[11px] font-medium mt-1 opacity-90">
-                                        {analysis.reason}
+                                        4H {selected?.h4_bias || analysis?.h4_bias || '—'} ·
+                                        allowed {selected?.mtf_allowed || analysis?.mtf_allowed || '—'}
+                                        {' · '}ADX {selected?.adx ?? analysis?.adx ?? '—'}
+                                        {' · '}P {selected?.permission ?? analysis?.permission ?? '—'}
                                     </div>
                                 </div>
-                                <div className="text-[11px] space-y-1">
-                                    <div>Primary: {analysis.primary_flow}</div>
-                                    {analysis.secondary_flow && (
-                                        <div>Secondary: {analysis.secondary_flow}</div>
-                                    )}
-                                    <div>OI PCR: {analysis.oi_pcr?.toFixed?.(2)}</div>
-                                </div>
-                                {analysis.rules_hit?.length > 0 && (
+
+                                {ticket ? (
+                                    <div className="space-y-2 text-[11px]">
+                                        <div className="p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 space-y-1.5">
+                                            <div className="text-[10px] font-black uppercase text-emerald-600">
+                                                {ticket.side} · {ticket.vehicle?.style}
+                                            </div>
+                                            <div className="text-sm font-black font-mono">
+                                                {ticket.vehicle?.structure}
+                                            </div>
+                                            <div className="text-zinc-500">
+                                                {ticket.vehicle?.why}
+                                            </div>
+                                            <div>Entry: {ticket.entry}</div>
+                                            <div>
+                                                Stop: <strong>{ticket.stop}</strong> ({ticket.stop_src})
+                                            </div>
+                                            <div>
+                                                Target: <strong>{ticket.target1}</strong> (
+                                                {ticket.target1_src})
+                                            </div>
+                                            <div>R:R {ticket.rr ?? '—'} · {ticket.time_stop}</div>
+                                            <div className="text-zinc-500">{ticket.invalidation}</div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="text-[11px] text-zinc-500">
+                                        No ticket — {selected?.board_reason || 'not permissioned'}.
+                                        4H opposite the cross is a hard block even with a strong
+                                        chain.
+                                    </p>
+                                )}
+
+                                {(selected?.permission_hits?.length ||
+                                    analysis?.rules_hit?.length) && (
                                     <ul className="space-y-1">
-                                        {analysis.rules_hit.map((r, i) => (
-                                            <li
-                                                key={i}
-                                                className="text-[10px] text-zinc-600 dark:text-zinc-400"
-                                            >
-                                                ✓ <strong>{r.rule}</strong> — {r.detail}
-                                            </li>
-                                        ))}
+                                        {(selected?.permission_hits || analysis?.rules_hit || []).map(
+                                            (r, i) => (
+                                                <li
+                                                    key={i}
+                                                    className="text-[10px] text-zinc-600 dark:text-zinc-400"
+                                                >
+                                                    ✓ <strong>{r.rule}</strong> — {r.detail}
+                                                </li>
+                                            ),
+                                        )}
                                     </ul>
                                 )}
-                                {analysis.status === 'CONFIRMED' &&
-                                    analysis.suggested_strikes?.length > 0 && (
-                                        <div className="p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5">
-                                            <div className="text-[10px] font-black uppercase text-emerald-600 mb-2">
-                                                Suggested strikes
-                                            </div>
-                                            {analysis.suggested_strikes.map((s, i) => (
-                                                <div
+                                {selected?.permission_miss &&
+                                    selected.permission_miss.length > 0 && (
+                                        <ul className="space-y-1">
+                                            {selected.permission_miss.slice(0, 4).map((m, i) => (
+                                                <li
                                                     key={i}
-                                                    className="text-xs flex justify-between"
+                                                    className="text-[10px] text-zinc-500"
                                                 >
-                                                    <span className="text-zinc-500">{s.role}</span>
-                                                    <span className="font-black font-mono">
-                                                        {s.structure}
-                                                    </span>
-                                                </div>
+                                                    · {m}
+                                                </li>
                                             ))}
-                                        </div>
+                                        </ul>
                                     )}
-                                {analysis.report && (
+
+                                <button
+                                    onClick={() => selected && analyzeChain(selected)}
+                                    disabled={!selected || analyzing === selected?.symbol}
+                                    className="w-full px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-white text-[10px] font-black uppercase rounded-lg disabled:opacity-50"
+                                >
+                                    Re-score this name
+                                </button>
+
+                                {analysis?.report && (
                                     <pre className="text-[10px] p-3 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-100 dark:border-zinc-800 whitespace-pre-wrap font-mono">
                                         {analysis.report}
                                     </pre>

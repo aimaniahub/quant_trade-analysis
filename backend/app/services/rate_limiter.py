@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Optional
 
@@ -26,6 +27,7 @@ class AsyncRateLimiter:
         self.min_interval = min_interval
         self.cooldown_on_limit = cooldown_on_limit
         self._lock = asyncio.Lock()
+        self._sync = threading.Lock()
         self._last_grant = 0.0
         self._cooldown_until = 0.0
         self._limit_hits = 0
@@ -40,19 +42,40 @@ class AsyncRateLimiter:
 
     def trip_limit(self, reason: str = "rate limit") -> None:
         """Call when Fyers returns 429 / request limit reached."""
-        self._limit_hits += 1
-        # Exponential-ish cooldown, capped
-        extra = min(self.cooldown_on_limit * (1 + self._limit_hits // 3), 180.0)
-        self._cooldown_until = time.monotonic() + extra
+        with self._sync:
+            self._limit_hits += 1
+            extra = min(self.cooldown_on_limit * (1 + self._limit_hits // 3), 180.0)
+            self._cooldown_until = time.monotonic() + extra
+            hits = self._limit_hits
         logger.warning(
             f"[RateLimiter] {reason} – cooling down {extra:.0f}s "
-            f"(hits={self._limit_hits})"
+            f"(hits={hits})"
         )
 
     def clear_soft(self) -> None:
         """Reset hit counter slowly after a successful stretch."""
-        if self._limit_hits > 0 and not self.in_cooldown:
-            self._limit_hits = max(0, self._limit_hits - 1)
+        with self._sync:
+            if self._limit_hits > 0 and time.monotonic() >= self._cooldown_until:
+                self._limit_hits = max(0, self._limit_hits - 1)
+
+    def acquire_sync(self) -> None:
+        """Block the calling thread until a Fyers token is available."""
+        while True:
+            with self._sync:
+                now = time.monotonic()
+                wait = 0.0
+                if now < self._cooldown_until:
+                    wait = self._cooldown_until - now
+                else:
+                    elapsed = now - self._last_grant
+                    if elapsed < self.min_interval:
+                        wait = self.min_interval - elapsed
+                    else:
+                        self._last_grant = now
+                        return
+            if wait > 0:
+                logger.info("[RateLimiter] waiting %.1fs (sync)", wait)
+                time.sleep(wait)
 
     async def acquire(self) -> None:
         async with self._lock:
@@ -93,5 +116,7 @@ def is_rate_limit_error(exc_or_msg) -> bool:
             "429",
             "quota",
             "throttle",
+            "expecting value",
+            "max retries exceeded",
         )
     )

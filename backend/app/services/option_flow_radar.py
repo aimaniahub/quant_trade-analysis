@@ -13,6 +13,7 @@ Spec: Option_Flow_Radar_Complete_Specification_v3.txt
 
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 import math
 import time
 import logging
@@ -126,6 +127,7 @@ class OptionFlowRadarService:
         self._last_scan: Optional[Dict[str, Any]] = None
         self._last_scan_at: Optional[datetime] = None
         self._scan_running = False
+        self._scan_heartbeat = 0.0
 
     def _is_authenticated(self) -> bool:
         return bool(self.auth_service.get_fyers_model())
@@ -138,13 +140,15 @@ class OptionFlowRadarService:
             from app.services import redis_client as rc
             if not rc.is_available():
                 return
+            slim = dict(self._last_scan)
+            slim.pop("all_hits", None)
             rc.set_json(
                 rc.key("radar", "last_scan"),
                 {
-                    "scan": self._last_scan,
+                    "scan": slim,
                     "at": self._last_scan_at.isoformat(),
                 },
-                ttl=1800,
+                ttl=14400,
             )
         except Exception:
             pass
@@ -307,7 +311,10 @@ class OptionFlowRadarService:
         underlying: Dict[str, Any],
         strike_count: int = 10,
         *,
-        fetch_vol_history: bool = True,
+        fetch_vol_history: bool = False,
+        enrich_underlying: bool = True,
+        attach_heavy: bool = True,
+        chain_resp: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         v3 pipeline:
@@ -316,7 +323,8 @@ class OptionFlowRadarService:
 
         Returns best composite contract or None.
         """
-        chain_resp = self.market_service.get_option_chain(symbol, strike_count)
+        if chain_resp is None:
+            chain_resp = self.market_service.get_option_chain(symbol, strike_count)
         if not chain_resp.get("success"):
             return None
 
@@ -513,8 +521,7 @@ class OptionFlowRadarService:
             ):
                 opposing = True
 
-        # Real VWAP / OR / 5m for any symbol that produced fuel
-        if underlying.get("light"):
+        if enrich_underlying and underlying.get("light"):
             rich = self._get_underlying_data(symbol, light=False)
             if rich:
                 underlying = rich
@@ -528,6 +535,9 @@ class OptionFlowRadarService:
             chain=chain,
             underlying=underlying,
             opposing=opposing,
+            fetch_day=attach_heavy,
+            fetch_futures=attach_heavy,
+            skip_mtf=not attach_heavy,
         )
 
     def _attach_process_trade(
@@ -540,22 +550,37 @@ class OptionFlowRadarService:
         opposing: bool = False,
         fetch_day: bool = True,
         fetch_futures: bool = True,
+        skip_mtf: bool = False,
     ) -> Dict[str, Any]:
         """Institutional map + persistence lock. Headline unit becomes the idea."""
         underlying = underlying or {}
         spot = float(row.get("spot") or underlying.get("ltp") or 0)
-        candles = underlying.get("candles_5min") or []
+        candles = list(underlying.get("candles_5min") or [])
         try:
+            from app.services import symbol_store as store
+
+            if len(candles) < 4:
+                m15 = store.get_history(symbol, "15", min_bars=8) or []
+                if m15:
+                    candles = m15
             levels_svc = get_levels_service()
+            # Day map is store-first. Futures Fyers only when fetch_futures=True
+            # (detail path). Harvest peeks stored futures instead.
             full = levels_svc.build_full_map(
                 symbol,
                 spot,
                 chain=chain,
                 candles_5m=candles,
-                fetch_day=fetch_day,
+                fetch_day=True,
                 fetch_futures=fetch_futures,
             )
+            if not (full.get("futures") or {}).get("ok"):
+                stored_fut = (store.get(symbol) or {}).get("futures") or {}
+                if stored_fut:
+                    full["futures"] = stored_fut
+            full["mtf"] = {}
             try:
+                # Store-only 4H/1H/15m — never a Fyers walk.
                 full["mtf"] = get_mtf_service().evaluate(symbol)
             except Exception as mtf_exc:
                 logger.debug("MTF evaluate failed %s: %s", symbol, mtf_exc)
@@ -596,6 +621,156 @@ class OptionFlowRadarService:
             "timestamp": datetime.now().isoformat(),
         }
 
+    def _harvest_quotes_pass(self, symbols: List[str]) -> None:
+        """Pass A — batched quotes (≤50) into the symbol store."""
+        from app.services import symbol_store as store
+        from app.services.fno_stocks import filter_valid_symbols
+
+        universe = filter_valid_symbols(list(dict.fromkeys([
+            *symbols,
+            *FNO_INDICES,
+            "NSE:INDIAVIX-INDEX",
+        ])))
+        logger.info("harvest quotes pass n=%s", len(universe))
+        for i in range(0, len(universe), 50):
+            chunk = universe[i: i + 50]
+            try:
+                self.market_service.get_quotes(chunk)
+            except Exception as exc:
+                logger.warning("harvest quotes chunk %s: %s", i, exc)
+
+    def _underlying_from_store(self, symbol: str) -> Dict[str, Any]:
+        """Spot from the harvest quotes pass — no extra Fyers call."""
+        from app.services import symbol_store as store
+
+        snap = store.get(symbol) or {}
+        spot = snap.get("spot") or {}
+        ltp = float(spot.get("ltp") or 0)
+        if ltp <= 0:
+            return {}
+        chg = float(spot.get("change_percent") or spot.get("chp") or 0)
+        return {
+            "ltp": ltp,
+            "change_pct": chg,
+            "vwap": ltp,
+            "ema20": ltp,
+            "vwap_dev_pct": 0.0,
+            "above_ema20": chg >= 0,
+            "candles_5min": [],
+            "light": True,
+        }
+
+    def _maybe_harvest_history(self, symbol: str) -> None:
+        """Pass C — 15m/40d and D/30d when stale. Derive 60/240 in process."""
+        from app.services import symbol_store as store
+        from app.services.rate_limiter import get_fyers_limiter
+
+        if get_fyers_limiter().in_cooldown:
+            return
+
+        if not store.is_fresh(symbol, "history.15", store.history_15_ttl()):
+            days = store.harvest_history_15_days()
+            hist = self.market_service.get_historical_data(
+                symbol, resolution="15", days=days
+            )
+            candles = hist.get("candles") or []
+            if hist.get("success") and candles:
+                store.put_history(symbol, "15", candles, days)
+                self._write_derived(symbol, candles_15=candles)
+
+        if not store.is_fresh(symbol, "history.D"):
+            days_d = store.harvest_history_d_days()
+            daily = self.market_service.get_historical_data(
+                symbol, resolution="D", days=days_d
+            )
+            d_bars = daily.get("candles") or []
+            if daily.get("success") and d_bars:
+                store.put_history(symbol, "D", d_bars, days_d)
+                snap = store.get(symbol) or {}
+                h = ((snap.get("history") or {}).get("D") or {})
+                h["ist_date"] = datetime.now().strftime("%Y-%m-%d")
+                store.put(symbol, {"history": {"D": h}})
+
+    def _write_derived(
+        self,
+        symbol: str,
+        candles_15: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """CPU-only derived fields (7/200, rel-vol, VWAP, MTF) on the snapshot."""
+        from app.services import symbol_store as store
+
+        bars = candles_15 or store.get_history(symbol, "15", min_bars=20) or []
+        dailies = store.get_history(symbol, "D", min_bars=10) or []
+        derived: Dict[str, Any] = {}
+        if bars:
+            closes = [float(c.get("close") or 0) for c in bars if c.get("close")]
+            ema20 = compute_ema(closes, 20)
+            try:
+                from app.services.levels import build_session_map
+
+                sess = build_session_map(bars, closes[-1] if closes else 0)
+                vwap = sess.get("vwap")
+                derived["vwap_side"] = sess.get("vwap_side")
+            except Exception:
+                vwap = compute_vwap(bars[-30:]) if len(bars) >= 2 else None
+            vols = [float(c.get("volume") or 0) for c in bars]
+            cur = vols[-1] if vols else 0.0
+            prev = vols[-21:-1] if len(vols) > 21 else vols[:-1]
+            avg = (sum(prev) / len(prev)) if prev else 0.0
+            rel = (cur / avg) if avg else 0.0
+            derived["vwap"] = round(vwap, 2) if vwap else None
+            derived["ema20_15"] = round(ema20, 2) if ema20 else None
+            derived["rel_vol_15"] = round(rel, 2)
+            try:
+                from app.services.strategies.ma7200_scanner import detect_7_200_cross
+
+                cross = detect_7_200_cross(bars, require_volume=True, skip_session_edge=True)
+                if cross:
+                    derived["ma7200"] = {
+                        "cross": cross.get("cross_type"),
+                        "bars_ago": cross.get("bars_ago"),
+                        "fast": cross.get("ema7"),
+                        "slow": cross.get("ema200"),
+                    }
+                else:
+                    derived["ma7200"] = {"cross": None, "bars_ago": None}
+            except Exception:
+                pass
+        if dailies or bars:
+            try:
+                h4 = store.aggregate_ohlcv(bars, 240) if bars else []
+                h1 = store.aggregate_ohlcv(bars, 60) if bars else []
+                packed = get_mtf_service().evaluate(
+                    symbol,
+                    daily_candles=dailies,
+                    m15_candles=bars,
+                    h4_candles=h4,
+                    h1_candles=h1,
+                )
+                derived["mtf"] = {
+                    "daily_bias": packed.get("daily_bias") or packed.get("daily"),
+                    "h4_bias": packed.get("h4_bias") or packed.get("h4"),
+                    "h1_bias": packed.get("h1_bias") or packed.get("h1"),
+                    "m15_bias": packed.get("m15_bias") or packed.get("m15"),
+                }
+            except Exception as exc:
+                logger.debug("derived mtf %s: %s", symbol, exc)
+        if derived:
+            store.put_derived(symbol, derived)
+
+    def _rebuild_hv_index(self) -> None:
+        """Write optiongreek:idx:hv from stored 15m so Quant reads Redis."""
+        try:
+            from app.services.high_volume_scanner import get_scanner_service
+            from app.services import symbol_store as store
+
+            svc = get_scanner_service()
+            result = svc.scan_from_store(timeframe="15", top_count=8)
+            if result.get("success"):
+                store.set_hv_index(result)
+        except Exception as exc:
+            logger.debug("rebuild hv index: %s", exc)
+
     def get_symbol_idea(self, symbol: str) -> Dict[str, Any]:
         idea = get_idea_book().get(symbol)
         day = get_levels_service().peek_day_map(symbol)
@@ -614,11 +789,14 @@ class OptionFlowRadarService:
         symbols: Optional[List[str]] = None,
         min_lis: float = 0,
         opt_type_filter: Optional[str] = None,
-        strike_count: int = 12,
+        strike_count: int = 14,
         progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
-        Scan FNO universe — ONE best strike per stock (v3 graded).
+        Harvest + scan FNO universe — ONE best strike per stock (v3 graded).
+
+        This is the only universe Fyers writer. After each symbol the Redis
+        snapshot is upserted so VAT / 7/200 / HV / home read the same book.
 
         Returns:
           flagged     → Grade A / A+ (main Normal Radar, actionable)
@@ -628,6 +806,8 @@ class OptionFlowRadarService:
 
         progress_callback(scanned, total, current_symbol, flagged_row|None, error|None)
         """
+        from app.services import symbol_store as store
+
         if not self._is_authenticated():
             return {
                 "success": False,
@@ -636,122 +816,346 @@ class OptionFlowRadarService:
                 "watch": [],
                 "alert_box": [],
             }
+        if self._scan_running:
+            stuck_for = time.time() - float(getattr(self, "_scan_heartbeat", 0) or 0)
+            if stuck_for < 90:
+                return {
+                    "success": False,
+                    "error": "Scan already running",
+                    "flagged": [],
+                    "watch": [],
+                    "alert_box": [],
+                }
+            logger.warning("Radar stealing stuck scan lock (idle %.0fs)", stuck_for)
 
         self._scan_running = True
+        self._scan_heartbeat = time.time()
         watch = filter_valid_symbols(symbols or ALL_FNO_WATCHLIST)
+        try:
+            prev_fail = list((store.get_harvest_meta() or {}).get("failed_remaining") or [])
+            if prev_fail:
+                head = [s for s in prev_fail if s in watch]
+                tail = [s for s in watch if s not in head]
+                watch = head + tail
+                logger.info("Radar prioritizing %s previously missed chains", len(head))
+        except Exception:
+            pass
         total = len(watch)
         all_hits: List[Dict] = []
         errors: List[str] = []
         scanned = 0
         rate_limited_skips = 0
-        aborted_rate_limit = False
+        SYMBOL_TIMEOUT_SEC = 25.0
         BATCH_SIZE = 12
-        BATCH_SLEEP = 0.35
+        BATCH_SLEEP = 0.2
+        CHAIN_WAIT_ATTEMPTS = 6
+        pass_id = f"h{int(time.time())}"
+        _hw = store.harvest_writer()
+        _hw.__enter__()
+        store.set_harvest_meta({
+            "running": True,
+            "started_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "scanned": 0,
+            "total": total,
+            "current": None,
+            "pass_id": pass_id,
+            "phase": "quotes",
+        })
+        try:
+            self._harvest_quotes_pass(watch)
+        except Exception as exc:
+            logger.warning("harvest quotes pass failed: %s", exc)
 
-        def _progress(sym: str, flagged_row=None, err=None):
+        def _progress(sym: str, flagged_row=None, err=None, *, status: str = "ok", ms: int = 0):
             if progress_callback:
                 try:
-                    progress_callback(scanned, total, sym, flagged_row, err)
+                    progress_callback(scanned, total, sym, flagged_row, err, status, ms)
+                except TypeError:
+                    try:
+                        progress_callback(scanned, total, sym, flagged_row, err)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
+
+        def _scan_one(
+            sym: str,
+            *,
+            chain_only: bool = False,
+            force_chain: bool = False,
+        ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+            if not is_valid_symbol(sym):
+                return None, "invalid_symbol"
+            underlying = self._underlying_from_store(sym)
+            if not underlying and not chain_only:
+                underlying = self._get_underlying_data(sym, light=True)
+            chain_resp = self.market_service.get_option_chain(
+                sym, strike_count, force_refresh=force_chain
+            )
+            if not chain_resp or not chain_resp.get("success"):
+                why = (chain_resp or {}).get("error") or "no_chain"
+                return None, f"no_chain:{why}"[:120]
+            if len(chain_resp.get("chain") or []) < 2:
+                return None, "no_chain:empty"
+            spot = float(chain_resp.get("spot_price") or (underlying or {}).get("ltp") or 0)
+            if not underlying or not float((underlying or {}).get("ltp") or 0):
+                if spot <= 0:
+                    return None, "no_underlying"
+                underlying = {
+                    "ltp": spot,
+                    "change_pct": 0.0,
+                    "vwap": spot,
+                    "ema20": spot,
+                    "vwap_dev_pct": 0.0,
+                    "above_ema20": True,
+                    "candles_5min": [],
+                    "light": True,
+                }
+            # Fast path: chain + LIS only. No 3-day hist, no 5m, no MTF.
+            best = self._process_option_chain(
+                sym,
+                underlying,
+                strike_count,
+                fetch_vol_history=False,
+                enrich_underlying=False,
+                attach_heavy=False,
+                chain_resp=chain_resp,
+            )
+            if best is None:
+                return None, None
+            if opt_type_filter and best.get("type") != opt_type_filter:
+                return None, None
+            if min_lis > 0 and float(best.get("lis") or 0) < min_lis:
+                return None, None
+            return best, None
+
+        def _retryable(err: Optional[str]) -> bool:
+            if not err:
+                return False
+            e = str(err).lower()
+            if e == "invalid_symbol" or e.startswith("invalid_symbol"):
+                return False
+            return True
+
+        def _quota_err(err: Optional[str]) -> bool:
+            if not err:
+                return False
+            e = str(err).lower()
+            if e in ("invalid_symbol", "no_chain:empty", "no_underlying"):
+                return False
+            try:
+                from app.services.rate_limiter import is_rate_limit_error
+                if is_rate_limit_error(e):
+                    return True
+            except Exception:
+                pass
+            return e == "timeout" or e.startswith("no_chain:")
+
+        def _weight_hit(hit: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                from app.services.strategies.rsi_desk import weight_radar_row
+
+                return weight_radar_row(hit)
+            except Exception as wexc:
+                logger.debug("desk weight %s: %s", hit.get("symbol"), wexc)
+                return hit
+
+        logger.info("Radar harvest start n=%s strike_count=%s pass=%s", total, strike_count, pass_id)
+        store.set_harvest_meta({"phase": "chains", "running": True, "total": total})
+        workers = {"pool": ThreadPoolExecutor(max_workers=1, thread_name_prefix="radar-sym")}
+        failed_syms: List[str] = []
+        retry_attempted = 0
+        retry_recovered = 0
+
+        def _reset_pool() -> None:
+            try:
+                workers["pool"].shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            workers["pool"] = ThreadPoolExecutor(max_workers=1, thread_name_prefix="radar-sym")
+
+        def _run_one(
+            sym: str,
+            timeout: float,
+            *,
+            chain_only: bool = False,
+            force_chain: bool = False,
+        ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+            nonlocal rate_limited_skips
+            try:
+                fut = workers["pool"].submit(
+                    _scan_one, sym, chain_only=chain_only, force_chain=force_chain
+                )
+                return fut.result(timeout=timeout)
+            except FuturesTimeout:
+                logger.warning("Radar skip %s — exceeded %.0fs", sym, timeout)
+                _reset_pool()
+                return None, "timeout"
+            except Exception as exc:
+                msg = str(exc)
+                if "invalid symbol" in msg.lower():
+                    mark_invalid_symbol(sym)
+                try:
+                    from app.services.rate_limiter import is_rate_limit_error
+                    if is_rate_limit_error(exc) or is_rate_limit_error(msg):
+                        rate_limited_skips += 1
+                except Exception:
+                    pass
+                logger.warning("Radar scan error for %s: %s", sym, exc)
+                return None, msg[:120]
+
+        def _cooldown_if_needed(cap: float = 120.0) -> None:
+            try:
+                from app.services.rate_limiter import get_fyers_limiter
+                lim = get_fyers_limiter()
+                if lim.in_cooldown:
+                    wait = min(max(lim.cooldown_remaining, 0.5), cap)
+                    logger.info("Radar cooldown %.0fs — staying on this name", wait)
+                    _sleep_hb(wait)
+            except Exception:
+                pass
+
+        def _sleep_hb(seconds: float) -> None:
+            end = time.time() + max(0.0, seconds)
+            while time.time() < end:
+                self._scan_heartbeat = time.time()
+                time.sleep(min(5.0, max(0.05, end - time.time())))
+
+        def _fetch_chain_wait(sym: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+            """Do not walk past this symbol on quota. Wait, then fetch again."""
+            nonlocal retry_attempted, retry_recovered
+            last_err = None
+            for attempt in range(CHAIN_WAIT_ATTEMPTS):
+                _cooldown_if_needed(120.0)
+                self._scan_heartbeat = time.time()
+                force = attempt > 0
+                hit, err = _run_one(
+                    sym,
+                    SYMBOL_TIMEOUT_SEC,
+                    chain_only=True,
+                    force_chain=force,
+                )
+                if not err:
+                    if attempt > 0:
+                        retry_recovered += 1
+                    return hit, None
+                last_err = err
+                if not _quota_err(err):
+                    return hit, err
+                retry_attempted += 1
+                try:
+                    from app.services.rate_limiter import get_fyers_limiter
+                    lim = get_fyers_limiter()
+                    if not lim.in_cooldown:
+                        lim.trip_limit(f"harvest {sym}: {err}")
+                    wait = min(max(lim.cooldown_remaining, 4.0), 45.0)
+                except Exception:
+                    wait = 8.0
+                _progress(sym, err=err, status="wait", ms=int(wait * 1000))
+                logger.info("Radar WAIT %s attempt %s/%s %s — sleep %.0fs", sym, attempt + 1, CHAIN_WAIT_ATTEMPTS, err, wait)
+                _sleep_hb(wait)
+            return None, last_err
 
         try:
             for batch_start in range(0, len(watch), BATCH_SIZE):
                 batch = watch[batch_start: batch_start + BATCH_SIZE]
                 for sym in batch:
-                    if not is_valid_symbol(sym):
-                        scanned += 1
-                        _progress(sym, err="invalid_symbol")
-                        continue
-                    try:
-                        # Light underlying on bulk scan — real spot, soft context
-                        underlying = self._get_underlying_data(sym, light=True)
-                        if not underlying:
-                            scanned += 1
-                            _progress(sym, err="no_underlying")
-                            continue
+                    t0 = time.perf_counter()
+                    self._scan_heartbeat = time.time()
+                    _progress(sym, status="start")
+                    hit, err = _fetch_chain_wait(sym)
 
-                        best = self._process_option_chain(
-                            sym, underlying, strike_count, fetch_vol_history=True
-                        )
-                        if best is None:
-                            scanned += 1
-                            _progress(sym)
-                            continue
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    scanned += 1
+                    if hit:
+                        hit = _weight_hit(hit)
+                        all_hits.append(hit)
+                        _progress(sym, flagged_row=hit, status="hit", ms=ms)
+                        logger.info("Radar HIT %s %s%s lis=%.0f %dms", sym, hit.get("strike"), hit.get("type"), float(hit.get("lis") or 0), ms)
+                    elif err:
+                        errors.append(f"{sym}: {err}")
+                        if _retryable(err):
+                            failed_syms.append(sym)
+                        _progress(sym, err=err, status="err", ms=ms)
+                        logger.info("Radar %s %s %dms", err, sym, ms)
+                    else:
+                        _progress(sym, status="skip", ms=ms)
 
-                        if opt_type_filter and best["type"] != opt_type_filter:
-                            scanned += 1
-                            _progress(sym)
-                            continue
-                        if min_lis > 0 and best["lis"] < min_lis:
-                            scanned += 1
-                            _progress(sym)
-                            continue
-
-                        all_hits.append(best)
-                        scanned += 1
-                        # Stream A/A+ to job progress UI immediately
-                        if best.get("actionable") or best.get("alert_box"):
-                            _progress(sym, flagged_row=best)
-                        else:
-                            _progress(sym)
-
-                    except Exception as exc:
-                        msg = str(exc)
-                        if "invalid symbol" in msg.lower():
-                            mark_invalid_symbol(sym)
-                        try:
-                            from app.services.rate_limiter import is_rate_limit_error
-                            if is_rate_limit_error(exc) or is_rate_limit_error(msg):
-                                rate_limited_skips += 1
-                        except Exception:
-                            pass
-                        logger.warning(f"Radar scan error for {sym}: {exc}")
-                        errors.append(f"{sym}: {msg}")
-                        scanned += 1
-                        _progress(sym, err=msg)
+                    store.set_harvest_meta({
+                        "scanned": scanned,
+                        "current": sym,
+                        "phase": "chains",
+                    })
 
                 if batch_start + BATCH_SIZE < len(watch):
-                    try:
-                        from app.services.rate_limiter import get_fyers_limiter
-                        lim = get_fyers_limiter()
-                        if lim.in_cooldown:
-                            time.sleep(min(lim.cooldown_remaining, 30))
-                            remaining = watch[batch_start + BATCH_SIZE :]
-                            rate_limited_skips += len(remaining)
-                            for rsym in remaining:
-                                scanned += 1
-                                errors.append(f"{rsym}: rate_limited")
-                                _progress(rsym, err="rate_limited")
-                            aborted_rate_limit = True
-                            break
-                    except Exception:
-                        pass
+                    _cooldown_if_needed(120.0)
                     time.sleep(BATCH_SLEEP)
+
+            # History only after every name has had a real chance at a chain.
+            store.set_harvest_meta({"phase": "history", "running": True})
+            try:
+                from app.services.rate_limiter import get_fyers_limiter
+                for sym in watch:
+                    if get_fyers_limiter().in_cooldown:
+                        break
+                    try:
+                        self._maybe_harvest_history(sym)
+                    except Exception as hist_exc:
+                        logger.debug("harvest history %s: %s", sym, hist_exc)
+                    self._scan_heartbeat = time.time()
+            except Exception:
+                pass
+
+            got = {h.get("symbol") for h in all_hits}
+            failed_syms = [s for s in failed_syms if s not in got]
+        except Exception:
+            try:
+                _hw.__exit__(None, None, None)
+            except Exception:
+                pass
+            raise
         finally:
+            try:
+                workers["pool"].shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
             self._scan_running = False
 
-        # Partition per v3 product rules
+        # Partition per v3 product rules — rank by stacked desk score
+        from app.services.strategies.rsi_desk import weight_radar_rows
+
+        all_hits = weight_radar_rows(all_hits)
         radar = [h for h in all_hits if h.get("grade") in ("A", "A+")]
         watch_list = [h for h in all_hits if h.get("grade") == "B"]
         alert_box = [h for h in all_hits if h.get("alert_box")]
 
         radar.sort(
             key=lambda x: (
+                float(x.get("desk_score") or 0),
                 1 if x.get("grade") == "A+" else 0,
                 float(x.get("composite_score") or 0),
                 float(x.get("lis") or 0),
             ),
             reverse=True,
         )
-        watch_list.sort(key=lambda x: float(x.get("composite_score") or 0), reverse=True)
+        watch_list.sort(
+            key=lambda x: (
+                float(x.get("desk_score") or 0),
+                float(x.get("composite_score") or 0),
+            ),
+            reverse=True,
+        )
         alert_box.sort(key=lambda x: float(x.get("unusual_score") or 0), reverse=True)
-        all_hits.sort(key=lambda x: float(x.get("composite_score") or 0), reverse=True)
 
         # flagged = actionable main radar (backward compatible primary list)
         # include watch when user wants full board — keep flagged = A/A+ only for quality
         flagged = list(radar)
 
+        logger.info(
+            "Radar full FNO scan done scanned=%s/%s hits=%s errors=%s retry=%s/%s",
+            scanned, total, len(all_hits), len(errors), retry_recovered, retry_attempted,
+        )
         board = get_idea_book().board(limit=8)
         result = {
             "success": True,
@@ -763,8 +1167,13 @@ class OptionFlowRadarService:
             "watch": watch_list,
             "alert_box": alert_box,
             "all_hits": all_hits,
+            "retry_attempted": retry_attempted,
+            "retry_recovered": retry_recovered,
+            "failed_remaining": failed_syms,
             "ideas": board.get("active") or [],
             "ideas_confirmed": board.get("confirmed") or [],
+            "ideas_bullish": board.get("bullish") or [],
+            "ideas_bearish": board.get("bearish") or [],
             "ideas_pullbacks": board.get("pullbacks") or [],
             "ideas_watch": board.get("watch") or [],
             "ideas_conflict": board.get("conflict") or [],
@@ -777,7 +1186,7 @@ class OptionFlowRadarService:
             },
             "errors": errors,
             "rate_limited_skips": rate_limited_skips,
-            "partial": aborted_rate_limit or scanned < total,
+            "partial": scanned < total,
             "completion_pct": round(100.0 * min(scanned, total) / max(total, 1), 1),
             "timestamp": datetime.now().isoformat(),
             "market_hours": self._is_market_hours(),
@@ -793,9 +1202,52 @@ class OptionFlowRadarService:
                 ),
             },
         }
-        self._last_scan = result
-        self._last_scan_at = datetime.now()
-        self._persist_last_scan()
+        # Only the full FNO universe may replace the board. A TOP / subset
+        # pass (scheduler) must not reshuffle filters mid-session.
+        full_n = len(filter_valid_symbols(ALL_FNO_WATCHLIST))
+        is_full_pass = total >= full_n and not result.get("partial")
+        if is_full_pass or not self._last_scan:
+            if is_full_pass or symbols is None:
+                self._last_scan = result
+                self._last_scan_at = datetime.now()
+                self._persist_last_scan()
+        try:
+            from app.services.levels import get_levels_service
+
+            flagged_syms = list(dict.fromkeys(
+                [h.get("symbol") for h in flagged if h.get("symbol")]
+            ))
+            for fsym in flagged_syms[:40]:
+                try:
+                    get_levels_service().get_futures(fsym)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._rebuild_hv_index()
+        except Exception:
+            pass
+        try:
+            store.set_harvest_meta({
+                "running": False,
+                "finished_at": datetime.now().isoformat(),
+                "scanned": scanned,
+                "total": total,
+                "current": None,
+                "pass_id": pass_id,
+                "phase": "idle",
+                "flagged": result.get("total_flagged"),
+                "retry_attempted": retry_attempted,
+                "retry_recovered": retry_recovered,
+                "failed_remaining": failed_syms,
+            })
+        except Exception:
+            pass
+        try:
+            _hw.__exit__(None, None, None)
+        except Exception:
+            pass
         return result
 
     # ── Public: Single symbol option chain with LIS ───────────────
@@ -803,7 +1255,7 @@ class OptionFlowRadarService:
     def get_symbol_flow(
         self,
         symbol: str,
-        strike_count: int = 12,
+        strike_count: int = 14,
     ) -> Dict[str, Any]:
         if not self._is_authenticated():
             return {"success": False, "error": "Not authenticated", "flagged": []}
@@ -892,6 +1344,14 @@ class OptionFlowRadarService:
             except Exception as exc:
                 logger.warning("process attach in flow failed for %s: %s", symbol, exc)
             flagged = [best] if best else []
+            try:
+                from app.services.strategies.rsi_desk import weight_radar_rows
+
+                flagged = weight_radar_rows(flagged)
+                if flagged:
+                    best = flagged[0]
+            except Exception:
+                pass
             idea = get_idea_book().get(symbol)
             levels_map = (best or {}).get("levels_map")
             if levels_map is None:

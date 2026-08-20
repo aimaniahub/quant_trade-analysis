@@ -77,9 +77,7 @@ async def confluence_status():
 
 @router.post("/confluence/radar/scan")
 async def trigger_scheduled_radar():
-    """Trigger a TOP-FNO radar pass (same as background scheduler)."""
-    scheduler = get_radar_scheduler()
-    result = await scheduler.run_once()
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "Scan failed"))
-    return result
+    """Nudge the harvest writer — starts the same job as POST /radar/scan/start."""
+    from app.routes.option_flow_radar import start_radar_scan_job
+
+    return await start_radar_scan_job(min_lis=0, option_type=None, strike_count=14)

@@ -496,10 +496,12 @@ class EnhancedVATStrategy:
         """
         # Get option chain
         scan_range, strike_step, min_gap = self._get_symbol_config(symbol)
-        strike_count = (scan_range // strike_step) * 2 + 10
-        
+        from app.services.symbol_store import canonical_strike_count
+
+        strike_count = canonical_strike_count(symbol)
+
         chain_result = self.market_service.get_option_chain(
-            symbol=symbol, 
+            symbol=symbol,
             strike_count=strike_count
         )
         

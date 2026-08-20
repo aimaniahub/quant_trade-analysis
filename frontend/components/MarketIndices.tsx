@@ -32,7 +32,7 @@ export default function MarketIndices() {
         ["market", "indices"],
         () => api.market.getIndices(),
         {
-            refetchInterval: 15000,
+            refetchInterval: 45000,
             onSuccess: () => {
                 setLastUpdate(new Date());
             },

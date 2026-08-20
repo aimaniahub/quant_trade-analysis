@@ -108,7 +108,7 @@ export default function ConfluencePanel() {
                         onClick={triggerRadar}
                         className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-violet-500/15 text-violet-400 border border-violet-500/30 hover:bg-violet-500/25"
                     >
-                        Run radar
+                        Nudge harvest
                     </button>
                     <button
                         onClick={() => refetch()}

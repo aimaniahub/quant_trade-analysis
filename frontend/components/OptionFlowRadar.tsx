@@ -78,6 +78,24 @@ interface FlaggedContract {
     alert_box?: boolean;
     unusual_score?: number;
     composite_score?: number;
+    desk_score?: number;
+    desk_align?: string;
+    desk_thesis?: string;
+    rsi15?: number | null;
+    rsi60?: number | null;
+    rsi_event?: string;
+    rsi_div?: string | null;
+    rsi_div_event?: string | null;
+    rsi_div_fresh?: boolean;
+    rsi_div_bars_ago?: number | null;
+    rsi_div_rsi_gap?: number | null;
+    rsi_div_price_l1?: number | null;
+    rsi_div_price_l2?: number | null;
+    rsi_div_rsi_l1?: number | null;
+    rsi_div_rsi_l2?: number | null;
+    oc_permission?: number;
+    mtf_allowed?: string;
+    h4_bias?: string;
     greek_quality?: GreekQuality;
     oi_added?: number;
     layers_passed?: number;
@@ -177,6 +195,9 @@ interface ProcessIdea {
     downgrade_frame?: string | null;
     campaign?: string;
     hq_pullback?: boolean;
+    vwap_agree?: boolean;
+    vwap_side?: string;
+    vwap_dev_pct?: number;
     align_score?: number;
     align_label?: string;
     allowed_side?: string;
@@ -205,13 +226,26 @@ interface ScanResult {
     alert_box?: FlaggedContract[];
     ideas?: ProcessIdea[];
     ideas_confirmed?: ProcessIdea[];
+    ideas_bullish?: ProcessIdea[];
+    ideas_bearish?: ProcessIdea[];
     ideas_pullbacks?: ProcessIdea[];
     ideas_watch?: ProcessIdea[];
     ideas_conflict?: ProcessIdea[];
-    idea_counts?: { active?: number; watch?: number; conflict?: number; confirmed?: number; pullbacks?: number };
+    idea_counts?: {
+        active?: number;
+        watch?: number;
+        conflict?: number;
+        confirmed?: number;
+        pullbacks?: number;
+        bullish?: number;
+        bearish?: number;
+    };
     grade_counts?: Record<string, number>;
     engine?: string;
     errors: string[];
+    retry_attempted?: number;
+    retry_recovered?: number;
+    failed_remaining?: string[];
     timestamp: string;
     market_hours: boolean;
 }
@@ -844,6 +878,82 @@ function fmtPx(v?: number | null) {
     return Number(v).toLocaleString('en-IN', { maximumFractionDigits: 1 });
 }
 
+function ideaTone(idea: ProcessIdea): 'bull' | 'bear' | 'none' {
+    const d = (idea.direction || idea.side || '').toUpperCase();
+    if (idea.status === 'CONFLICT') return 'none';
+    if (d === 'BULLISH' || d === 'LONG') return 'bull';
+    if (d === 'BEARISH' || d === 'SHORT') return 'bear';
+    return 'none';
+}
+
+function ideaRank(idea: ProcessIdea): number {
+    return Number(idea.prominence ?? idea.composite ?? 0);
+}
+
+function tickerName(idea: ProcessIdea): string {
+    return idea.name || String(idea.symbol || '').split(':').pop()?.replace('-EQ', '').replace('-INDEX', '') || '—';
+}
+
+function topN(rows: ProcessIdea[], n = 3): ProcessIdea[] {
+    return [...rows].sort((a, b) => ideaRank(b) - ideaRank(a)).slice(0, n);
+}
+
+function dedupeIdeas(rows: ProcessIdea[]): ProcessIdea[] {
+    const seen = new Map<string, ProcessIdea>();
+    for (const row of rows) {
+        const key = String(row.symbol || row.name || '');
+        if (!key) continue;
+        const prev = seen.get(key);
+        if (!prev || ideaRank(row) >= ideaRank(prev)) seen.set(key, row);
+    }
+    return [...seen.values()];
+}
+
+function ideaToContract(idea: ProcessIdea): FlaggedContract {
+    const opt = (idea.trade_opt_type || idea.execution?.instrument?.opt_type || idea.opt_type || 'CE') as 'CE' | 'PE';
+    const tone = ideaTone(idea);
+    return {
+        timestamp: idea.locked_at || new Date().toISOString(),
+        symbol: idea.symbol,
+        name: tickerName(idea),
+        expiry: '',
+        strike: Number(idea.trade_strike ?? idea.execution?.instrument?.strike ?? idea.strike ?? 0),
+        type: opt,
+        ltp: 0,
+        ltp_change_pct: 0,
+        oi: 0,
+        oi_change_pct: 0,
+        volume: 0,
+        vol_3day_avg: 0,
+        vol_spike_ratio: 0,
+        iv: null,
+        delta: null,
+        gamma: null,
+        theta: null,
+        vega: null,
+        greek_interpretation: null,
+        spot: idea.spot || 0,
+        spot_change_pct: 0,
+        vwap_dev_pct: 0,
+        above_ema20: true,
+        atm_dist_pct: 0,
+        lis: idea.lis || 0,
+        signal: {
+            signal: idea.signal || (tone === 'bull' ? 'BULLISH' : tone === 'bear' ? 'BEARISH' : 'NEUTRAL'),
+            label: idea.label || '',
+            icon: '',
+            color: '',
+            direction: idea.direction,
+        },
+        direction: idea.direction,
+        conviction: { level: idea.status === 'ACTIVE' ? 'HIGH' : 'MEDIUM', icon: '🔒', label: idea.status },
+        unusual_flags: idea.location_tags || [],
+        process_locked: idea.status === 'ACTIVE',
+        process_direction: idea.direction,
+        idea,
+    };
+}
+
 function processSignal(idea: ProcessIdea): {
     text: string;
     tone: 'bull' | 'bear' | 'none';
@@ -868,6 +978,179 @@ function processSignal(idea: ProcessIdea): {
         };
     }
     return { text: 'NO SIGNAL', tone: 'none', hint: idea.label || 'Waiting for direction' };
+}
+
+function ProcessMiniCard({
+    idea,
+    onOpen,
+    selected,
+}: {
+    idea: ProcessIdea;
+    onOpen: (idea: ProcessIdea) => void;
+    selected?: boolean;
+}) {
+    const sig = processSignal(idea);
+    const long = sig.tone === 'bull';
+    const locked = idea.status === 'ACTIVE';
+    const zone =
+        idea.entry_zone?.from != null && idea.entry_zone?.to != null
+            ? `${fmtPx(idea.entry_zone.from)}–${fmtPx(idea.entry_zone.to)}`
+            : fmtPx(idea.entry ?? idea.spot);
+    const buyStrike = fmtPx(idea.trade_strike ?? idea.execution?.instrument?.strike ?? idea.strike);
+    const buyType = idea.trade_opt_type || idea.execution?.instrument?.opt_type || idea.opt_type || '—';
+    const health = idea.cluster_health || idea.execution?.cluster_health;
+    return (
+        <button
+            type="button"
+            data-symbol={idea.symbol}
+            onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onOpen(idea);
+            }}
+            className={`w-full text-left p-3 rounded-xl border transition-colors ${
+                selected
+                    ? 'ring-2 ring-cyan-400/70 border-cyan-400/50 bg-cyan-500/10'
+                    : locked && long
+                      ? 'bg-emerald-500/8 border-emerald-500/35 hover:border-emerald-400/60'
+                      : locked && sig.tone === 'bear'
+                        ? 'bg-rose-500/8 border-rose-500/35 hover:border-rose-400/60'
+                        : idea.status === 'CONFLICT'
+                          ? 'bg-amber-500/8 border-amber-500/30 hover:border-amber-400/50'
+                          : 'bg-[#0b1018] border-zinc-800 hover:border-zinc-600'
+            }`}
+        >
+            <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                    <p className="text-[15px] font-black text-white truncate">{tickerName(idea)}</p>
+                    <p className="text-[10px] text-zinc-500 truncate">{idea.symbol}</p>
+                </div>
+                <span
+                    className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-black ${
+                        sig.tone === 'bull'
+                            ? 'bg-emerald-500 text-emerald-950'
+                            : sig.tone === 'bear'
+                              ? 'bg-rose-500 text-rose-950'
+                              : 'bg-zinc-700 text-zinc-200'
+                    }`}
+                >
+                    {sig.tone === 'bull' ? 'BULLISH' : sig.tone === 'bear' ? 'BEARISH' : 'FLAT'}
+                </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1 mt-2">
+                <span className="px-1.5 py-0.5 rounded border border-cyan-500/30 text-cyan-300 text-[9px] font-black">
+                    {locked ? 'LOCKED' : idea.status}
+                </span>
+                {idea.hq_pullback && (
+                    <span className="px-1.5 py-0.5 rounded bg-amber-400 text-amber-950 text-[9px] font-black">
+                        PULLBACK
+                    </span>
+                )}
+                {idea.session?.vwap != null && (
+                    <span
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-black ${
+                            idea.vwap_agree
+                                ? 'bg-cyan-500/20 text-cyan-300'
+                                : 'bg-zinc-800 text-zinc-400'
+                        }`}
+                    >
+                        VWAP {idea.vwap_side || (idea.spot >= (idea.session.vwap || 0) ? 'ABOVE' : 'BELOW')}
+                    </span>
+                )}
+                <span className="text-[10px] font-black text-zinc-200">
+                    Buy {buyStrike} <span className={buyType === 'CE' ? 'text-emerald-400' : 'text-rose-400'}>{buyType}</span>
+                </span>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5 mt-2 text-[10px]">
+                <div>
+                    <p className="text-zinc-500 font-bold uppercase">Zone</p>
+                    <p className="text-zinc-100 font-black truncate">{zone}</p>
+                </div>
+                <div>
+                    <p className="text-zinc-500 font-bold uppercase">Target</p>
+                    <p className="text-emerald-300 font-black truncate">{fmtPx(idea.target)}</p>
+                </div>
+                <div>
+                    <p className="text-zinc-500 font-bold uppercase">Stop</p>
+                    <p className="text-rose-300 font-black truncate">{fmtPx(idea.stop ?? idea.invalidation)}</p>
+                </div>
+            </div>
+            <div className="flex items-center justify-between mt-2">
+                <div className="flex gap-1">
+                    {[
+                        ['D', idea.mtf?.daily_bias],
+                        ['4H', idea.mtf?.h4_bias],
+                        ['1H', idea.mtf?.h1_bias],
+                        ['15', idea.mtf?.m15_bias],
+                    ].map(([tf, bias]) => (
+                        <span
+                            key={String(tf)}
+                            className={`px-1 py-0.5 rounded text-[8px] font-black ${
+                                bias === 'BULLISH'
+                                    ? 'bg-emerald-500/15 text-emerald-300'
+                                    : bias === 'BEARISH'
+                                      ? 'bg-rose-500/15 text-rose-300'
+                                      : 'bg-zinc-800 text-zinc-600'
+                            }`}
+                        >
+                            {tf}
+                        </span>
+                    ))}
+                </div>
+                <span className={`text-[9px] font-black ${
+                    health === 'HEALTHY' ? 'text-emerald-400' : health === 'WEAKENING' || health === 'CHAOS' ? 'text-rose-400' : 'text-zinc-500'
+                }`}>
+                    {idea.execution?.action_label || idea.exec_action || health || 'Plan'}
+                </span>
+            </div>
+        </button>
+    );
+}
+
+function ProcessCategory({
+    title,
+    hint,
+    accent,
+    items,
+    empty,
+    selectedSymbol,
+    onOpen,
+}: {
+    title: string;
+    hint: string;
+    accent: string;
+    items: ProcessIdea[];
+    empty: string;
+    selectedSymbol?: string | null;
+    onOpen: (idea: ProcessIdea) => void;
+}) {
+    return (
+        <section className={`rounded-2xl border bg-[#0e1420] p-3 ${accent}`}>
+            <div className="flex items-end justify-between gap-2 mb-3">
+                <div>
+                    <h3 className="text-[11px] font-black uppercase tracking-widest">{title}</h3>
+                    <p className="text-[10px] text-zinc-500 mt-0.5">{hint}</p>
+                </div>
+                <span className="text-[10px] font-black text-zinc-500">TOP {Math.min(items.length, 3)} / 3</span>
+            </div>
+            {items.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-zinc-800 px-3 py-8 text-center">
+                    <p className="text-[11px] text-zinc-500">{empty}</p>
+                </div>
+            ) : (
+                <div className="space-y-2">
+                    {items.slice(0, 3).map((idea) => (
+                        <ProcessMiniCard
+                            key={`${title}-${idea.symbol}`}
+                            idea={idea}
+                            selected={selectedSymbol === idea.symbol}
+                            onOpen={onOpen}
+                        />
+                    ))}
+                </div>
+            )}
+        </section>
+    );
 }
 
 function ProcessIdeaCard({
@@ -917,6 +1200,17 @@ function ProcessIdeaCard({
                         {idea.hq_pullback && (
                             <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-400 text-amber-950">
                                 HIGH-QUALITY PULLBACK
+                            </span>
+                        )}
+                        {idea.session?.vwap != null && (
+                            <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                                    idea.vwap_agree
+                                        ? 'border border-cyan-500/40 text-cyan-300'
+                                        : 'border border-zinc-700 text-zinc-400'
+                                }`}
+                            >
+                                VWAP {idea.vwap_side || (idea.spot >= (idea.session.vwap || 0) ? 'ABOVE' : 'BELOW')}
                             </span>
                         )}
                         {idea.campaign && idea.campaign !== 'WATCH' && !idea.hq_pullback && (
@@ -1128,25 +1422,57 @@ function GradeBadge({ grade }: { grade?: string }) {
     );
 }
 
+const RADAR_BOARD_KEY = 'optiongreek:radar:last_board';
+
+function loadCachedBoard(): ScanResult | null {
+    if (typeof window === 'undefined') return null;
+    try {
+        const raw = sessionStorage.getItem(RADAR_BOARD_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || (!parsed.flagged?.length && !parsed.ideas?.length && !parsed.watch?.length)) {
+            return null;
+        }
+        return parsed as ScanResult;
+    } catch {
+        return null;
+    }
+}
+
+function saveCachedBoard(data: ScanResult) {
+    try {
+        sessionStorage.setItem(RADAR_BOARD_KEY, JSON.stringify(data));
+    } catch {
+        /* quota — ignore */
+    }
+}
+
 export default function OptionFlowRadar({ onBack }: Props) {
     const [tab, setTab] = useState<TabType>('process');
 
-    // Scan state
-    const [scanData, setScanData] = useState<ScanResult | null>(null);
+    // Scan state — seed from this-tab cache so Back/Radar never paints empty
+    const [scanData, setScanData] = useState<ScanResult | null>(() => loadCachedBoard());
     const [scanLoading, setScanLoading] = useState(false);
     const [scanError, setScanError] = useState<string | null>(null);
     const [scanProgress, setScanProgress] = useState(0);
     const [scanCurrent, setScanCurrent] = useState<string | null>(null);
+    const [scanUniverse, setScanUniverse] = useState(0);
+    const [scanDoneCount, setScanDoneCount] = useState(0);
+    const [scanLog, setScanLog] = useState<Array<{ sym?: string; status?: string; ms?: number; err?: string | null }>>([]);
+    const [scanLastMs, setScanLastMs] = useState(0);
+    const [scanLastError, setScanLastError] = useState<string | null>(null);
     const scanPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const scanRunRef = useRef(0);
+    const scanLoadingRef = useRef(false);
 
     // Filters
     const [minLis, setMinLis] = useState(0);
     const [optTypeFilter, setOptTypeFilter] = useState<'CE' | 'PE' | ''>('');
-    const [sortBy, setSortBy] = useState<'lis' | 'oi_change_pct' | 'volume' | 'composite_score' | 'unusual_score'>('composite_score');
+    const [sortBy, setSortBy] = useState<'desk_score' | 'lis' | 'oi_change_pct' | 'volume' | 'composite_score' | 'unusual_score'>('desk_score');
 
     // Selected contract for detail
     const [selectedContract, setSelectedContract] = useState<FlaggedContract | null>(null);
+    const flowReqRef = useRef(0);
 
     // Symbol flow detail
     const [flowData, setFlowData] = useState<SymbolFlow | null>(null);
@@ -1196,7 +1522,7 @@ export default function OptionFlowRadar({ onBack }: Props) {
         const flagged = snap.flagged || [];
         const watch = snap.watch || [];
         const alertBox = snap.alert_box || [];
-        setScanData({
+        const next: ScanResult = {
             success: true,
             engine: snap.engine || 'v4-process',
             scanned: snap.scanned ?? snap.completed ?? 0,
@@ -1206,20 +1532,43 @@ export default function OptionFlowRadar({ onBack }: Props) {
             alert_box: alertBox,
             ideas: snap.ideas || [],
             ideas_confirmed: snap.ideas_confirmed || [],
+            ideas_bullish: snap.ideas_bullish || [],
+            ideas_bearish: snap.ideas_bearish || [],
             ideas_pullbacks: snap.ideas_pullbacks || [],
             ideas_watch: snap.ideas_watch || [],
             ideas_conflict: snap.ideas_conflict || [],
             idea_counts: snap.idea_counts,
             grade_counts: snap.grade_counts,
             errors: snap.errors || [],
+            retry_attempted: snap.retry_attempted || 0,
+            retry_recovered: snap.retry_recovered || 0,
+            failed_remaining: snap.failed_remaining || [],
             timestamp: snap.timestamp || new Date().toISOString(),
             market_hours: snap.market_hours ?? true,
+        };
+        setScanData((prev) => {
+            // Never replace a painted board with an empty snapshot
+            const incoming =
+                flagged.length +
+                watch.length +
+                alertBox.length +
+                (next.ideas?.length || 0);
+            const had =
+                (prev?.flagged?.length || 0) +
+                (prev?.watch?.length || 0) +
+                (prev?.ideas?.length || 0);
+            if (prev && incoming === 0 && had > 0) return prev;
+            saveCachedBoard(next);
+            return next;
         });
     }, []);
 
     const runScan = useCallback(async (silent = false) => {
+        // One FNO pass at a time. Auto-refresh must not start a second job.
+        if (scanLoadingRef.current && scanPollRef.current) return;
         const myRun = ++scanRunRef.current;
         stopScanPoll();
+        scanLoadingRef.current = true;
         setScanLoading(true);
         setScanError(null);
         if (!silent) setScanProgress(2);
@@ -1227,41 +1576,91 @@ export default function OptionFlowRadar({ onBack }: Props) {
 
         try {
             const started: any = await api.radar.startScan(
-                minLis,
-                optTypeFilter || undefined,
-                8,
+                0,
+                undefined,
+                14,
             );
             if (myRun !== scanRunRef.current) return;
-            const jid = started.job_id as string;
-            if (!jid) throw new Error('No radar job id returned');
+            const jid = started.job_id as string | null;
+            setScanUniverse(Number(started.total || 0));
+            setScanDoneCount(Number(started.completed || 0));
+            if (started.completion_pct != null) {
+                setScanProgress(Number(started.completion_pct));
+            }
+            if (!jid) {
+                // Another pass is already fetching the full list.
+                // Keep this board; wait for /radar/last to publish once.
+                const waitLast = async () => {
+                    if (myRun !== scanRunRef.current) return;
+                    try {
+                        const last: any = await api.radar.getLastScan();
+                        if (myRun !== scanRunRef.current) return;
+                        if (last?.scan_running) {
+                            setScanCurrent('waiting for in-flight FNO pass');
+                            return;
+                        }
+                        stopScanPoll();
+                        scanLoadingRef.current = false;
+                        setScanLoading(false);
+                        setLastRefresh(new Date());
+                        if (last?.has_data) commitScanPayload(last);
+                    } catch (e: any) {
+                        if (myRun !== scanRunRef.current) return;
+                        stopScanPoll();
+                        scanLoadingRef.current = false;
+                        setScanLoading(false);
+                        setScanError(e?.message || 'Radar wait failed');
+                    }
+                };
+                await waitLast();
+                if (myRun !== scanRunRef.current) return;
+                if (scanLoadingRef.current) {
+                    scanPollRef.current = setInterval(waitLast, 2000);
+                }
+                return;
+            }
 
             const pollOnce = async () => {
                 if (myRun !== scanRunRef.current) return;
                 try {
                     const snap: any = await api.radar.getScanJob(jid);
                     if (myRun !== scanRunRef.current) return;
+                    const requested = Number(snap.universe_requested || snap.total || 0);
+                    const scanned = Number(snap.scanned ?? snap.completed ?? 0);
+                    setScanUniverse(requested);
+                    setScanDoneCount(scanned);
                     setScanProgress(Number(snap.completion_pct ?? 0));
                     setScanCurrent(snap.current_symbol || null);
+                    if (Array.isArray(snap.log)) setScanLog(snap.log);
+                    if (snap.last_ms != null) setScanLastMs(Number(snap.last_ms) || 0);
+                    setScanLastError(snap.last_error || null);
                     const done =
                         snap.status === 'completed' ||
                         snap.status === 'failed' ||
                         snap.status === 'cancelled';
-                    // Keep the existing board on screen. Only replace scores
-                    // when this job is finished.
+                    // Progress only while running. Paint the board once, after
+                    // every FNO name in this job has been fetched.
                     if (done) {
                         stopScanPoll();
+                        scanLoadingRef.current = false;
                         setScanLoading(false);
                         setLastRefresh(new Date());
-                        if (snap.status !== 'failed') {
+                        const fullPass = requested <= 0 || scanned >= requested;
+                        if (snap.status === 'completed' && fullPass && !snap.partial) {
                             commitScanPayload(snap);
                             applyRadarAlerts(snap.flagged || []);
-                        } else {
+                        } else if (snap.status === 'failed') {
                             setScanError(snap.error_message || 'Radar job failed');
+                        } else {
+                            setScanError(
+                                'Scan finished before every FNO name was fetched. Previous board kept.',
+                            );
                         }
                     }
                 } catch (e: any) {
                     if (myRun !== scanRunRef.current) return;
                     stopScanPoll();
+                    scanLoadingRef.current = false;
                     setScanLoading(false);
                     setScanError(e?.message || 'Radar poll failed');
                 }
@@ -1272,15 +1671,18 @@ export default function OptionFlowRadar({ onBack }: Props) {
             scanPollRef.current = setInterval(pollOnce, 1500);
         } catch (e: any) {
             if (myRun !== scanRunRef.current) return;
+            scanLoadingRef.current = false;
             setScanError(e.message || 'Scan failed');
             setScanLoading(false);
         }
-    }, [applyRadarAlerts, commitScanPayload, minLis, optTypeFilter, stopScanPoll]);
+    }, [applyRadarAlerts, commitScanPayload, stopScanPoll]);
 
     const applyIdeaBoard = useCallback((board: any) => {
-        if (!board) return;
+        if (!board || scanLoadingRef.current) return;
         const ideas = board.active || board.ideas || [];
         const confirmed = board.confirmed || board.ideas_confirmed || [];
+        const bullish = board.bullish || board.ideas_bullish || [];
+        const bearish = board.bearish || board.ideas_bearish || [];
         const pullbacks = board.pullbacks || board.ideas_pullbacks || [];
         const watch = board.watch || board.ideas_watch || [];
         const conflict = board.conflict || board.ideas_conflict || [];
@@ -1294,6 +1696,8 @@ export default function OptionFlowRadar({ onBack }: Props) {
             alert_box: prev?.alert_box || [],
             ideas,
             ideas_confirmed: confirmed,
+            ideas_bullish: bullish,
+            ideas_bearish: bearish,
             ideas_pullbacks: pullbacks,
             ideas_watch: watch,
             ideas_conflict: conflict,
@@ -1322,6 +1726,10 @@ export default function OptionFlowRadar({ onBack }: Props) {
                 if (last.has_data || hasRows) {
                     commitScanPayload(last);
                 }
+                if (last.scan_running) {
+                    scanLoadingRef.current = true;
+                    setScanLoading(true);
+                }
             } catch {
                 /* first visit — wait for scan */
             }
@@ -1335,9 +1743,12 @@ export default function OptionFlowRadar({ onBack }: Props) {
     useEffect(() => {
         let cancelled = false;
         const pull = async () => {
+            if (scanLoadingRef.current) return;
             try {
-                const board: any = await api.radar.getIdeas(8);
-                if (!cancelled && board?.success !== false) applyIdeaBoard(board);
+                const board: any = await api.radar.getIdeas(12);
+                if (!cancelled && !scanLoadingRef.current && board?.success !== false) {
+                    applyIdeaBoard(board);
+                }
             } catch {
                 /* idea book empty until first scan */
             }
@@ -1350,41 +1761,74 @@ export default function OptionFlowRadar({ onBack }: Props) {
         };
     }, [applyIdeaBoard]);
 
-    // Initial + filter-triggered scan
-    useEffect(() => {
-        runScan(true);
-        return () => {
-            scanRunRef.current += 1;
-            stopScanPoll();
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [minLis, optTypeFilter]);
+    const [bookMeta, setBookMeta] = useState<{
+        symbols?: number;
+        chain_fresh?: number;
+        history_15_fresh?: number;
+        freshest_age?: number | null;
+        redis?: string;
+        harvest?: { running?: boolean; scanned?: number; total?: number; phase?: string };
+    } | null>(null);
 
-    // Auto-refresh every 90s (jobs are heavy — avoid 60s pile-up)
+    // Poll last board + ideas + harvest meta. UI never starts a 90s Fyers walk.
     useEffect(() => {
-        if (autoRefresh) {
-            refreshTimerRef.current = setInterval(() => runScan(true), 90_000);
-        } else {
-            if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-        }
+        let cancelled = false;
+        const pullBook = async () => {
+            try {
+                const last: any = await api.radar.getLastScan();
+                if (cancelled) return;
+                const hasRows =
+                    (last?.flagged || []).length ||
+                    (last?.watch || []).length ||
+                    (last?.alert_box || []).length ||
+                    (last?.ideas || []).length;
+                if (last?.has_data || hasRows) {
+                    commitScanPayload(last);
+                    setLastRefresh(new Date());
+                    if (last.scan_running) {
+                        scanLoadingRef.current = true;
+                        setScanLoading(true);
+                    } else {
+                        scanLoadingRef.current = false;
+                        setScanLoading(false);
+                    }
+                }
+            } catch {
+                /* board empty until first harvest */
+            }
+            try {
+                const st: any = await api.market.getStoreStatus();
+                if (!cancelled && st) setBookMeta(st);
+            } catch {
+                /* store status optional */
+            }
+        };
+        pullBook();
+        if (!autoRefresh) return () => { cancelled = true; };
+        refreshTimerRef.current = setInterval(pullBook, 15_000);
         return () => {
+            cancelled = true;
             if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
         };
-    }, [autoRefresh, runScan]);
+    }, [autoRefresh, commitScanPayload]);
 
     // ── Symbol flow ───────────────────────────────────────────────
 
     const loadFlow = async (symbol: string) => {
+        const req = ++flowReqRef.current;
         setFlowLoading(true);
         setFlowError(null);
+        setFlowData(null);
         try {
-            const data: SymbolFlow = await api.radar.getSymbolFlow(symbol, 10);
+            const data: SymbolFlow = await api.radar.getSymbolFlow(symbol, 14);
+            if (req !== flowReqRef.current) return;
             setFlowData(data);
             if (data.warning) setFlowError(data.warning);
         } catch (e: any) {
+            if (req !== flowReqRef.current) return;
             setFlowError(e?.message || 'Failed to load symbol flow');
         } finally {
-            setFlowLoading(false);
+            if (req === flowReqRef.current) setFlowLoading(false);
         }
     };
 
@@ -1393,10 +1837,19 @@ export default function OptionFlowRadar({ onBack }: Props) {
         loadFlow(contract.symbol);
     };
 
+    const openProcessIdea = (idea: ProcessIdea) => {
+        if (!idea?.symbol) return;
+        setSelectedContract(ideaToContract(idea));
+        setTab('flow');
+        loadFlow(idea.symbol);
+    };
+
     // ── Derived data ─────────────────────────────────────────────
 
     const sortRows = (rows: FlaggedContract[]) =>
         [...rows].sort((a, b) => {
+            if (sortBy === 'desk_score')
+                return (b.desk_score ?? b.composite_score ?? b.lis) - (a.desk_score ?? a.composite_score ?? a.lis);
             if (sortBy === 'lis') return b.lis - a.lis;
             if (sortBy === 'oi_change_pct') return Math.abs(b.oi_change_pct) - Math.abs(a.oi_change_pct);
             if (sortBy === 'unusual_score') return (b.unusual_score || 0) - (a.unusual_score || 0);
@@ -1405,9 +1858,15 @@ export default function OptionFlowRadar({ onBack }: Props) {
             return b.volume - a.volume;
         });
 
-    const sortedContracts = sortRows(scanData?.flagged ?? []);
-    const alertBoxRows = sortRows(scanData?.alert_box ?? []);
-    const watchRows = sortRows(scanData?.watch ?? []);
+    const applyClientFilters = (rows: FlaggedContract[]) =>
+        rows.filter((c) => {
+            if (minLis > 0 && (c.lis ?? 0) < minLis) return false;
+            if (optTypeFilter && c.type !== optTypeFilter) return false;
+            return true;
+        });
+    const sortedContracts = sortRows(applyClientFilters(scanData?.flagged ?? []));
+    const alertBoxRows = sortRows(applyClientFilters(scanData?.alert_box ?? []));
+    const watchRows = sortRows(applyClientFilters(scanData?.watch ?? []));
 
     const chartMarkers = flowData?.flagged_contracts.map(c => ({
         timestamp: new Date(c.timestamp).getTime() / 1000,
@@ -1417,18 +1876,31 @@ export default function OptionFlowRadar({ onBack }: Props) {
 
     // ── LIS stats ─────────────────────────────────────────────────
 
-    const processRows = [
+    const processPool = dedupeIdeas([
         ...(scanData?.ideas || []),
-        ...(scanData?.ideas_watch || []),
-    ];
-    const processBulls = processRows.filter(
-        i => i.direction === 'BULLISH' || i.side === 'LONG',
-    ).length;
-    const processBears = processRows.filter(
-        i => i.direction === 'BEARISH' || i.side === 'SHORT',
-    ).length;
-    const processBias =
-        processBulls > processBears ? 'BULLISH' : processBears > processBulls ? 'BEARISH' : processBulls ? 'MIXED' : 'NONE';
+        ...(scanData?.ideas_confirmed || []),
+        ...(scanData?.ideas_bullish || []),
+        ...(scanData?.ideas_bearish || []),
+        ...(scanData?.ideas_pullbacks || []),
+    ]);
+    const processWatch = dedupeIdeas(scanData?.ideas_watch || []);
+    const processConflict = dedupeIdeas(scanData?.ideas_conflict || []);
+    const pureLocked = processPool.filter(i => i.status === 'ACTIVE' && !i.hq_pullback);
+    const processBullish = topN(
+        scanData?.ideas_bullish?.length
+            ? scanData.ideas_bullish
+            : pureLocked.filter(i => ideaTone(i) === 'bull'),
+    );
+    const processBearish = topN(
+        scanData?.ideas_bearish?.length
+            ? scanData.ideas_bearish
+            : pureLocked.filter(i => ideaTone(i) === 'bear'),
+    );
+    const processPullbacks = topN(scanData?.ideas_pullbacks?.length ? scanData.ideas_pullbacks : processPool.filter(i => i.hq_pullback));
+    const processWatchTop = topN(processWatch);
+    const processConflictTop = topN(processConflict);
+    const processBulls = (scanData?.idea_counts?.bullish ?? processPool.filter(i => ideaTone(i) === 'bull').length);
+    const processBears = (scanData?.idea_counts?.bearish ?? processPool.filter(i => ideaTone(i) === 'bear').length);
 
     const highConviction = sortedContracts.filter(
         c => c.grade === 'A+' || c.grade === 'A' || c.lis >= 70,
@@ -1505,7 +1977,7 @@ export default function OptionFlowRadar({ onBack }: Props) {
                             <span className="text-cyan-500 text-xs not-italic font-black">v4</span>
                         </h1>
                         <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">
-                            Locked process trades · pivots / CPR / OI walls · persistence
+                            Flow + RSI 15/1H + OC permission + 4H · ranked by desk score
                         </p>
                     </div>
 
@@ -1536,7 +2008,7 @@ export default function OptionFlowRadar({ onBack }: Props) {
                             onClick={() => runScan()}
                             className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase rounded-full transition-all"
                         >
-                            {scanLoading ? 'Updating…' : '↻ Refresh'}
+                            {scanLoading ? 'Harvesting…' : '↻ Refresh book'}
                         </button>
 
                         {lastRefresh && (
@@ -1546,6 +2018,24 @@ export default function OptionFlowRadar({ onBack }: Props) {
                         )}
                     </div>
                 </div>
+
+                {bookMeta && (
+                    <div className="max-w-screen-2xl mx-auto px-4 pb-2">
+                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border border-zinc-700 bg-zinc-900/80 text-zinc-400">
+                            <span className={`w-1.5 h-1.5 rounded-full ${bookMeta.harvest?.running ? 'bg-amber-400 animate-pulse' : 'bg-emerald-500'}`} />
+                            Book age {bookMeta.freshest_age != null ? `${Math.round(bookMeta.freshest_age)}s` : '—'}
+                            {' · '}
+                            {bookMeta.chain_fresh ?? 0}/{bookMeta.symbols ?? 0} chains
+                            {' · '}
+                            15m {bookMeta.history_15_fresh ?? 0}/{bookMeta.symbols ?? 0}
+                            {' · '}
+                            {bookMeta.redis === 'ok' ? 'Redis' : 'Memory'}
+                            {bookMeta.harvest?.running
+                                ? ` · warming ${bookMeta.harvest.scanned ?? 0}/${bookMeta.harvest.total ?? 0} ${bookMeta.harvest.phase || ''}`
+                                : ''}
+                        </div>
+                    </div>
+                )}
 
                 {/* Tab bar */}
                 <div className="max-w-screen-2xl mx-auto px-4 flex gap-1 pb-0 flex-wrap">
@@ -1575,64 +2065,118 @@ export default function OptionFlowRadar({ onBack }: Props) {
             <main className="max-w-screen-2xl mx-auto px-4 py-4">
                 <LoadingBanner
                     active={scanLoading}
-                    label={scanData ? 'Refreshing option flow radar' : 'Scanning watchlist option chains'}
+                    label={
+                        scanUniverse
+                            ? `Scanning FNO ${scanDoneCount}/${scanUniverse}`
+                            : scanData
+                              ? 'Starting full FNO job'
+                              : 'Scanning full FNO universe'
+                    }
                     progress={scanProgress}
                     detail={
-                        scanCurrent
-                            ? `Now: ${String(scanCurrent).replace('NSE:', '').replace('-EQ', '')} · ${Math.round(scanProgress)}%`
-                            : scanData
-                              ? `Live job… ${scanData.scanned} scanned · ${scanData.total_flagged} flagged so far`
-                              : 'Background job · LIS · OI change · volume spikes · greeks'
+                        scanLoading
+                            ? [
+                                  scanLog.some((r) => r.status === 'wait' || r.status === 'retry' || r.status === 'retry_start')
+                                      ? 'Waiting on quota — staying on this name until the chain arrives'
+                                      : null,
+                                  scanCurrent
+                                      ? `Now ${String(scanCurrent).replace('NSE:', '').replace('-EQ', '').replace('-INDEX', '')}`
+                                      : null,
+                                  scanLastMs ? `${scanLastMs}ms` : null,
+                                  scanLastError ? `last ${scanLastError}` : null,
+                                  'previous board held',
+                              ]
+                                  .filter(Boolean)
+                                  .join(' · ')
+                            : 'Job finished · waited for missing chains · board swapped once'
                     }
                 />
+                {scanLoading && scanLog.length > 0 && (
+                    <div className="mb-4 flex flex-wrap gap-1.5">
+                        {scanLog.slice(-20).map((row, i) => (
+                            <span
+                                key={`${row.sym}-${i}`}
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${
+                                    row.status === 'hit' || row.status === 'retry_hit'
+                                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10'
+                                        : row.status === 'wait' || row.status === 'retry' || row.status === 'retry_start'
+                                          ? 'border-amber-500/40 text-amber-300 bg-amber-500/10'
+                                          : row.status === 'err' || row.status === 'timeout' || (row.status || '').startsWith('no_chain')
+                                            ? 'border-rose-500/40 text-rose-300 bg-rose-500/10'
+                                            : 'border-zinc-700 text-zinc-500 bg-zinc-900/60'
+                                }`}
+                                title={row.err || `${row.status || ''} ${row.ms || 0}ms`}
+                            >
+                                {row.sym}
+                                {row.status === 'wait' ? ' …' : ''}
+                                {row.status === 'retry' || row.status === 'retry_start' ? ' ↻' : ''}
+                                {row.status === 'retry_hit' ? ' ✓' : ''}
+                                {row.ms != null ? ` ${row.ms}ms` : ''}
+                            </span>
+                        ))}
+                    </div>
+                )}
+                {!scanLoading && ((scanData?.retry_attempted || 0) > 0 || (scanData?.failed_remaining || []).length > 0) && (
+                    <div className="mb-4 px-3 py-2 rounded-xl border border-zinc-800 bg-[#0e1420] text-[11px] text-zinc-400">
+                        <span className="font-black text-zinc-200">Chain wait</span>
+                        {' · '}
+                        recovered {scanData?.retry_recovered ?? 0}/{scanData?.retry_attempted ?? 0}
+                        {(scanData?.failed_remaining || []).length > 0 && (
+                            <span className="text-rose-300">
+                                {' · still missing '}
+                                {(scanData?.failed_remaining || [])
+                                    .slice(0, 8)
+                                    .map((s) => String(s).replace('NSE:', '').replace('-EQ', '').replace('-INDEX', ''))
+                                    .join(' ')}
+                                {(scanData?.failed_remaining || []).length > 8
+                                    ? ` +${(scanData?.failed_remaining || []).length - 8}`
+                                    : ''}
+                            </span>
+                        )}
+                    </div>
+                )}
 
                 {/* ══════════════════════════════════════════════
                     TAB: LIVE MONITOR
                 ══════════════════════════════════════════════ */}
                 {tab === 'process' && (
                     <div className="space-y-4">
-                        <div className={`p-4 rounded-xl border ${
-                            processBias === 'BULLISH'
-                                ? 'border-emerald-500/40 bg-emerald-500/10'
-                                : processBias === 'BEARISH'
-                                  ? 'border-rose-500/40 bg-rose-500/10'
-                                  : 'border-cyan-500/20 bg-cyan-500/5'
-                        }`}>
-                            <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="p-4 rounded-2xl border border-zinc-800 bg-[#0e1420]">
+                            <div className="flex flex-wrap items-end justify-between gap-3">
                                 <div>
                                     <p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
-                                        Process signal
+                                        Process board
                                     </p>
-                                    <p className={`text-2xl font-black ${
-                                        processBias === 'BULLISH'
-                                            ? 'text-emerald-400'
-                                            : processBias === 'BEARISH'
-                                              ? 'text-rose-400'
-                                              : 'text-zinc-300'
-                                    }`}>
-                                        {processBias === 'NONE' ? 'NO SIGNAL YET' : `${processBias} SIGNAL`}
+                                    <p className="text-xl font-black text-white mt-0.5">
+                                        Top 3 in each category
                                     </p>
-                                    <p className="text-[11px] text-zinc-400 mt-0.5">
-                                        {processBulls} bullish · {processBears} bearish
-                                        {scanLoading ? ' · scores update when this scan finishes' : ''}
+                                    <p className="text-[11px] text-zinc-500 mt-0.5">
+                                        Click a stock to open that same symbol.
+                                        {scanLoading
+                                            ? ` · scanning ${scanDoneCount}/${scanUniverse || '…'} FNO — categories stay put until the job finishes`
+                                            : ''}
                                     </p>
                                 </div>
-                                <div className="flex gap-2">
+                                <div className="flex flex-wrap gap-2">
                                     <span className="px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-300 text-xs font-black">
                                         BULL {processBulls}
                                     </span>
                                     <span className="px-3 py-1.5 rounded-lg bg-rose-500/15 text-rose-300 text-xs font-black">
                                         BEAR {processBears}
                                     </span>
+                                    <span className="px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 text-xs font-black">
+                                        PB {scanData?.idea_counts?.pullbacks ?? processPullbacks.length}
+                                    </span>
                                 </div>
                             </div>
                         </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                             {[
-                                { label: 'Confirmed MTF', value: scanData?.idea_counts?.confirmed ?? scanData?.ideas_confirmed?.length ?? 0, color: 'text-emerald-400' },
-                                { label: 'HQ Pullback', value: scanData?.idea_counts?.pullbacks ?? scanData?.ideas_pullbacks?.length ?? 0, color: 'text-amber-400' },
-                                { label: 'Watch', value: scanData?.idea_counts?.watch ?? scanData?.ideas_watch?.length ?? 0, color: 'text-zinc-300' },
-                                { label: 'Conflict / no trade', value: scanData?.idea_counts?.conflict ?? scanData?.ideas_conflict?.length ?? 0, color: 'text-rose-400' },
+                                { label: 'Pure bullish', value: scanData?.idea_counts?.bullish ?? processBulls, color: 'text-emerald-400' },
+                                { label: 'Pure bearish', value: scanData?.idea_counts?.bearish ?? processBears, color: 'text-rose-400' },
+                                { label: 'HQ pullback', value: scanData?.idea_counts?.pullbacks ?? processPullbacks.length, color: 'text-amber-400' },
+                                { label: 'Watch', value: scanData?.idea_counts?.watch ?? processWatch.length, color: 'text-zinc-300' },
+                                { label: 'Conflict', value: scanData?.idea_counts?.conflict ?? processConflict.length, color: 'text-orange-400' },
                             ].map(s => (
                                 <div key={s.label} className="bg-[#0e1420] border border-zinc-800 rounded-xl p-3 text-center">
                                     <p className={`text-2xl font-black ${s.color}`}>{s.value}</p>
@@ -1641,104 +2185,56 @@ export default function OptionFlowRadar({ onBack }: Props) {
                             ))}
                         </div>
 
-                        {((scanData?.ideas_confirmed || scanData?.ideas || []).length > 0) ? (
-                            <div className="space-y-3">
-                                <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Confirmed momentum — 4H side locked</h3>
-                                {(scanData?.ideas_confirmed?.length ? scanData.ideas_confirmed : (scanData?.ideas || []).filter(i => !i.hq_pullback)).map(idea => (
-                                    <ProcessIdeaCard
-                                        key={`act-${idea.symbol}`}
-                                        idea={idea}
-                                        onOpen={(it) => {
-                                            setSelectedContract({
-                                                timestamp: it.locked_at || new Date().toISOString(),
-                                                symbol: it.symbol,
-                                                name: it.name,
-                                                expiry: '',
-                                                strike: it.strike,
-                                                type: (it.opt_type as 'CE' | 'PE') || 'CE',
-                                                ltp: 0,
-                                                ltp_change_pct: 0,
-                                                oi: 0,
-                                                oi_change_pct: 0,
-                                                volume: 0,
-                                                vol_3day_avg: 0,
-                                                vol_spike_ratio: 0,
-                                                iv: null,
-                                                delta: null,
-                                                gamma: null,
-                                                theta: null,
-                                                vega: null,
-                                                greek_interpretation: null,
-                                                spot: it.spot || 0,
-                                                spot_change_pct: 0,
-                                                vwap_dev_pct: 0,
-                                                above_ema20: true,
-                                                atm_dist_pct: 0,
-                                                lis: it.lis || 0,
-                                                signal: { signal: it.signal || '', label: it.label, icon: '', color: '' },
-                                                conviction: { level: 'HIGH', icon: '🔒', label: 'Locked' },
-                                                unusual_flags: it.location_tags || [],
-                                                process_locked: true,
-                                                idea: it,
-                                            });
-                                            setTab('flow');
-                                            loadFlow(it.symbol);
-                                        }}
-                                    />
-                                ))}
-                            </div>
-                        ) : (scanData?.ideas_pullbacks || []).length === 0 ? (
-                            <div className="flex flex-col items-center justify-center py-14 text-center border border-zinc-800 rounded-xl bg-[#0e1420]">
-                                <p className="text-sm font-bold text-zinc-400">No confirmed MTF momentum yet</p>
-                                <p className="text-xs text-zinc-600 mt-1 max-w-md">
-                                    Daily+4H+1H must agree (or 1H must be a closed-bar turn). 15m only times the entry.
-                                    First 15 minutes and 0–2 DTE cannot open a new confirm.
-                                </p>
-                            </div>
-                        ) : null}
+                        <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+                            <ProcessCategory
+                                title="Pure bullish"
+                                hint="Spot above VWAP · CE/PE fuel · not 4H short"
+                                accent="border-emerald-500/25"
+                                items={processBullish}
+                                empty="No locked long ideas yet"
+                                selectedSymbol={selectedContract?.symbol}
+                                onOpen={openProcessIdea}
+                            />
+                            <ProcessCategory
+                                title="Pure bearish"
+                                hint="Spot below VWAP · PE/CE fuel · not 4H long"
+                                accent="border-rose-500/25"
+                                items={processBearish}
+                                empty="No locked short ideas yet"
+                                selectedSymbol={selectedContract?.symbol}
+                                onOpen={openProcessIdea}
+                            />
+                            <ProcessCategory
+                                title="HQ pullback"
+                                hint="4H trend intact · 1H turning into the dip / rally"
+                                accent="border-amber-500/25"
+                                items={processPullbacks}
+                                empty="No high-quality pullbacks"
+                                selectedSymbol={selectedContract?.symbol}
+                                onOpen={openProcessIdea}
+                            />
+                        </div>
 
-                        {(scanData?.ideas_pullbacks || []).length > 0 && (
-                            <div className="space-y-3">
-                                <h3 className="text-[10px] font-black text-amber-400 uppercase tracking-widest">
-                                    High-quality pullback — often the best entry
-                                </h3>
-                                {(scanData?.ideas_pullbacks || []).map(idea => (
-                                    <ProcessIdeaCard
-                                        key={`pb-${idea.symbol}`}
-                                        idea={idea}
-                                        onOpen={(it) => {
-                                            setTab('flow');
-                                            loadFlow(it.symbol);
-                                        }}
-                                    />
-                                ))}
-                            </div>
-                        )}
-
-                        {(scanData?.ideas_watch || []).length > 0 && (
-                            <div className="space-y-2">
-                                <h3 className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Watch — not sure yet</h3>
-                                {(scanData?.ideas_watch || []).slice(0, 6).map(idea => (
-                                    <ProcessIdeaCard
-                                        key={`w-${idea.symbol}`}
-                                        idea={idea}
-                                        onOpen={(it) => {
-                                            setTab('flow');
-                                            loadFlow(it.symbol);
-                                        }}
-                                    />
-                                ))}
-                            </div>
-                        )}
-
-                        {(scanData?.ideas_conflict || []).length > 0 && (
-                            <div className="space-y-2">
-                                <h3 className="text-[10px] font-black text-rose-400/70 uppercase tracking-widest">Conflict — stand aside</h3>
-                                {(scanData?.ideas_conflict || []).slice(0, 4).map(idea => (
-                                    <ProcessIdeaCard key={`c-${idea.symbol}`} idea={idea} onOpen={(it) => { setTab('flow'); loadFlow(it.symbol); }} />
-                                ))}
-                            </div>
-                        )}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <ProcessCategory
+                                title="Watch"
+                                hint="Building — not locked"
+                                accent="border-zinc-800"
+                                items={processWatchTop}
+                                empty="Nothing on watch"
+                                selectedSymbol={selectedContract?.symbol}
+                                onOpen={openProcessIdea}
+                            />
+                            <ProcessCategory
+                                title="Conflict"
+                                hint="Both sides printing — stand aside"
+                                accent="border-orange-500/20"
+                                items={processConflictTop}
+                                empty="No conflicts"
+                                selectedSymbol={selectedContract?.symbol}
+                                onOpen={openProcessIdea}
+                            />
+                        </div>
                     </div>
                 )}
 
@@ -1821,6 +2317,7 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                     onChange={e => setSortBy(e.target.value as typeof sortBy)}
                                     className="bg-zinc-900 border border-zinc-700 text-zinc-300 text-xs rounded-lg px-2 py-1"
                                 >
+                                    <option value="desk_score">Desk (all params)</option>
                                     <option value="composite_score">Composite</option>
                                     <option value="lis">LIS Score</option>
                                     <option value="unusual_score">Unusual Score</option>
@@ -1856,6 +2353,9 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                                 <th className="py-2 text-right">Spot Chg%</th>
                                                 <th className="py-2 text-center">Signal</th>
                                                 <th className="py-2 text-center">LIS</th>
+                                                <th className="py-2 text-center">Desk</th>
+                                                <th className="py-2 text-center">RSI 15/1H</th>
+                                                <th className="py-2 text-center">OC P</th>
                                                 <th className="py-2 text-center">Action</th>
                                             </tr>
                                         </thead>
@@ -1886,7 +2386,19 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                                             <p className="text-[9px] text-zinc-500">
                                                                 Exp: {formatExpiryText(c.expiry)} • ATM dist: {c.atm_dist_pct?.toFixed(1)}%
                                                                 {c.location_score != null ? ` • loc ${c.location_score}` : ''}
+                                                                {c.h4_bias ? ` • 4H ${c.h4_bias}` : ''}
                                                             </p>
+                                                            {c.desk_align && c.desk_align !== 'FLOW' && (
+                                                                <span className={`inline-block mt-0.5 px-1.5 py-0.5 rounded text-[9px] font-black ${
+                                                                    c.desk_align === 'STACK'
+                                                                        ? 'bg-emerald-500/20 text-emerald-300'
+                                                                        : c.desk_align === 'VETO' || c.desk_align === 'FIGHT'
+                                                                          ? 'bg-rose-500/20 text-rose-300'
+                                                                          : 'bg-zinc-700 text-zinc-300'
+                                                                }`}>
+                                                                    {c.desk_thesis || c.desk_align}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                     </td>
                                                     <td className="py-2.5 text-center font-bold text-zinc-200 text-sm">
@@ -1923,6 +2435,48 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                                     </td>
                                                     <td className="py-2.5 text-center">
                                                         <LISRing lis={c.lis} />
+                                                    </td>
+                                                    <td className="py-2.5 text-center">
+                                                        <span className="text-sm font-black text-cyan-300 tabular-nums">
+                                                            {c.desk_score != null ? c.desk_score : '—'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="py-2.5 text-center font-mono text-[11px] text-zinc-300">
+                                                        {c.rsi15 != null ? c.rsi15 : '—'}
+                                                        <span className="text-zinc-600"> / </span>
+                                                        {c.rsi60 != null ? c.rsi60 : '—'}
+                                                        {c.rsi_event && c.rsi_event !== 'NONE' && c.rsi_event !== 'MID' && (
+                                                            <div className="text-[8px] text-fuchsia-400 font-bold">
+                                                                {c.rsi_event}
+                                                            </div>
+                                                        )}
+                                                        {c.rsi_div && (
+                                                            <div
+                                                                className={`text-[8px] font-black ${
+                                                                    c.rsi_div === 'BULL_DIV'
+                                                                        ? 'text-emerald-400'
+                                                                        : 'text-rose-400'
+                                                                }`}
+                                                                title={[
+                                                                    c.rsi_div_event,
+                                                                    c.rsi_div_price_l1 != null && c.rsi_div_price_l2 != null
+                                                                        ? `15m price ${c.rsi_div_price_l1}→${c.rsi_div_price_l2}`
+                                                                        : null,
+                                                                    c.rsi_div_rsi_l1 != null && c.rsi_div_rsi_l2 != null
+                                                                        ? `RSI ${c.rsi_div_rsi_l1}→${c.rsi_div_rsi_l2}`
+                                                                        : null,
+                                                                    c.rsi_div_bars_ago != null ? `${c.rsi_div_bars_ago} bars ago` : null,
+                                                                ]
+                                                                    .filter(Boolean)
+                                                                    .join(' · ')}
+                                                            >
+                                                                {c.rsi_div === 'BULL_DIV' ? 'BULL DIV' : 'BEAR DIV'}
+                                                                {c.rsi_div_fresh ? ' FRESH' : ''}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td className="py-2.5 text-center text-xs font-bold text-amber-300 tabular-nums">
+                                                        {c.oc_permission != null ? c.oc_permission : '—'}
                                                     </td>
                                                     <td className="py-2.5 text-center">
                                                         <button
@@ -2102,7 +2656,12 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                     <LISRing lis={selectedContract.lis} />
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-3 flex-wrap">
-                                            <h2 className="text-xl font-black text-white">{selectedContract.name}</h2>
+                                            <h2 className="text-xl font-black text-white">
+                                                {selectedContract.name}
+                                            </h2>
+                                            <span className="text-[11px] font-bold text-zinc-500 truncate">
+                                                {selectedContract.symbol}
+                                            </span>
                                             <span className={`px-2 py-0.5 rounded text-sm font-black ${
                                                 selectedContract.type === 'CE'
                                                     ? 'bg-emerald-500/15 text-emerald-400'
@@ -2139,6 +2698,36 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                             <span className={`${selectedContract.above_ema20 ? 'text-emerald-400' : 'text-rose-400'} font-bold`}>
                                                 {selectedContract.above_ema20 ? '↑ Above EMA20' : '↓ Below EMA20'}
                                             </span>
+                                            {selectedContract.desk_score != null && (
+                                                <span className="text-cyan-300 font-black">
+                                                    Desk {selectedContract.desk_score}
+                                                    {selectedContract.desk_thesis ? ` · ${selectedContract.desk_thesis}` : ''}
+                                                </span>
+                                            )}
+                                            {(selectedContract.rsi15 != null || selectedContract.rsi60 != null) && (
+                                                <span className="text-fuchsia-300 font-bold">
+                                                    RSI {selectedContract.rsi15 ?? '—'} / {selectedContract.rsi60 ?? '—'}
+                                                    {selectedContract.rsi_event && selectedContract.rsi_event !== 'NONE'
+                                                        ? ` ${selectedContract.rsi_event}`
+                                                        : ''}
+                                                    {selectedContract.rsi_div
+                                                        ? ` · ${selectedContract.rsi_div_fresh ? 'FRESH ' : ''}${
+                                                              selectedContract.rsi_div === 'BULL_DIV' ? 'BULL DIV' : 'BEAR DIV'
+                                                          }`
+                                                        : ''}
+                                                </span>
+                                            )}
+                                            {selectedContract.oc_permission != null && (
+                                                <span className="text-amber-300 font-bold">
+                                                    OC P {selectedContract.oc_permission}
+                                                </span>
+                                            )}
+                                            {selectedContract.h4_bias && (
+                                                <span className="text-zinc-300">
+                                                    4H {selectedContract.h4_bias}
+                                                    {selectedContract.mtf_allowed ? ` · ${selectedContract.mtf_allowed}` : ''}
+                                                </span>
+                                            )}
                                         </div>
                                         {selectedContract.unusual_flags.length > 0 && (
                                             <div className="flex flex-wrap gap-1 mt-2">
@@ -2164,38 +2753,45 @@ export default function OptionFlowRadar({ onBack }: Props) {
                                         <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
                                         <span className="text-xs text-zinc-400">Loading flow data...</span>
                                     </div>
-                                ) : flowData ? (
+                                ) : flowData && flowData.symbol === selectedContract.symbol ? (
                                     <>
-                                        {(flowData.idea || selectedContract.idea) && (
+                                        {(() => {
+                                            const ideaForFlow =
+                                                flowData && flowData.symbol === selectedContract.symbol
+                                                    ? flowData.idea || selectedContract.idea
+                                                    : selectedContract.idea;
+                                            if (!ideaForFlow) return null;
+                                            return (
                                             <div className={`p-4 rounded-xl border ${
-                                                (flowData.idea || selectedContract.idea)?.status === 'ACTIVE'
+                                                ideaForFlow.status === 'ACTIVE'
                                                     ? 'border-cyan-500/40 bg-cyan-500/8'
                                                     : 'border-zinc-700 bg-[#0e1420]'
                                             }`}>
                                                 <p className="text-[10px] font-black uppercase text-cyan-400 mb-1">
-                                                    Process idea · {(flowData.idea || selectedContract.idea)?.status}
+                                                    Process idea · {ideaForFlow.status} · {ideaForFlow.symbol}
                                                 </p>
                                                 <p className="text-sm text-zinc-200">
-                                                    {(flowData.idea || selectedContract.idea)?.thesis}
+                                                    {ideaForFlow.thesis}
                                                 </p>
                                                 <div className="flex flex-wrap gap-4 mt-2 text-[11px] text-zinc-400">
                                                     <span>Entry zone <b className="text-zinc-100">
-                                                        {(flowData.idea || selectedContract.idea)?.entry_zone?.from != null
-                                                            ? `${fmtPx((flowData.idea || selectedContract.idea)?.entry_zone?.from)}–${fmtPx((flowData.idea || selectedContract.idea)?.entry_zone?.to)}`
-                                                            : `${(flowData.idea || selectedContract.idea)?.entry_label || ''} ${fmtPx((flowData.idea || selectedContract.idea)?.entry)}`}
+                                                        {ideaForFlow.entry_zone?.from != null
+                                                            ? `${fmtPx(ideaForFlow.entry_zone?.from)}–${fmtPx(ideaForFlow.entry_zone?.to)}`
+                                                            : `${ideaForFlow.entry_label || ''} ${fmtPx(ideaForFlow.entry)}`}
                                                     </b></span>
-                                                    <span>Stop <b className="text-rose-300">{fmtPx((flowData.idea || selectedContract.idea)?.stop)}</b></span>
-                                                    <span>Target <b className="text-emerald-300">{(flowData.idea || selectedContract.idea)?.target_label || ''} {fmtPx((flowData.idea || selectedContract.idea)?.target)}</b></span>
-                                                    <span>Inv <b className="text-zinc-200">{fmtPx((flowData.idea || selectedContract.idea)?.invalidation)}</b></span>
-                                                    <span>Health {(flowData.idea || selectedContract.idea)?.cluster_health || '—'}</span>
+                                                    <span>Stop <b className="text-rose-300">{fmtPx(ideaForFlow.stop)}</b></span>
+                                                    <span>Target <b className="text-emerald-300">{ideaForFlow.target_label || ''} {fmtPx(ideaForFlow.target)}</b></span>
+                                                    <span>Inv <b className="text-zinc-200">{fmtPx(ideaForFlow.invalidation)}</b></span>
+                                                    <span>Health {ideaForFlow.cluster_health || '—'}</span>
                                                 </div>
-                                                {((flowData.idea || selectedContract.idea)?.exit_warnings || []).length > 0 && (
+                                                {(ideaForFlow.exit_warnings || []).length > 0 && (
                                                     <p className="text-[11px] font-bold text-rose-400 mt-1">
-                                                        {(flowData.idea || selectedContract.idea)?.exit_warnings?.join(' · ')}
+                                                        {ideaForFlow.exit_warnings?.join(' · ')}
                                                     </p>
                                                 )}
                                             </div>
-                                        )}
+                                            );
+                                        })()}
 
                                         {flowData.levels && (
                                             <div className="p-4 bg-[#0e1420] border border-zinc-800 rounded-xl">

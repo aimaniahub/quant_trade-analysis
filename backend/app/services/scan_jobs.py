@@ -375,6 +375,17 @@ class ScanJobManager:
                 self._append_counts[job_id] = n
                 self._persist(job, force=(n % 5 == 0))
 
+    def clear_failed_symbol(self, job_id: str, symbol: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or not symbol:
+                return
+            job.failed_symbols = [s for s in job.failed_symbols if s != symbol]
+            job.errors = [
+                e for e in (job.errors or [])
+                if (e.get("symbol") if isinstance(e, dict) else None) != symbol
+            ]
+
     def note_error_only(
         self,
         job_id: str,
@@ -427,6 +438,28 @@ class ScanJobManager:
                 job.status = "running"
                 job.started_at = job.started_at or _now_iso()
                 self._persist(job, force=True)
+
+    def find_running(self, kind: str) -> Optional[ScanJob]:
+        """Return the newest live job of this kind. Stale heartbeats are dropped."""
+        with self._lock:
+            self._purge_old()
+            now = time.time()
+            running: List[ScanJob] = []
+            for j in self._jobs.values():
+                if j.kind != kind or j.status != "running":
+                    continue
+                hb = float((j.meta or {}).get("heartbeat_at") or 0)
+                if hb and now - hb > 75:
+                    j.status = "interrupted"
+                    j.error_message = "No heartbeat — scan stalled"
+                    j.finished_at = _now_iso()
+                    self._persist(j, force=True)
+                    continue
+                running.append(j)
+            if not running:
+                return None
+            running.sort(key=lambda j: j.started_at or j.created_at, reverse=True)
+            return running[0]
 
     def list_jobs(self, kind: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
         from app.services import redis_client as rc

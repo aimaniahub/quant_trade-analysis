@@ -47,7 +47,11 @@ async def get_market_state(symbol: str = Query("NSE:NIFTY50-INDEX", description=
     from app.services.signal_bus import get_signal_bus
 
     # Offload blocking Fyers + analysis off the event loop
-    chain_data = await asyncio.to_thread(market_service.get_option_chain, symbol, 10)
+    from app.services.symbol_store import canonical_strike_count
+
+    chain_data = await asyncio.to_thread(
+        market_service.get_option_chain, symbol, canonical_strike_count(symbol)
+    )
     
     if not chain_data.get("success"):
         raise HTTPException(status_code=400, detail=chain_data.get("error", "Failed to fetch option chain"))
@@ -201,24 +205,14 @@ def _summarize_stock_results(
 
 
 async def _analyze_one_stock(symbol: str, strike_count: int, deep: bool) -> dict:
-    """Analyze a single symbol; returns ok/data or error dict."""
+    """Analyze a single symbol from the harvest store (CPU). No Fyers walk."""
     import asyncio
-    from app.services.rate_limiter import get_fyers_limiter, is_rate_limit_error
+    from app.services import symbol_store as store
 
-    limiter = get_fyers_limiter()
-    if limiter.in_cooldown:
-        return {"symbol": symbol, "error": "rate_limited", "rate_limited": True}
     try:
-        await limiter.acquire()
-        chain_data = await asyncio.to_thread(
-            market_service.get_option_chain, symbol, strike_count
-        )
-        if not chain_data.get("success"):
-            err = chain_data.get("error", "Failed to fetch OC")
-            if is_rate_limit_error(err):
-                limiter.trip_limit(err)
-                return {"symbol": symbol, "error": err, "rate_limited": True}
-            return {"symbol": symbol, "error": err}
+        chain_data = store.get_chain(symbol, strike_count)
+        if not chain_data or not chain_data.get("success"):
+            return {"symbol": symbol, "error": "chain not harvested yet"}
 
         analysis = await asyncio.to_thread(
             intelligence_engine.analyze_stock, symbol, chain_data
@@ -231,9 +225,6 @@ async def _analyze_one_stock(symbol: str, strike_count: int, deep: bool) -> dict
             analysis.pop("deep_analytics", None)
         return {"ok": True, "data": analysis}
     except Exception as e:
-        if is_rate_limit_error(e):
-            get_fyers_limiter().trip_limit(str(e))
-            return {"symbol": symbol, "error": str(e), "rate_limited": True}
         return {"symbol": symbol, "error": str(e)}
 
 
@@ -297,7 +288,7 @@ async def scan_fno_stocks(
     limit: int = Query(200, ge=1, le=250, description="Max stocks to analyze (full F&O)"),
     tradable_only: bool = Query(False, description="Only return tradable states"),
     top_only: bool = Query(False, description="If true, only TOP liquid F&O names"),
-    strike_count: int = Query(10, ge=5, le=20, description="Strikes above/below ATM"),
+    strike_count: int = Query(14, ge=5, le=20, description="Strikes above/below ATM"),
     deep: bool = Query(True, description="Include deep mathematical analytics"),
 ):
     """
@@ -511,7 +502,7 @@ async def start_stock_scan_job(
     limit: int = Query(200, ge=1, le=250),
     tradable_only: bool = Query(False),
     top_only: bool = Query(False),
-    strike_count: int = Query(10, ge=5, le=20),
+    strike_count: int = Query(14, ge=5, le=20),
     deep: bool = Query(True),
     body: Optional[StartStockScanBody] = Body(default=None),
 ):
@@ -679,6 +670,17 @@ async def market_cache_stats():
             "cooldown_remaining": round(lim.cooldown_remaining, 1),
         },
     }
+
+
+@router.get("/market/store/status")
+async def get_store_status():
+    """Harvest / Redis symbol-store health for the UI book banner."""
+    from app.services.symbol_store import status as store_status
+    from app.services.redis_client import status as redis_status
+
+    st = store_status()
+    st["redis_detail"] = redis_status()
+    return {"success": True, **st}
 
 
 @router.get("/market/indices")
@@ -939,8 +941,10 @@ async def get_live_trade_signal(symbol: str):
     import asyncio
     try:
         # Fetch fresh option chain (cached + off event loop)
+        from app.services.symbol_store import canonical_strike_count
+
         chain_data = await asyncio.to_thread(
-            market_service.get_option_chain, symbol, 20
+            market_service.get_option_chain, symbol, canonical_strike_count(symbol)
         )
         
         if not chain_data.get("success"):
@@ -1054,7 +1058,7 @@ async def get_live_trade_signal(symbol: str):
 @router.get("/market/greeks-heatmap/{symbol}")
 async def get_greeks_heatmap(
     symbol: str,
-    strike_count: int = Query(15, ge=5, le=30, description="Number of strikes to include")
+    strike_count: int = Query(14, ge=5, le=30, description="Number of strikes to include")
 ):
     """
     Get Greeks heatmap data for visualization.

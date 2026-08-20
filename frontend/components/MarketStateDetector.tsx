@@ -42,7 +42,7 @@ interface MarketStateData {
 
 export default function MarketStateDetector() {
     const { data, isLoading } = useApiQuery<MarketStateData>(
-        ["market", "state"],
+        ["market", "state", "NIFTY"],
         () => api.market.getMarketState() as Promise<MarketStateData>,
         {
             refetchInterval: 45000,

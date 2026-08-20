@@ -200,7 +200,7 @@ class IdeaBook:
         loc = ev.get("location") or {}
         recipe = ev.get("recipe") or {}
         ex = ev.get("execution") or {}
-        thesis = self._thesis(snap, loc, recipe, ev.get("futures") or {})
+        thesis = self._thesis(snap, loc, recipe, ev.get("futures") or {}, ev.get("vwap") or {})
         idea = {
             "status": "ACTIVE",
             "symbol": snap.symbol,
@@ -277,7 +277,11 @@ class IdeaBook:
                 "vwap": (full_map.get("session") or {}).get("vwap"),
                 "orh": (full_map.get("session") or {}).get("orh"),
                 "orl": (full_map.get("session") or {}).get("orl"),
+                "vwap_side": (full_map.get("session") or {}).get("vwap_side"),
             },
+            "vwap_agree": bool((ev.get("vwap") or {}).get("agree")),
+            "vwap_side": (ev.get("vwap") or {}).get("side"),
+            "vwap_dev_pct": (ev.get("vwap") or {}).get("dev_pct"),
             "kill_reason": None,
             "kill_frame": None,
             **self._mtf_fields(ev),
@@ -382,7 +386,7 @@ class IdeaBook:
             "updated_at": _iso(now.timestamp()),
             "hold_seconds": 0,
             "recipe": recipe,
-            "thesis": self._thesis(snap, loc, recipe, ev.get("futures") or {}),
+            "thesis": self._thesis(snap, loc, recipe, ev.get("futures") or {}, ev.get("vwap") or {}),
             "location_score": loc.get("score"),
             "location_tags": loc.get("tags") or [],
             "pivot_side": loc.get("pivot_side"),
@@ -425,7 +429,11 @@ class IdeaBook:
             },
             "session": {
                 "vwap": (full_map.get("session") or {}).get("vwap"),
+                "vwap_side": (full_map.get("session") or {}).get("vwap_side"),
             },
+            "vwap_agree": bool((ev.get("vwap") or {}).get("agree")),
+            "vwap_side": (ev.get("vwap") or {}).get("side"),
+            "vwap_dev_pct": (ev.get("vwap") or {}).get("dev_pct"),
             "kill_reason": None,
             "kill_frame": None,
             "prev_status": (prev or {}).get("status"),
@@ -494,10 +502,16 @@ class IdeaBook:
     @staticmethod
     def _mtf_fields(ev: Dict[str, Any]) -> Dict[str, Any]:
         mtf = ev.get("mtf") or {}
-        if not mtf:
+        if not mtf and not ev.get("vwap_oc_ready"):
             return {}
-        return {
-            "mtf": {
+        hq = bool(mtf.get("hq_pullback"))
+        campaign = mtf.get("campaign")
+        # VWAP + option fuel is a confirmed process trade, not a 4H-mixed sit-out.
+        if ev.get("vwap_oc_ready") and not hq:
+            campaign = "CONFIRMED"
+        packed_mtf = dict(mtf) if mtf else {}
+        if packed_mtf:
+            packed_mtf = {
                 "daily_bias": mtf.get("daily_bias"),
                 "h4_bias": mtf.get("h4_bias"),
                 "h1_bias": mtf.get("h1_bias"),
@@ -505,17 +519,19 @@ class IdeaBook:
                 "align_score": mtf.get("align_score"),
                 "align_label": mtf.get("align_label"),
                 "allowed_side": mtf.get("allowed_side"),
-                "campaign": mtf.get("campaign"),
-                "hq_pullback": mtf.get("hq_pullback"),
+                "campaign": campaign,
+                "hq_pullback": hq,
                 "turning": mtf.get("turning"),
                 "m15_trigger": mtf.get("m15_trigger"),
                 "momentum_now": mtf.get("momentum_now"),
                 "daily_veto": mtf.get("daily_veto"),
                 "h1_structure": mtf.get("h1_structure"),
                 "h4_structure": mtf.get("h4_structure"),
-            },
-            "campaign": mtf.get("campaign"),
-            "hq_pullback": bool(mtf.get("hq_pullback")),
+            }
+        return {
+            "mtf": packed_mtf or None,
+            "campaign": campaign,
+            "hq_pullback": hq,
             "align_score": mtf.get("align_score"),
             "align_label": mtf.get("align_label"),
             "allowed_side": mtf.get("allowed_side"),
@@ -527,9 +543,15 @@ class IdeaBook:
         loc: Dict[str, Any],
         recipe: Dict[str, Any],
         futures: Dict[str, Any],
+        vwap: Optional[Dict[str, Any]] = None,
     ) -> str:
         side = "Long" if snap.direction == "BULLISH" else "Short" if snap.direction == "BEARISH" else "Flat"
         bits = [f"{side} process"]
+        vw = vwap or {}
+        if vw.get("agree"):
+            bits.append(f"VWAP {vw.get('side') or 'ok'}")
+        elif vw.get("ok") and not vw.get("agree"):
+            bits.append("against VWAP")
         if recipe.get("name") and recipe.get("id") != "NONE":
             bits.append(recipe["name"])
         tags = loc.get("tags") or []
@@ -556,20 +578,41 @@ class IdeaBook:
         confirmed = [i for i in active if not i.get("hq_pullback")]
         watch = [i for i in ideas if i.get("status") == "WATCH"]
         conflict = [i for i in ideas if i.get("status") == "CONFLICT"]
-        confirmed.sort(key=lambda x: float(x.get("prominence") or 0), reverse=True)
-        pullbacks.sort(key=lambda x: float(x.get("prominence") or 0), reverse=True)
-        watch.sort(key=lambda x: float(x.get("prominence") or x.get("composite") or 0), reverse=True)
-        # Confirmed first, then HQ pullbacks (not buried), then watch
-        headline = confirmed[:limit] + pullbacks[:limit]
+
+        def _rank(row: Dict[str, Any]) -> float:
+            return float(row.get("prominence") or row.get("composite") or 0)
+
+        def _is_bull(row: Dict[str, Any]) -> bool:
+            d = str(row.get("direction") or row.get("side") or "").upper()
+            return d in ("BULLISH", "LONG")
+
+        def _is_bear(row: Dict[str, Any]) -> bool:
+            d = str(row.get("direction") or row.get("side") or "").upper()
+            return d in ("BEARISH", "SHORT")
+
+        confirmed.sort(key=_rank, reverse=True)
+        pullbacks.sort(key=_rank, reverse=True)
+        watch.sort(key=_rank, reverse=True)
+        conflict.sort(key=_rank, reverse=True)
+        bullish = [i for i in confirmed if _is_bull(i)]
+        bearish = [i for i in confirmed if _is_bear(i)]
+        top_n = 3
+        headline = bullish[:top_n] + bearish[:top_n] + pullbacks[:top_n]
         return {
-            "active": headline[:limit],
+            "active": headline[: max(limit, 9)],
             "confirmed": confirmed[:limit],
-            "pullbacks": pullbacks[:limit],
-            "watch": watch[:12],
-            "conflict": conflict[:8],
+            "bullish": bullish[:top_n],
+            "bearish": bearish[:top_n],
+            "pullbacks": pullbacks[:top_n],
+            "watch": watch[:top_n],
+            "conflict": conflict[:top_n],
+            "ideas_bullish": bullish[:top_n],
+            "ideas_bearish": bearish[:top_n],
             "counts": {
                 "active": len(active),
                 "confirmed": len(confirmed),
+                "bullish": len(bullish),
+                "bearish": len(bearish),
                 "pullbacks": len(pullbacks),
                 "watch": len(watch),
                 "conflict": len(conflict),
@@ -626,6 +669,9 @@ class IdeaBook:
             "mtf": idea.get("mtf"),
             "campaign": idea.get("campaign"),
             "hq_pullback": idea.get("hq_pullback"),
+            "vwap_agree": idea.get("vwap_agree"),
+            "vwap_side": idea.get("vwap_side"),
+            "vwap_dev_pct": idea.get("vwap_dev_pct"),
             "align_score": idea.get("align_score"),
             "align_label": idea.get("align_label"),
             "allowed_side": idea.get("allowed_side"),

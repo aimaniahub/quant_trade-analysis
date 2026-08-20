@@ -55,7 +55,7 @@ async def start_ma7200_scan(
     history_days: int = Query(40, ge=10, le=120, description="History fetch days"),
 ):
     """
-    Start direct-API scan of F&O equities (15m history each).
+    Start harvest-book desk scan (15m 7/200 + OC/MTF permission).
     Poll GET /strategies/ma7200/scan/jobs/{job_id} for progress.
     """
     from app.services.scan_jobs import get_scan_job_manager
@@ -122,10 +122,10 @@ async def start_ma7200_scan(
         "status": "running",
         "total": n,
         "source": source,
-        "mode": "direct_api",
+        "mode": "store_desk",
         "settings": settings,
         "poll_url": f"/api/v1/strategies/ma7200/scan/jobs/{job.id}",
-        "note": "Direct Fyers 15m history per symbol — poll for progress",
+        "note": "CPU on harvested 15m + stored chain. 4H allowed_side is a hard gate.",
     }
 
 
@@ -152,6 +152,11 @@ async def get_ma7200_job(job_id: str):
         "current_symbol": snap.get("current_symbol"),
         "completion_pct": snap.get("completion_pct") or 0,
         "candidates": candidates,
+        "trade": summary.get("trade") or [c for c in candidates if c.get("board") == "TRADE"],
+        "watch": summary.get("watch") or [c for c in candidates if c.get("board") == "WATCH"],
+        "reject": summary.get("reject") or [c for c in candidates if c.get("board") == "REJECT"],
+        "counts": summary.get("counts") or {},
+        "harvest": summary.get("harvest") or {},
         "count": len(candidates),
         "scanned": summary.get("scanned", snap["completed"]),
         "universe": summary.get("universe", snap["total"]),
@@ -254,7 +259,7 @@ async def ma7200_settings_defaults():
 async def analyze_chain_for_cross(
     symbol: str = Query(...),
     cross_type: str = Query(...),
-    strike_count: int = Query(12, ge=5, le=20),
+    strike_count: int = Query(14, ge=5, le=20),
 ):
     """Option chain confirmation for a MA-cross candidate."""
     from app.services.strategies.ma7200_scanner import get_ma7200_scanner

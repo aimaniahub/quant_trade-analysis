@@ -988,10 +988,21 @@ class InstitutionalLevelsService:
         if hit and hit[0] == today and hit[1].get("ok"):
             return hit[1]
         try:
-            from app.services.fyers_market import get_market_service
+            from app.services import symbol_store as store
 
-            hist = get_market_service().get_historical_data(symbol, resolution="D", days=25)
-            dailies = hist.get("candles") or []
+            dailies = store.get_history(symbol, "D", min_bars=15) or []
+            if not dailies:
+                # harvest writer may still fill D via fyers_market store-first
+                from app.services.symbol_store import is_harvest_writer
+                if is_harvest_writer():
+                    from app.services.fyers_market import get_market_service
+
+                    hist = get_market_service().get_historical_data(
+                        symbol, resolution="D", days=30
+                    )
+                    dailies = hist.get("candles") or []
+            if not dailies:
+                return hit[1] if hit else {"ok": False, "reason": "no stored daily"}
             day = build_day_map_from_dailies(dailies)
         except Exception as exc:
             logger.debug("day map failed %s: %s", symbol, exc)
@@ -1014,6 +1025,27 @@ class InstitutionalLevelsService:
         cached = self._fut_cache.get(symbol)
         if cached and now - cached[0] < self._FUT_TTL:
             return cached[1]
+        try:
+            from app.services import symbol_store as store
+
+            snap = store.get(symbol) or {}
+            stored_fut = snap.get("futures") or {}
+            if stored_fut.get("ltp") and store.is_fresh(symbol, "futures", 300):
+                packed = dict(stored_fut)
+                if not packed.get("state"):
+                    packed.update(classify_futures_buildup(
+                        packed.get("change_pct") or packed.get("chg_pct"),
+                        packed.get("oi_chg"),
+                        packed.get("oi"),
+                    ))
+                packed.setdefault("ok", True)
+                packed.setdefault("direction", packed.get("direction") or "NEUTRAL")
+                packed.setdefault("agree_long", False)
+                packed.setdefault("agree_short", False)
+                self._fut_cache[symbol] = (now, packed)
+                return packed
+        except Exception:
+            pass
         fut = fut_symbol_for(symbol)
         empty = {
             "ok": False,
@@ -1026,6 +1058,11 @@ class InstitutionalLevelsService:
         if not fut:
             return empty
         try:
+            from app.services.symbol_store import is_harvest_writer
+
+            if not is_harvest_writer():
+                self._fut_cache[symbol] = (now, empty)
+                return empty
             from app.services.fyers_market import get_market_service
 
             q = get_market_service().get_quotes([fut])
@@ -1064,6 +1101,12 @@ class InstitutionalLevelsService:
                 "change_pct": chp,
             })
             self._fut_cache[symbol] = (now, packed)
+            try:
+                from app.services import symbol_store as store
+
+                store.put_futures(symbol, packed)
+            except Exception:
+                pass
             return packed
         except Exception as exc:
             logger.debug("futures quote failed %s: %s", symbol, exc)

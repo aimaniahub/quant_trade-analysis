@@ -14,6 +14,8 @@ import MCPTradingPanel from './MCPTradingPanel';
 import OptionFlowRadar from './OptionFlowRadar';
 import HighVolumeScanner from './HighVolumeScanner';
 import MA7200Scanner from './MA7200Scanner';
+import RSIScanner from './RSIScanner';
+import RSIDivergenceScanner from './RSIDivergenceScanner';
 import ConfluencePanel from './ConfluencePanel';
 import SystemStatus from './SystemStatus';
 
@@ -25,47 +27,23 @@ type ViewType =
     | 'mcpTrading'
     | 'optionFlowRadar'
     | 'highVolume'
-    | 'ma7200';
+    | 'ma7200'
+    | 'rsi'
+    | 'rsiDiv';
 
 export default function Dashboard() {
     const [currentView, setCurrentView] = useState<ViewType>('dashboard');
+    // Keep Flow Radar mounted so Back → Radar does not wipe the book.
+    const [keepRadar, setKeepRadar] = useState(false);
 
-    // Show Stock Analysis page
-    if (currentView === 'stockAnalysis') {
-        return <StockAnalysis onBack={() => setCurrentView('dashboard')} />;
-    }
-
-    if (currentView === 'quantDashboard') {
-        return <QuantDashboard onBack={() => setCurrentView('dashboard')} />;
-    }
-
-    // Show VAT Scanner page
-    if (currentView === 'vatScanner') {
-        return <VATScanner onBack={() => setCurrentView('dashboard')} />;
-    }
-
-    // Show MCP Trading Panel
-    if (currentView === 'mcpTrading') {
-        return <MCPTradingPanel onBack={() => setCurrentView('dashboard')} />;
-    }
-
-    // Show Option Flow Radar
-    if (currentView === 'optionFlowRadar') {
-        return <OptionFlowRadar onBack={() => setCurrentView('dashboard')} />;
-    }
-
-    // Show High Volume Scanner
-    if (currentView === 'highVolume') {
-        return <HighVolumeScanner onBack={() => setCurrentView('dashboard')} />;
-    }
-
-    // 15m 7/200 MA Cross + Option Chain confirmation
-    if (currentView === 'ma7200') {
-        return <MA7200Scanner onBack={() => setCurrentView('dashboard')} />;
-    }
+    const go = (view: ViewType) => {
+        if (view === 'optionFlowRadar') setKeepRadar(true);
+        setCurrentView(view);
+    };
 
     return (
-        <div className="min-h-screen bg-zinc-50 dark:bg-black text-zinc-900 dark:text-zinc-100 p-4 md:p-8">
+        <>
+        <div className={currentView === 'dashboard' ? 'min-h-screen bg-zinc-50 dark:bg-black text-zinc-900 dark:text-zinc-100 p-4 md:p-8' : 'hidden'}>
             <header className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
                 <div>
                     <h1 className="text-3xl font-black italic tracking-tighter text-zinc-900 dark:text-white uppercase leading-none">
@@ -77,43 +55,50 @@ export default function Dashboard() {
                 </div>
                 <div className="flex items-center gap-3 flex-wrap justify-end">
                     <button
-                        onClick={() => setCurrentView('quantDashboard')}
+                        onClick={() => go('quantDashboard')}
                         className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         🚀 Quant Dashboard
                     </button>
                     <button
-                        onClick={() => setCurrentView('stockAnalysis')}
+                        onClick={() => go('stockAnalysis')}
                         className="px-4 py-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         📊 Stocks Option
                     </button>
                     <button
-                        onClick={() => setCurrentView('vatScanner')}
+                        onClick={() => go('vatScanner')}
                         className="px-4 py-2 bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-700 hover:to-rose-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         ⚡ VAT Scanner
                     </button>
                     <button
-                        onClick={() => setCurrentView('mcpTrading')}
+                        onClick={() => go('mcpTrading')}
                         className="px-4 py-2 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         💹 Trading
                     </button>
                     <button
-                        onClick={() => setCurrentView('ma7200')}
+                        onClick={() => go('ma7200')}
                         className="px-4 py-2 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-700 hover:to-indigo-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         🔀 7/200 Cross
                     </button>
+
                     <button
-                        onClick={() => setCurrentView('optionFlowRadar')}
+                        onClick={() => go('rsiDiv')}
+                        className="px-4 py-2 bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-700 hover:to-pink-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
+                    >
+                        📉 RSI Div
+                    </button>
+                    <button
+                        onClick={() => go('optionFlowRadar')}
                         className="px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         🎯 Flow Radar
                     </button>
                     <button
-                        onClick={() => setCurrentView('highVolume')}
+                        onClick={() => go('highVolume')}
                         className="px-4 py-2 bg-gradient-to-r from-lime-600 to-green-600 hover:from-lime-700 hover:to-green-700 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg hover:shadow-xl"
                     >
                         📶 High Vol
@@ -155,6 +140,37 @@ export default function Dashboard() {
                 <SystemStatus />
             </footer>
         </div>
+
+        {keepRadar && (
+            <div className={currentView === 'optionFlowRadar' ? '' : 'hidden'}>
+                <OptionFlowRadar onBack={() => go('dashboard')} />
+            </div>
+        )}
+        {currentView === 'stockAnalysis' && (
+            <StockAnalysis onBack={() => go('dashboard')} />
+        )}
+        {currentView === 'quantDashboard' && (
+            <QuantDashboard onBack={() => go('dashboard')} />
+        )}
+        {currentView === 'vatScanner' && (
+            <VATScanner onBack={() => go('dashboard')} />
+        )}
+        {currentView === 'mcpTrading' && (
+            <MCPTradingPanel onBack={() => go('dashboard')} />
+        )}
+        {currentView === 'highVolume' && (
+            <HighVolumeScanner onBack={() => go('dashboard')} />
+        )}
+        {currentView === 'ma7200' && (
+            <MA7200Scanner onBack={() => go('dashboard')} />
+        )}
+        {currentView === 'rsi' && (
+            <RSIScanner onBack={() => go('dashboard')} />
+        )}
+        {currentView === 'rsiDiv' && (
+            <RSIDivergenceScanner onBack={() => go('dashboard')} />
+        )}
+        </>
     );
 }
 

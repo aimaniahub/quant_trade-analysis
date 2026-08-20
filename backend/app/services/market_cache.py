@@ -121,6 +121,18 @@ class MarketCache:
             self._store[key] = (now + max(ttl, 0.5), value)
         self._l2_set(key, value, ttl)
 
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._store.pop(key, None)
+        try:
+            from app.services import redis_client as rc
+
+            client = rc.get_redis()
+            if client:
+                client.delete(self._redis_key(key))
+        except Exception:
+            pass
+
     def clear(self) -> None:
         with self._lock:
             self._store.clear()

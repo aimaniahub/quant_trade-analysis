@@ -343,10 +343,24 @@ class MA7200ScannerService:
         return self._filter(list(self._all(top_only=False)))[:limit]
 
     def _fetch_15m_direct(self, symbol: str, days: int = HISTORY_DAYS) -> Dict[str, Any]:
-        """Direct Fyers history call (cache may still absorb identical repeats)."""
-        return self.market.get_historical_data(
-            symbol, resolution="15", days=days, force_refresh=True
-        )
+        """Read harvested 15m from the symbol store. No force_refresh storm."""
+        from app.services import symbol_store as store
+
+        candles = store.get_history(symbol, "15", min_bars=1, days=days)
+        if candles:
+            return {
+                "success": True,
+                "candles": candles,
+                "count": len(candles),
+                "source": "store",
+            }
+        # Missing book — do not hit Fyers; harvest will fill this name
+        return {
+            "success": False,
+            "candles": [],
+            "error": "15m book not harvested yet",
+            "source": "store_miss",
+        }
 
     def _pace(self, limiter) -> None:
         while limiter.in_cooldown:
@@ -413,25 +427,12 @@ class MA7200ScannerService:
                 )
 
             try:
-                self._pace(limiter)
                 hist = self._fetch_15m_direct(sym, days=history_days)
 
                 if not hist.get("success"):
                     err = str(hist.get("error") or "history_failed")
-                    api_fail += 1
-                    if is_rate_limit_error(err):
-                        limiter.trip_limit(err)
-                        errors.append({"symbol": sym, "error": err})
-                        # wait and retry once
-                        self._pace(limiter)
-                        hist = self._fetch_15m_direct(sym, days=history_days)
-                        if not hist.get("success"):
-                            errors.append({"symbol": sym, "error": hist.get("error") or err})
-                            continue
-                        api_fail -= 1
-                    else:
-                        errors.append({"symbol": sym, "error": err})
-                        continue
+                    errors.append({"symbol": sym, "error": err})
+                    continue
 
                 candles = hist.get("candles") or []
                 api_ok += 1
@@ -446,7 +447,8 @@ class MA7200ScannerService:
                     )
                     continue
 
-                # Settings-driven: first-in-window + age ≤ max_bars_ago
+                # Detect 0–2 closed bars. Desk then applies the strict bar-2 rule.
+                detect_age = max(int(max_bars_ago), 2)
                 cross = detect_7_200_cross(
                     candles,
                     require_volume=True,
@@ -455,39 +457,32 @@ class MA7200ScannerService:
                     first_cross_window_days=window_days,
                     fast_period=fast_ma,
                     slow_period=slow_ma,
-                    max_bars_ago=max_bars_ago,
+                    max_bars_ago=detect_age,
                 )
+                near = None
                 if not cross:
+                    from app.services.strategies.ma7200_desk import score_near_cross
+
+                    near = score_near_cross(candles, fast=fast_ma, slow=slow_ma)
+                if not cross and not near:
                     continue
 
-                name = sym.replace("NSE:", "").replace("-EQ", "")
-                row = {
-                    "symbol": sym,
-                    "name": name,
-                    "ltp": cross["ltp"],
-                    "cross_type": cross["cross_type"],
-                    "cross_time": cross["cross_time"],
-                    "volume_ratio": cross["volume_ratio"],
-                    "trend_15m": cross["trend_15m"],
-                    "ema7": cross["ema7"],
-                    "ema200": cross["ema200"],
-                    "ema_fast": cross["ema7"],
-                    "ema_slow": cross["ema200"],
-                    "bars_ago": cross["bars_ago"],
-                    "fresh_label": cross.get("fresh_label"),
-                    "freshness": cross.get("freshness"),
-                    "first_cross_in_15d": cross.get("first_cross_in_15d", True),
-                    "crosses_in_15d": cross.get("crosses_in_15d", 1),
-                    "extension_from_200_pct": cross.get("extension_from_200_pct"),
-                    "momentum_score": cross.get("momentum_score"),
-                    "body_strength": cross["body_strength"],
-                    "volume_rising": cross["volume_rising"],
-                    "fast_ma": fast_ma,
-                    "slow_ma": slow_ma,
-                    "window_days": window_days,
-                    "data_source": "fyers_api",
-                    "status": "CANDIDATE",
-                }
+                from app.services.strategies.ma7200_desk import enrich_candidate
+
+                row = enrich_candidate(
+                    sym,
+                    candles=candles,
+                    cross=cross,
+                    near=near,
+                    fast_ma=fast_ma,
+                    slow_ma=slow_ma,
+                )
+                if not row:
+                    continue
+                row["fast_ma"] = fast_ma
+                row["slow_ma"] = slow_ma
+                row["window_days"] = window_days
+                row["data_source"] = hist.get("source") or "store"
                 candidates.append(row)
                 if mgr and job_id:
                     mgr.append_result_raw(job_id, row)
@@ -500,22 +495,53 @@ class MA7200ScannerService:
                 errors.append({"symbol": sym, "error": msg})
                 logger.warning("[ma7200] %s: %s", sym, e)
 
-        # Momentum first, then freshest (bars_ago 0 is valid — never use `or 99`)
-        candidates.sort(
-            key=lambda x: (
-                -(x.get("momentum_score") or 0),
+        def _desk_key(x: Dict[str, Any]):
+            board_r = {"TRADE": 0, "WATCH": 1, "REJECT": 2}.get(x.get("board") or "", 3)
+            return (
+                board_r,
+                -(x.get("desk_score") or x.get("momentum_score") or 0),
                 99 if x.get("bars_ago") is None else int(x["bars_ago"]),
                 x.get("name") or "",
             )
-        )
 
-        age_label = f"age ≤ {max_bars_ago + 1} closed 15m candles"
+        candidates.sort(key=_desk_key)
+        trade = [c for c in candidates if c.get("board") == "TRADE"]
+        watch = [c for c in candidates if c.get("board") == "WATCH"]
+        reject = [c for c in candidates if c.get("board") == "REJECT"]
+
+        harvest = {}
+        try:
+            from app.services.symbol_store import status as store_status
+
+            harvest = store_status()
+        except Exception:
+            harvest = {}
+
+        age_label = "age 0–1 bars; bar-2 only if ext≤1.2% and P≥70"
         result = {
             "success": True,
             "scanned": scanned,
             "universe": len(symbols),
-            "count": len(candidates),
-            "candidates": candidates,
+            "count": len(trade) + len(watch),
+            "candidates": trade + watch,
+            "trade": trade,
+            "watch": watch,
+            "reject": reject,
+            "counts": {
+                "trade": len(trade),
+                "watch": len(watch),
+                "reject": len(reject),
+                "near": sum(1 for c in candidates if c.get("kind") == "NEAR"),
+                "waiting_harvest": sum(
+                    1 for e in errors if "not harvested" in str(e.get("error") or "")
+                ),
+            },
+            "harvest": {
+                "symbols": harvest.get("symbols"),
+                "history_15_fresh": harvest.get("history_15_fresh"),
+                "freshest_age": harvest.get("freshest_age"),
+                "redis": harvest.get("redis"),
+            },
             "errors": errors[:40] if errors else None,
             "error_count": len(errors),
             "rules": {
@@ -527,15 +553,17 @@ class MA7200ScannerService:
                 "max_bars_ago": max_bars_ago,
                 "max_extension_pct": MAX_EXTENSION_FROM_200_PCT,
                 "description": (
-                    f"Only first {fast_ma}/{slow_ma} EMA cross in {window_days} calendar days, "
-                    f"{age_label}, volume ≥ {vol_mult}×"
+                    f"First {fast_ma}/{slow_ma} in {window_days}d · {age_label} · "
+                    f"vol ≥ {vol_mult}× · 4H allowed_side hard gate · no max-pain"
                 ),
+                "mtf_hard_gate": True,
+                "max_pain": False,
             },
             "api": {
-                "mode": "direct",
+                "mode": "store",
                 "ok": api_ok,
                 "fail": api_fail,
-                "pace_sec": PACE_SEC,
+                "pace_sec": 0,
                 "history_days": history_days,
                 "in_cooldown": limiter.in_cooldown,
                 "cooldown_remaining": round(limiter.cooldown_remaining, 1),
@@ -554,8 +582,8 @@ class MA7200ScannerService:
             },
             "timestamp": datetime.now(tz=IST).isoformat(),
             "note": (
-                f"Direct Fyers 15m API. FIRST {fast_ma}/{slow_ma} cross in {window_days}d, "
-                f"{age_label}, vol ≥{vol_mult}×. Candidates only — Analyze Chain to confirm."
+                f"Desk on harvest book. TRADE needs 4H allowed_side + OC/futures permission. "
+                f"Bar-2 only if ext≤1.2% and P≥70. Max pain not used."
             ),
         }
 
@@ -580,370 +608,101 @@ class MA7200ScannerService:
         symbol: str,
         cross_type: str,
         *,
-        strike_count: int = 12,
+        strike_count: int = 14,
     ) -> Dict[str, Any]:
+        """Desk evaluate on the harvest snapshot. No private Fyers walk."""
+        from app.services.strategies.ma7200_desk import evaluate_symbol
+
         cross_type = (cross_type or "").upper()
         if cross_type not in ("BULLISH", "BEARISH"):
             return {"success": False, "error": "cross_type must be BULLISH or BEARISH"}
 
-        chain_data = self.market.get_option_chain(symbol, strike_count)
-        if not chain_data.get("success"):
+        hist = self._fetch_15m_direct(symbol, days=HISTORY_DAYS)
+        candles = hist.get("candles") or []
+        if not candles:
             return {
                 "success": False,
-                "error": chain_data.get("error") or "Failed to fetch option chain",
+                "error": hist.get("error") or "15m book not harvested yet",
                 "symbol": symbol,
             }
 
-        analysis = self.intel.get_analysis_summary(chain_data, bypass_time_check=True)
-        if analysis.get("error"):
-            return {"success": False, "error": analysis["error"], "symbol": symbol}
-
-        deep = analysis.get("deep_analytics") or {}
-        buildup = analysis.get("buildup") or deep.get("buildup") or {}
-        pcr = deep.get("pcr") or {}
-        max_pain = analysis.get("max_pain") or (deep.get("max_pain") or {}).get("max_pain")
-        spot = float(analysis.get("spot_price") or chain_data.get("spot_price") or 0)
-        atm = analysis.get("atm_strike") or chain_data.get("atm_strike")
-        oi_pcr = float(
-            pcr.get("oi_pcr") or analysis.get("oi_pcr") or analysis.get("pcr") or 1.0
+        ev = evaluate_symbol(
+            symbol,
+            candles=candles,
+            cross_type=cross_type,
+            fast_ma=FAST_PERIOD,
+            slow_ma=SLOW_PERIOD,
         )
-        band = buildup.get("atm_band") or []
-        rules_hit: List[Dict[str, Any]] = []
-        rules_miss: List[str] = []
+        if not ev.get("success"):
+            return ev
 
-        def _near(side: str, want: str, above: Optional[bool]) -> List[str]:
-            hits = []
-            for row in band:
-                st = (row.get(side) or {}).get("state") or ""
-                strike = row.get("strike")
-                if want not in st:
-                    continue
-                if atm is not None and strike is not None:
-                    if above is True and strike < atm:
-                        continue
-                    if above is False and strike > atm:
-                        continue
-                hits.append(f"{strike} {side[:2].upper()}: {st}")
-            return hits
-
-        if cross_type == "BULLISH":
-            ce_lb = _near("call", "Long Buildup", True)
-            for row in band:
-                if row.get("is_atm") and "Long Buildup" in (
-                    (row.get("call") or {}).get("state") or ""
-                ):
-                    ce_lb.append(f"{row.get('strike')} CE ATM Long Buildup")
-            if ce_lb or (
-                buildup.get("primary_state") == "Long Buildup"
-                and buildup.get("bias") == "BULLISH"
-            ):
-                rules_hit.append(
-                    {
-                        "rule": "Call Long Buildup ATM/+OTM",
-                        "detail": "; ".join(ce_lb[:3])
-                        or buildup.get("note")
-                        or "primary Long Buildup",
-                    }
-                )
-            else:
-                rules_miss.append("No Call Long Buildup at ATM/above")
-
-            pe_w = [
-                f"{row.get('strike')} PE: {(row.get('put') or {}).get('state')}"
-                for row in band
-                if row.get("strike") is not None
-                and atm
-                and row["strike"] <= atm
-                and (
-                    "Short Buildup" in ((row.get("put") or {}).get("state") or "")
-                    or "Short Covering" in ((row.get("put") or {}).get("state") or "")
-                )
-            ]
-            if pe_w or int(buildup.get("strong_short_pe") or 0) > 0:
-                rules_hit.append(
-                    {
-                        "rule": "Put Writing / support ATM/below",
-                        "detail": "; ".join(pe_w[:3]) or "PE short-side activity",
-                    }
-                )
-            else:
-                rules_miss.append("No Put writing/support ATM/below")
-
-            if oi_pcr > 1.0 or str(pcr.get("regime") or "").startswith("PUT"):
-                rules_hit.append(
-                    {"rule": "OI PCR supportive", "detail": f"OI PCR {oi_pcr:.2f}"}
-                )
-            else:
-                rules_miss.append(f"OI PCR {oi_pcr:.2f} not supportive")
-
-            if max_pain and spot and float(max_pain) > spot:
-                rules_hit.append(
-                    {
-                        "rule": "Max Pain above spot",
-                        "detail": f"MP {max_pain} > {spot:.1f}",
-                    }
-                )
-            else:
-                rules_miss.append("Max Pain not above spot")
-
-            atm_ce_rel = float(pcr.get("atm_ce_rel_vol") or 0)
-            atm_ce_share = float(pcr.get("atm_ce_vol_share") or 0)
-            if atm_ce_rel >= 1.3 or atm_ce_share >= 0.55:
-                rules_hit.append(
-                    {
-                        "rule": "Strong Call volume ATM",
-                        "detail": f"CE {atm_ce_rel:.1f}× share {atm_ce_share:.0%}",
-                    }
-                )
-            else:
-                rules_miss.append("ATM Call volume not dominant")
-
-            opposite = buildup.get("primary_state") == "Short Buildup" or (
-                int(buildup.get("strong_long_pe") or 0) >= 2
-                and buildup.get("bias") == "BEARISH"
-            )
-        else:
-            pe_lb = _near("put", "Long Buildup", False)
-            for row in band:
-                if row.get("is_atm") and "Long Buildup" in (
-                    (row.get("put") or {}).get("state") or ""
-                ):
-                    pe_lb.append(f"{row.get('strike')} PE ATM Long Buildup")
-            if pe_lb or buildup.get("bias") == "BEARISH":
-                rules_hit.append(
-                    {
-                        "rule": "Put Long Buildup ATM/below",
-                        "detail": "; ".join(pe_lb[:3])
-                        or buildup.get("note")
-                        or "bearish lean",
-                    }
-                )
-            else:
-                rules_miss.append("No Put Long Buildup ATM/below")
-
-            ce_w = [
-                f"{row.get('strike')} CE: {(row.get('call') or {}).get('state')}"
-                for row in band
-                if row.get("strike") is not None
-                and atm
-                and row["strike"] >= atm
-                and "Short" in ((row.get("call") or {}).get("state") or "")
-            ]
-            if ce_w or int(buildup.get("strong_short_ce") or 0) > 0:
-                rules_hit.append(
-                    {
-                        "rule": "Call Writing ATM/above",
-                        "detail": "; ".join(ce_w[:3]) or "CE short buildup",
-                    }
-                )
-            else:
-                rules_miss.append("No Call writing ATM/above")
-
-            if oi_pcr < 0.85 or str(pcr.get("regime") or "").startswith("CALL"):
-                rules_hit.append(
-                    {"rule": "OI PCR bearish zone", "detail": f"OI PCR {oi_pcr:.2f}"}
-                )
-            else:
-                rules_miss.append(f"OI PCR {oi_pcr:.2f} not < 0.85")
-
-            if max_pain and spot and float(max_pain) < spot:
-                rules_hit.append(
-                    {
-                        "rule": "Max Pain below spot",
-                        "detail": f"MP {max_pain} < {spot:.1f}",
-                    }
-                )
-            else:
-                rules_miss.append("Max Pain not below spot")
-
-            atm_pe_rel = float(pcr.get("atm_pe_rel_vol") or 0)
-            if atm_pe_rel >= 1.3 or float(pcr.get("atm_ce_vol_share") or 1) <= 0.45:
-                rules_hit.append(
-                    {
-                        "rule": "Strong Put volume / Call writing ATM",
-                        "detail": f"PE {atm_pe_rel:.1f}×",
-                    }
-                )
-            else:
-                rules_miss.append("ATM Put volume not strong")
-
-            opposite = (
-                buildup.get("primary_state") == "Long Buildup"
-                and buildup.get("bias") == "BULLISH"
-            )
-
-        hits = len(rules_hit)
-        if opposite and hits < 3:
-            status, decision = "CONFLICT", "AVOID"
-            reason = f"Conflict – opposite option flow ({buildup.get('primary_state')})"
-            result = "NOT_CONFIRMED"
-        elif hits >= 2:
-            status = result = "CONFIRMED"
-            decision = (
+        board = ev.get("board")
+        ticket = ev.get("ticket")
+        if board == "TRADE" and ticket:
+            status, result, decision = "CONFIRMED", "CONFIRMED", (
                 "LONG SETUP VALID" if cross_type == "BULLISH" else "SHORT SETUP VALID"
             )
-            reason = f"{hits}/5 confirmation rules met"
+        elif board == "WATCH":
+            status, result, decision = "WATCH", "NOT_CONFIRMED", "WATCH — no ticket"
         else:
-            status = result = "NOT_CONFIRMED"
-            decision = "AVOID"
-            reason = f"Only {hits}/5 rules met — need ≥2"
+            status, result, decision = ev.get("board") or "REJECT", "NOT_CONFIRMED", "AVOID"
 
-        suggested = (
-            self._suggest_strikes(cross_type, spot, atm, band)
-            if status == "CONFIRMED"
-            else []
-        )
-        primary_flow = rules_hit[0]["detail"] if rules_hit else "—"
-        secondary = rules_hit[1]["detail"] if len(rules_hit) > 1 else None
+        hits = ev.get("permission_hits") or []
+        suggested = []
+        if ticket and ticket.get("vehicle"):
+            v = ticket["vehicle"]
+            suggested = [
+                {
+                    "role": "Primary",
+                    "strike": v.get("strike"),
+                    "instrument": v.get("instrument"),
+                    "structure": v.get("structure"),
+                    "style": v.get("style"),
+                    "why": v.get("why"),
+                }
+            ]
 
         return {
             "success": True,
-            "symbol": symbol,
-            "name": symbol.replace("NSE:", "").replace("-EQ", ""),
-            "cross_type": cross_type,
-            "spot": spot,
-            "atm": atm,
+            **ev,
+            "spot": ev.get("ltp"),
+            "atm": (ticket or {}).get("vehicle", {}).get("strike") or ev.get("ltp"),
             "result": result,
             "status": status,
             "decision": decision,
-            "reason": reason,
-            "rules_hit": rules_hit,
-            "rules_miss": rules_miss,
-            "hits": hits,
-            "required_hits": 2,
-            "primary_flow": primary_flow,
-            "secondary_flow": secondary,
-            "oi_pcr": round(oi_pcr, 3),
-            "volume_pcr": pcr.get("volume_pcr"),
-            "max_pain": max_pain,
-            "buildup_state": buildup.get("primary_state"),
-            "buildup_note": buildup.get("note"),
+            "reason": ev.get("board_reason"),
+            "rules_hit": hits,
+            "rules_miss": ev.get("permission_miss") or [],
+            "hits": len(hits),
+            "required_hits": None,
+            "primary_flow": (hits[0].get("detail") if hits else ev.get("buildup_note")),
+            "secondary_flow": hits[1].get("detail") if len(hits) > 1 else None,
             "suggested_strikes": suggested,
-            "put_wall": analysis.get("put_wall"),
-            "call_wall": analysis.get("call_wall"),
-            "timestamp": datetime.now(tz=IST).isoformat(),
-            "report": self._format_report(
-                symbol,
-                cross_type,
-                status,
-                decision,
-                reason,
-                primary_flow,
-                secondary,
-                oi_pcr,
-                suggested,
-                hits,
-            ),
+            "ticket": ticket,
+            "report": self._format_ticket_report(ev, status, decision),
         }
 
-    def _suggest_strikes(
-        self, cross_type: str, spot: float, atm: Any, band: List[Dict]
-    ) -> List[Dict[str, Any]]:
-        atm_f = float(atm or spot or 0)
-        out: List[Dict[str, Any]] = []
-        if cross_type == "BULLISH":
-            aggressive = next(
-                (
-                    row.get("strike")
-                    for row in sorted(band, key=lambda r: r.get("strike") or 0)
-                    if row.get("strike") is not None and row["strike"] > atm_f
-                ),
-                None,
-            )
-            out.append(
-                {
-                    "role": "Primary",
-                    "strike": atm_f,
-                    "instrument": "CE",
-                    "structure": f"{atm_f} CE",
-                }
-            )
-            if aggressive:
-                out.append(
-                    {
-                        "role": "Aggressive",
-                        "strike": aggressive,
-                        "instrument": "CE",
-                        "structure": f"{aggressive} CE",
-                    }
-                )
-            step = abs((aggressive or atm_f) - atm_f) or max(5.0, round(atm_f * 0.01))
-            out.append(
-                {
-                    "role": "Defined Risk",
-                    "strike": atm_f,
-                    "instrument": "CE",
-                    "structure": f"{atm_f}/{atm_f + step} Bull Call Spread",
-                }
-            )
-        else:
-            aggressive = next(
-                (
-                    row.get("strike")
-                    for row in sorted(band, key=lambda r: -(r.get("strike") or 0))
-                    if row.get("strike") is not None and row["strike"] < atm_f
-                ),
-                None,
-            )
-            out.append(
-                {
-                    "role": "Primary",
-                    "strike": atm_f,
-                    "instrument": "PE",
-                    "structure": f"{atm_f} PE",
-                }
-            )
-            if aggressive:
-                out.append(
-                    {
-                        "role": "Aggressive",
-                        "strike": aggressive,
-                        "instrument": "PE",
-                        "structure": f"{aggressive} PE",
-                    }
-                )
-            step = abs(atm_f - (aggressive or atm_f)) or max(5.0, round(atm_f * 0.01))
-            out.append(
-                {
-                    "role": "Defined Risk",
-                    "strike": atm_f,
-                    "instrument": "PE",
-                    "structure": f"{atm_f}/{atm_f - step} Put Spread",
-                }
-            )
-        return out
-
-    def _format_report(
-        self,
-        symbol: str,
-        cross_type: str,
-        status: str,
-        decision: str,
-        reason: str,
-        primary: str,
-        secondary: Optional[str],
-        oi_pcr: float,
-        suggested: List[Dict],
-        hits: int,
-    ) -> str:
-        name = symbol.replace("NSE:", "").replace("-EQ", "")
+    def _format_ticket_report(self, ev: Dict[str, Any], status: str, decision: str) -> str:
+        name = ev.get("name") or ""
+        t = ev.get("ticket") or {}
+        v = t.get("vehicle") or {}
         lines = [
             f"Stock: {name}",
-            f"Cross: {cross_type}",
-            f"Option Chain Result: {status}",
-            f"Rules met: {hits}/5 — {reason}",
+            f"Cross: {ev.get('cross_type')} · {ev.get('fresh_label')} · board {ev.get('board')}",
+            f"4H: {ev.get('h4_bias')} allowed={ev.get('mtf_allowed')} gate={ev.get('mtf_gate')}",
+            f"ADX {ev.get('adx')} · P {ev.get('permission')} · T {ev.get('momentum_score')} · desk {ev.get('desk_score')}",
+            f"Result: {status} — {ev.get('board_reason')}",
+            f"Decision: {decision}",
         ]
-        if status == "CONFIRMED":
+        if t:
             lines += [
-                f"Primary Flow: {primary}",
-                *([f"Secondary Flow: {secondary}"] if secondary else []),
-                f"OI PCR: {oi_pcr:.2f}",
-                f"Decision: {decision}",
-                "Suggested Strikes:",
-                *[f"  - {s['role']}: {s['structure']}" for s in suggested],
+                f"Vehicle: {v.get('structure')} ({v.get('style')}) — {v.get('why')}",
+                f"Entry: {t.get('entry')}",
+                f"Stop: {t.get('stop')} ({t.get('stop_src')})",
+                f"Target: {t.get('target1')} ({t.get('target1_src')})",
+                f"R:R {t.get('rr')} · {t.get('time_stop')}",
+                f"Invalid: {t.get('invalidation')}",
             ]
-        else:
-            lines += [f"Reason: {reason}", f"Decision: {decision}"]
         return "\n".join(lines)
 
 
