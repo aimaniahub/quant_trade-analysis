@@ -32,7 +32,17 @@ export const api = {
      * Generic fetch wrapper
      */
     async fetch<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
-        const url = `${API_BASE_URL}${endpoint}`;
+        const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+        let url: string;
+        if (typeof window === 'undefined') {
+            // Server-side / SSR: use bound BACKEND_URL injected by Vercel services
+            const backend = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+            url = `${backend.replace(/\/+$/, '')}/api/v1${cleanEndpoint}`;
+        } else {
+            // Client-side browser: use relative /api/v1 routed by Vercel rewrites
+            const base = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
+            url = `${base.replace(/\/+$/, '')}${cleanEndpoint}`;
+        }
         const response = await fetch(url, {
             ...options,
             headers: {
