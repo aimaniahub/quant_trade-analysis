@@ -1,25 +1,64 @@
-# OptionGreek local dependencies
-# Usage:
-#   docker compose up -d redis
-#   # then set in backend/.env:
-#   REDIS_ENABLED=true
-#   REDIS_URL=redis://localhost:6379/0
+# OptionGreek — live stack
+#   docker compose up -d --build
+# UI: http://localhost:3000   API: http://localhost:8000/docs
+#
+# Put secrets in backend/.env (copied from backend/.env.example).
+# Redis + /app/app/data persist harvest board, last session, trade-watch.
 
 services:
   redis:
     image: redis:7-alpine
     container_name: optiongreek-redis
-    ports:
-      - "6379:6379"
     volumes:
       - optiongreek_redis_data:/data
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
-      retries: 5
+      retries: 8
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: optiongreek-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      REDIS_ENABLED: "true"
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - optiongreek_data:/app/app/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 8
+      start_period: 25s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_URL: http://backend:8000
+    container_name: optiongreek-frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+      NEXT_PUBLIC_API_URL: /api/v1
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   optiongreek_redis_data:
+  optiongreek_data:

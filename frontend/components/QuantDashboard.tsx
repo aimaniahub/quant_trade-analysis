@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import NiftySentimentCards from './NiftySentimentCards';
 import LiveTradeSignal from './LiveTradeSignal';
 import GreeksHeatmap from './GreeksHeatmap';
+import NiftyQuantTerminal from './NiftyQuantTerminal';
 import { api } from '../lib/api';
 import LoadingBanner from './ui/LoadingBanner';
 
@@ -25,7 +26,7 @@ export default function QuantDashboard({ onBack }: QuantDashboardProps) {
     const [topStocks, setTopStocks] = useState<HighVolumeStock[]>([]);
     const [loadingStocks, setLoadingStocks] = useState(true);
     const [stocksError, setStocksError] = useState<string | null>(null);
-    const [activeTab, setActiveTab] = useState<'signal' | 'greeks'>('signal');
+    const [activeTab, setActiveTab] = useState<'nifty-quant' | 'signal' | 'greeks'>('nifty-quant');
 
     // Fetch top high-volume stocks on load
     useEffect(() => {
@@ -173,6 +174,15 @@ export default function QuantDashboard({ onBack }: QuantDashboardProps) {
                 {/* Tab Switch */}
                 <section className="flex items-center gap-2">
                     <button
+                        onClick={() => setActiveTab('nifty-quant')}
+                        className={`px-4 py-2 text-sm font-bold rounded-lg transition-all ${activeTab === 'nifty-quant'
+                            ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-lg shadow-violet-900/30'
+                            : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                            }`}
+                    >
+                        ⚡ Nifty 50 Quant Desk
+                    </button>
+                    <button
                         onClick={() => setActiveTab('signal')}
                         className={`px-4 py-2 text-sm font-bold rounded-lg transition-all ${activeTab === 'signal'
                             ? 'bg-white text-black'
@@ -194,7 +204,9 @@ export default function QuantDashboard({ onBack }: QuantDashboardProps) {
 
                 {/* Analysis Section */}
                 <section>
-                    {activeTab === 'signal' ? (
+                    {activeTab === 'nifty-quant' ? (
+                        <NiftyQuantTerminal autoRefresh={true} refreshInterval={15000} />
+                    ) : activeTab === 'signal' ? (
                         <LiveTradeSignal
                             symbol={selectedStock}
                             autoRefresh={true}

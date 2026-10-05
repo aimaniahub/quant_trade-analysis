@@ -371,7 +371,7 @@ export default function VATScanner({ onBack }: VATScannerProps) {
                         {/* Strategy Info */}
                         <div className="p-4 bg-zinc-100 dark:bg-zinc-900/50 rounded-xl text-xs text-zinc-500">
                             <p className="font-bold mb-2">📚 Value Adjustment Theory</p>
-                            <p>Equidistant strikes should have similar premiums. When they don't, buy the undervalued option and target convergence. Best on expiry days (ex-d2 to ex-d0), during 10AM-3PM IST.</p>
+                            <p>Equidistant strikes should have similar premiums. When they don&apos;t, buy the undervalued option and target convergence. Best on expiry days (ex-d2 to ex-d0), during 10AM-3PM IST.</p>
                         </div>
                     </div>
                 )}

@@ -55,6 +55,10 @@ interface StockAnalysisRow {
     quant_bias?: string;
     quant_conviction?: string;
     quant_factors?: string[];
+    buildup_sentence?: string;
+    top_anomaly_label?: string;
+    pcr_sentence?: string;
+    skew_sentence?: string;
     /** Single source of truth for bull/bear columns */
     setup_side?: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | string;
     max_pain?: number;
@@ -907,7 +911,18 @@ function SideColumn({
                                     </div>
                                     <div className="flex flex-col items-end gap-1">
                                         <span
-                                            className={`px-1.5 py-0.5 text-[9px] font-black rounded text-white ${stateColors[stock.state] || 'bg-zinc-600'}`}
+                                            title={
+                                                stock.state === 'TREND'
+                                                    ? 'HTF trend aligned with 15m momentum & option buildup'
+                                                    : stock.state === 'INTENT'
+                                                    ? 'Option IV & OI positioning indicate clear directional intent'
+                                                    : stock.state === 'RANGE'
+                                                    ? 'No clear breakout, options pinned within support & resistance walls'
+                                                    : stock.state === 'ADJUSTMENT'
+                                                    ? 'Positioning shift underway or conflicting technical signals'
+                                                    : 'Low volume or no clear setup'
+                                            }
+                                            className={`px-1.5 py-0.5 text-[9px] font-black rounded text-white cursor-help ${stateColors[stock.state] || 'bg-zinc-600'}`}
                                         >
                                             {stock.state}
                                         </span>
@@ -920,6 +935,11 @@ function SideColumn({
                                         </span>
                                     </div>
                                 </div>
+                                {(stock.buildup_sentence || stock.top_anomaly_label) && (
+                                    <div className="mt-1 text-[10px] text-zinc-400 font-medium truncate">
+                                        {stock.top_anomaly_label ? `⚡ ${stock.top_anomaly_label}` : stock.buildup_sentence}
+                                    </div>
+                                )}
                                 {(stock.buildup_state || stock.buildup?.primary_state) && (
                                     <div className="mt-1.5 flex flex-wrap gap-1">
                                         <BuildupBadge

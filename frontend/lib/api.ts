@@ -4,8 +4,21 @@
  * Handles all communication with the FastAPI backend.
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
-const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/api/v1';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
+
+function wsBaseFromApi(apiBase: string): string {
+    if (process.env.NEXT_PUBLIC_WS_URL) return process.env.NEXT_PUBLIC_WS_URL;
+    if (apiBase.startsWith('https://')) return `wss://${apiBase.slice('https://'.length)}`;
+    if (apiBase.startsWith('http://')) return `ws://${apiBase.slice('http://'.length)}`;
+    if (typeof window !== 'undefined') {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const cleanBase = apiBase.startsWith('/') ? apiBase : `/${apiBase}`;
+        return `${proto}//${window.location.host}${cleanBase}`;
+    }
+    return 'ws://localhost:8000/api/v1';
+}
+
+const WS_BASE_URL = wsBaseFromApi(API_BASE_URL);
 
 export interface ApiResponse<T = any> {
     success: boolean;
@@ -129,7 +142,7 @@ export const api = {
 
         // Quant Dashboard methods
         getLiveTradeSignal: (symbol: string) => api.fetch(`/market/live-trade-signal/${symbol}`),
-        getGreeksHeatmap: (symbol: string, strikeCount = 15) =>
+        getGreeksHeatmap: (symbol: string, strikeCount = 14) =>
             api.fetch(`/market/greeks-heatmap/${symbol}?strike_count=${strikeCount}`),
         // Nifty sentiment
         getNiftySentiment: () => api.fetch('/market/nifty-sentiment'),
@@ -152,6 +165,13 @@ export const api = {
             api.fetch(`/options/chain/${symbol}?strike_count=${strikeCount}`),
         analyze: (symbol: string) => api.fetch(`/options/analysis/${symbol}`),
         getAdjustments: (symbol: string) => api.fetch(`/options/adjustments/${symbol}`),
+        getNiftyQuant: (forceRefresh = false) =>
+            api.fetch(`/options/nifty-quant?force_refresh=${forceRefresh}`),
+        simulateBreakout: (stockSymbol: string, expectedMovePct: number) =>
+            api.fetch('/options/nifty-quant/simulate', {
+                method: 'POST',
+                body: JSON.stringify({ stock_symbol: stockSymbol, expected_move_pct: expectedMovePct }),
+            }),
     },
 
     /**
@@ -322,82 +342,125 @@ export const api = {
             api.fetch(
                 `/radar/levels/${encodeURIComponent(symbol)}?strike_count=${strikeCount}`,
             ),
+        startAiChain: () =>
+            api.fetch('/radar/ai-chain', { method: 'POST', body: JSON.stringify({}) }),
+        getAiChainJob: (jobId: string) =>
+            api.fetch(`/radar/ai-chain/jobs/${encodeURIComponent(jobId)}`),
+        getAiChainLast: () => api.fetch('/radar/ai-chain/last'),
+        getTradeWatch: () => api.fetch('/trade-watch'),
+        runTradeWatch: (force = false) =>
+            api.fetch('/trade-watch/run', {
+                method: 'POST',
+                body: JSON.stringify({ force }),
+            }),
+        markTradeWatch: () => api.fetch('/trade-watch/mark', { method: 'POST' }),
+        flattenTradeWatch: () => api.fetch('/trade-watch/flatten', { method: 'POST' }),
     },
 };
 
+type WSHandlers = {
+    onOpen?: () => void;
+    onClose?: () => void;
+};
+
 /**
- * WebSocket manager for real-time data
+ * Browser socket to the FastAPI /ws/* endpoints.
+ * onerror Events are not serializable (console shows {}); log url/state instead.
  */
 export class WSClient {
     private ws: WebSocket | null = null;
     private url: string;
     private onMessage: (data: any) => void;
+    private handlers: WSHandlers;
     private reconnectInterval = 3000;
-    private maxReconnectAttempts = 5;
+    private maxReconnectAttempts = 8;
     private reconnectAttempts = 0;
     private intentionalClose = false;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private loggedError = false;
 
-    constructor(path: string, onMessage: (data: any) => void) {
-        this.url = `${WS_BASE_URL}${path}`;
+    constructor(path: string, onMessage: (data: any) => void, handlers: WSHandlers = {}) {
+        const p = path.startsWith('/') ? path : `/${path}`;
+        this.url = `${WS_BASE_URL}${p}`;
         this.onMessage = onMessage;
+        this.handlers = handlers;
+    }
+
+    get readyState(): number {
+        return this.ws?.readyState ?? WebSocket.CLOSED;
     }
 
     connect() {
         try {
             this.intentionalClose = false;
-            // Avoid stacking sockets
             if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
                 return;
             }
+            if (this.ws) {
+                try {
+                    this.ws.onopen = null;
+                    this.ws.onclose = null;
+                    this.ws.onerror = null;
+                    this.ws.onmessage = null;
+                    this.ws.close();
+                } catch {
+                    /* ignore */
+                }
+                this.ws = null;
+            }
 
-            this.ws = new WebSocket(this.url);
+            const socket = new WebSocket(this.url);
+            this.ws = socket;
 
-            this.ws.onopen = () => {
-                console.log(`Connected to WebSocket: ${this.url}`);
+            socket.onopen = () => {
                 this.reconnectAttempts = 0;
+                this.loggedError = false;
+                this.handlers.onOpen?.();
             };
 
-            this.ws.onmessage = (event) => {
+            socket.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
                     this.onMessage(data);
                 } catch (err) {
-                    console.error('Failed to parse WebSocket message:', err);
+                    console.warn('[ws] bad message', err);
                 }
             };
 
-            this.ws.onclose = () => {
-                console.log('WebSocket connection closed');
+            socket.onclose = () => {
+                this.handlers.onClose?.();
                 if (!this.intentionalClose) {
                     this.attemptReconnect();
                 }
             };
 
-            this.ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
+            socket.onerror = () => {
+                // Browser Event has no enumerable fields — logging it prints "{}".
+                if (!this.loggedError) {
+                    this.loggedError = true;
+                    console.warn(
+                        `[ws] connect failed ${this.url} readyState=${socket.readyState} (REST alerts still poll)`,
+                    );
+                }
             };
         } catch (error) {
-            console.error('Failed to connect to WebSocket:', error);
+            console.warn('[ws] failed to open', this.url, error);
+            this.attemptReconnect();
         }
     }
 
     private attemptReconnect() {
         if (this.intentionalClose) return;
-        if (this.reconnectAttempts < this.maxReconnectAttempts) {
-            this.reconnectAttempts++;
-            console.log(`Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts}...`);
-            if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
-        }
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
+        this.reconnectAttempts += 1;
+        const delay = Math.min(this.reconnectInterval * this.reconnectAttempts, 15000);
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = setTimeout(() => this.connect(), delay);
     }
 
     send(data: any) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(data));
-        } else if (!this.intentionalClose) {
-            console.warn('WebSocket is not open. Initializing connection...');
-            this.connect();
         }
     }
 

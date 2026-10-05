@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
-from typing import Optional, List
+from pydantic import field_validator
+from typing import Optional, List, Union
 from functools import lru_cache
 import json
 
@@ -18,6 +19,18 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: List[str] = ["http://localhost:3000"]
     
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v):
+        if isinstance(v, str):
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [i.strip() for i in v.split(",") if i.strip()]
+        return v
+    
     # Fyers API Configuration
     fyers_app_id: str = ""
     fyers_secret_key: str = ""
@@ -34,6 +47,11 @@ class Settings(BaseSettings):
     grok_api_url: str = "https://api.x.ai/v1"
     # Optional preferred model (fallback chain used if empty/fails)
     grok_model: str = "grok-3-mini"
+
+    # OpenRouter (AI + Chain news ranker)
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "google/gemma-4-31b-it:free"
     
     # WebSocket Configuration
     ws_heartbeat_interval: int = 30  # seconds
@@ -53,10 +71,11 @@ class Settings(BaseSettings):
     market_open_minute: int = 15
     market_close_hour: int = 15
     market_close_minute: int = 30
+    allow_off_hours_scan: bool = False
 
     # Redis (optional — graceful fallback to in-memory when disabled/unreachable)
     # Set REDIS_ENABLED=true and REDIS_URL=redis://localhost:6379/0
-    redis_enabled: bool = False
+    redis_enabled: bool = True
     redis_url: str = "redis://localhost:6379/0"
     redis_prefix: str = "optiongreek"
     redis_job_ttl_seconds: int = 3600  # scan job retention
@@ -77,6 +96,18 @@ class Settings(BaseSettings):
     stale_soft_secs: int = 90
     stale_hard_secs: int = 300
     symbol_store_ttl_secs: int = 14400
+    # Last-session board/quotes: survive overnight + weekend until next open.
+    session_snapshot_ttl_secs: int = 259200
+
+    # Readers (UI / HTTP) must not escape to Fyers. Harvest thread is the writer.
+    # FYERS_READER_ESCAPE=true is a debug hatch only.
+    fyers_reader_escape: bool = False
+    fyers_rpm_limit: int = 200
+    # Phase 2 harvest pacing (concurrency hides RTT; do not raise RPS)
+    harvest_chain_workers: int = 4
+    harvest_chain_rps: float = 3.0
+    harvest_symbol_timeout_secs: float = 8.0
+    harvest_retry_backoff_secs: float = 1.5
     
     class Config:
         env_file = ".env"

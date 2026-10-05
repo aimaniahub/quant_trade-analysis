@@ -28,9 +28,11 @@ from app.services.strategies.ma7200_desk import (
 from app.services.strategies.rsi_divergence import (
     BEAR_RSI_MIN,
     BULL_RSI_MAX,
+    analyze_divergence,
     classify_divergence,
     divergence_score,
     near_session_vwap,
+    quality_grade,
 )
 
 RSI_PERIOD = 14
@@ -869,8 +871,49 @@ def weight_radar_rows(rows: Optional[List[Dict[str, Any]]]) -> List[Dict[str, An
     return out
 
 
+def _div_thesis(
+    name: str,
+    div: Dict[str, Any],
+    *,
+    rsi_now: Optional[float],
+    rsi60: Optional[float],
+    div60: Optional[Dict[str, Any]],
+    perm: Dict[str, Any],
+    gate: Dict[str, Any],
+    board: str,
+    reason: str,
+    vwap: Optional[float],
+    spot: float,
+    adx: Optional[float],
+) -> str:
+    kind = "Bullish" if div.get("type") == "BULL_DIV" else "Bearish"
+    price = f"{div.get('price_l1')}→{div.get('price_l2')}"
+    rsi_p = f"{div.get('rsi_l1')}→{div.get('rsi_l2')}"
+    d60 = div60 or {}
+    if d60.get("live") and d60.get("type") == div.get("type"):
+        htf = "1H confirms same divergence"
+    elif d60.get("live") and d60.get("type"):
+        htf = "1H opposed"
+    else:
+        htf = "1H silent"
+    oc = (perm.get("buildup") or {}).get("note") or f"permission {perm.get('p')}"
+    loc = ""
+    if vwap and spot:
+        side_v = "above" if spot >= vwap else "below"
+        loc = f" Spot {side_v} VWAP {round(vwap, 1)}."
+    adx_s = f" ADX {adx}." if adx else ""
+    tag = "Near-miss" if div.get("near") else kind
+    return (
+        f"{name}: {tag} — price {price}, RSI {rsi_p} "
+        f"({div.get('rsi_gap')} pts over {div.get('pivot_span') or div.get('bars_ago')} bars, "
+        f"{div.get('bars_ago')} bars ago). RSI now {rsi_now} / 1H {rsi60 if rsi60 is not None else '—'}. "
+        f"{htf}. Chain: {oc}. 4H {gate.get('h4_bias') or '—'}.{loc}{adx_s} "
+        f"{board} — {reason}."
+    )
+
+
 def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]:
-    """Classic RSI divergence on stored 15m or daily. No Fyers."""
+    """Quant RSI divergence on stored 15m or daily. No Fyers."""
     from app.services import symbol_store as store
 
     tf_key = "D" if str(tf).upper() in ("D", "1D", "DAY", "DAILY", "1") else "15"
@@ -891,7 +934,7 @@ def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]
 
     series = rsi_wilder(candles)
     rsi_now = last_rsi(series)
-    div = classify_divergence(
+    div = analyze_divergence(
         candles,
         series,
         tf=tf_code,
@@ -899,7 +942,24 @@ def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]
         fresh_bars=fresh_bars,
         stale_bars=stale_bars,
     )
-    if not div.get("live") or not div.get("type"):
+    rsi_os = bool(rsi_now is not None and rsi_now <= RSI_OS)
+    rsi_ob = bool(rsi_now is not None and rsi_now >= RSI_OB)
+
+    m15 = candles if tf_key == "15" else (store.get_history(symbol, "15", min_bars=RSI_PERIOD + 5) or [])
+    h1: List[Dict[str, Any]] = []
+    r60s: List[Optional[float]] = []
+    rsi60: Optional[float] = None
+    div60: Dict[str, Any] = {}
+    if tf_key == "15":
+        h1 = store.get_history(symbol, "60", min_bars=RSI_PERIOD + 5) or []
+        if len(h1) < RSI_PERIOD + 5:
+            h1 = store.aggregate_ohlcv(m15, 60) if m15 else []
+        if h1:
+            r60s = rsi_wilder(h1)
+            rsi60 = last_rsi(r60s)
+            div60 = analyze_divergence(h1, r60s, tf=60, period_minutes=60)
+
+    if (not div.get("live") and not div.get("near")) or not div.get("type"):
         return {
             "success": True,
             "symbol": symbol,
@@ -907,9 +967,15 @@ def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]
             "tf": tf_key,
             "board": "IGNORE",
             "rsi": rsi_now,
+            "rsi60": rsi60,
+            "rsi_os": rsi_os,
+            "rsi_ob": rsi_ob,
             "div_live": False,
             "div_type": None,
+            "div_near": False,
             "event": div.get("event"),
+            "pivot_lows": div.get("pivot_lows"),
+            "pivot_highs": div.get("pivot_highs"),
         }
 
     side = "BULLISH" if div.get("type") == "BULL_DIV" else "BEARISH"
@@ -920,44 +986,98 @@ def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]
     perm = permission_from_snapshot(symbol, side, snap=snap, spot=spot)
     p = float(perm.get("p") or 0)
     hard = list(perm.get("hard_fail") or [])
-    d_score = divergence_score(div, None, rsi15=rsi_now, near_vwap=near_session_vwap(spot, session_vwap(candles if tf_key == "15" else [])))
-    desk = round(0.35 * d_score + 0.65 * p, 1) if d_score else round(0.40 * 0 + 0.60 * p, 1)
+    vwap = session_vwap(m15) if m15 else (session_vwap(candles) if tf_key == "15" else None)
+    adx = compute_adx(m15 or candles)
+    atr = compute_atr(m15 or candles)
+    rel_vol = _rel_vol(m15 or candles)
+    ema20 = _ema20_side(m15 or candles, spot)
+    near_vwap = near_session_vwap(spot, vwap)
+    d_score = divergence_score(
+        div if div.get("live") else None,
+        div60 if div60.get("live") else None,
+        rsi15=rsi_now,
+        near_vwap=near_vwap,
+    )
+    if div.get("near") and not d_score:
+        d_score = round(min(40.0, 15.0 + _f(div.get("rsi_gap")) * 3), 1)
+    e_prev = None
+    for v in reversed(series[:-1]):
+        if v is not None:
+            e_prev = round(float(v), 2)
+            break
+    ev15 = classify_rsi_event(e_prev, rsi_now)
+    e_score = _extreme_score(ev15, rsi60, side, div15=div if div.get("live") else None, div60=div60)
+    desk = round(0.35 * e_score + 0.25 * d_score + 0.40 * p, 1)
 
-    board = "WATCH"
-    reason = "live divergence"
+    is_near = bool(div.get("near"))
+    board = "NEAR" if is_near else "WATCH"
+    reason = (
+        f"building — RSI gap/zone short of classic ({div.get('near_why')})"
+        if is_near
+        else "live divergence"
+    )
     if gate.get("hard"):
         board, reason = "REJECT", gate.get("detail") or gate.get("reason") or "4H opposite"
     elif "OC_CONFLICT" in hard or "FUTURES_OPPOSITE" in hard:
         board, reason = "REJECT", "; ".join(perm.get("miss") or hard) or "OC knife"
     elif side == "BEARISH":
         bias = ((perm.get("buildup") or {}).get("bias") or "").upper()
-        if bias == "BULLISH" and "OC_CONFLICT" not in hard:
+        if bias == "BULLISH" and "OC_CONFLICT" not in hard and not is_near:
             board, reason = "WATCH", "Divergence but chain still bullish — do not fade"
-    if board != "REJECT":
+    if board not in ("REJECT", "NEAR"):
         extreme = (
             (side == "BULLISH" and rsi_now is not None and rsi_now <= BULL_RSI_MAX)
             or (side == "BEARISH" and rsi_now is not None and rsi_now >= BEAR_RSI_MIN)
         )
+        reclaim = bool(ev15.get("reclaim"))
         if p < P_AVOID:
             board, reason = "REJECT", f"Permission {p:.0f} < {P_AVOID:.0f}"
         elif gate.get("soft"):
             board, reason = "WATCH", "4H mixed — divergence watch"
-        elif (div.get("fresh") or extreme) and p >= P_SETUP and not gate.get("hard"):
+        elif (
+            not is_near
+            and (div.get("fresh") or extreme)
+            and (reclaim or p >= P_A or extreme)
+            and p >= P_SETUP
+            and not gate.get("hard")
+        ):
             board, reason = "TRADE", "SETUP"
         else:
             board, reason = "WATCH", "divergence, wait reclaim / stronger OC"
 
+    q = quality_grade(
+        div,
+        div60,
+        rsi_now=rsi_now,
+        permission=p,
+        h4_hard=bool(gate.get("hard")),
+    )
+    if board == "TRADE" and q == "A":
+        grade_label = "A-SETUP"
+    elif board == "TRADE":
+        grade_label = "SETUP"
+    else:
+        grade_label = q
+
+    if (div60 or {}).get("live") and (div60 or {}).get("type") == div.get("type"):
+        htf_priority = "A"
+    elif (div60 or {}).get("live") and (div60 or {}).get("type"):
+        htf_priority = "C"
+    elif div.get("live"):
+        htf_priority = "B"
+    else:
+        htf_priority = "D"
+
     ticket = None
-    grade = None
     if board == "TRADE":
         fake_cross = {
             "ema200": None,
             "ltp": spot,
-            "volume_ratio": _rel_vol(candles),
+            "volume_ratio": rel_vol,
             "bars_ago": div.get("bars_ago") or 0,
             "fresh_label": div.get("event"),
         }
-        closes = [_f(c.get("close")) for c in candles]
+        closes = [_f(c.get("close")) for c in (m15 or candles)]
         e20 = next((v for v in reversed(_ema(closes, 20)) if v is not None), None)
         fake_cross["ema200"] = e20
         ticket = build_ticket(
@@ -966,9 +1086,9 @@ def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]
             cross=fake_cross,
             perm=perm,
             mtf=mtf,
-            adx=compute_adx(candles),
-            vwap=session_vwap(candles) if tf_key == "15" else None,
-            atr=compute_atr(candles),
+            adx=adx,
+            vwap=vwap,
+            atr=atr,
         )
         if ticket:
             ticket["trigger"] = (
@@ -976,9 +1096,23 @@ def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]
                 f"price {div.get('price_l1')}→{div.get('price_l2')} · "
                 f"{div.get('bars_ago')} bars ago"
             )
-            grade = "SETUP"
         else:
             board, reason = "WATCH", "Permission ok but no vehicle"
+
+    thesis = _div_thesis(
+        _name(symbol),
+        div,
+        rsi_now=rsi_now,
+        rsi60=rsi60,
+        div60=div60,
+        perm=perm,
+        gate=gate,
+        board=board,
+        reason=reason,
+        vwap=vwap,
+        spot=spot,
+        adx=adx,
+    )
 
     return {
         "success": True,
@@ -986,31 +1120,70 @@ def evaluate_divergence_symbol(symbol: str, *, tf: str = "15") -> Dict[str, Any]
         "name": _name(symbol),
         "tf": tf_key,
         "ltp": spot,
+        "chg_pct": _f((snap.get("spot") or {}).get("chg_pct") or (snap.get("spot") or {}).get("change_percent")),
         "side": side,
         "thesis": "BOUNCE" if side == "BULLISH" else "FADE",
+        "analysis": thesis,
         "rsi": rsi_now,
+        "rsi15": rsi_now if tf_key == "15" else last_rsi(rsi_wilder(m15)) if m15 else None,
+        "rsi60": rsi60,
+        "rsi_os": rsi_os,
+        "rsi_ob": rsi_ob,
         "event": div.get("event"),
+        "zone": ev15.get("zone"),
+        "reclaim": bool(ev15.get("reclaim")),
         "div_type": div.get("type"),
-        "div_live": True,
+        "div_live": bool(div.get("live")),
+        "div_near": is_near,
         "div_fresh": bool(div.get("fresh")),
+        "div_stale": bool(div.get("stale")),
         "div_bars_ago": div.get("bars_ago"),
         "div_rsi_gap": div.get("rsi_gap"),
         "div_price_l1": div.get("price_l1"),
         "div_price_l2": div.get("price_l2"),
         "div_rsi_l1": div.get("rsi_l1"),
         "div_rsi_l2": div.get("rsi_l2"),
+        "price_move_pct": div.get("price_move_pct"),
+        "rsi_move": div.get("rsi_move"),
+        "pivot_span": div.get("pivot_span"),
+        "div_magnitude": div.get("div_magnitude"),
+        "div60_type": div60.get("type") if div60.get("live") else None,
+        "div60_live": bool(div60.get("live")),
+        "div60_bars_ago": div60.get("bars_ago") if div60.get("live") else None,
+        "htf_priority": htf_priority,
+        "quality": q,
         "permission": perm.get("p"),
         "permission_hits": perm.get("hits") or [],
         "permission_miss": perm.get("miss") or [],
         "hard_fail": hard,
+        "buildup_state": (perm.get("buildup") or {}).get("primary_state"),
+        "buildup_note": (perm.get("buildup") or {}).get("note"),
+        "futures_state": (perm.get("futures") or {}).get("state"),
+        "oi_pcr": perm.get("oi_pcr"),
+        "atm_iv": perm.get("atm_iv"),
+        "put_wall": (perm.get("walls") or {}).get("put_wall"),
+        "call_wall": (perm.get("walls") or {}).get("call_wall"),
+        "rel_vol": rel_vol,
+        "vwap": round(vwap, 2) if vwap else None,
+        "near_vwap": near_vwap,
+        "ema20": ema20,
+        "adx": adx,
         "h4_bias": gate.get("h4_bias") or mtf.get("h4_bias"),
         "mtf_allowed": gate.get("allowed_side"),
         "mtf_gate": gate.get("reason"),
+        "mtf_gate_hard": bool(gate.get("hard")),
+        "extreme_score": e_score,
         "desk_score": desk,
         "div_score": d_score,
+        "score": {
+            "D": d_score,
+            "E": e_score,
+            "P": round(p, 1),
+            "desk": desk,
+        },
         "board": board,
         "board_reason": reason,
-        "grade": grade,
+        "grade": grade_label,
         "ticket": ticket,
     }
 
@@ -1029,9 +1202,14 @@ def scan_divergence_book(*, tf: str = "15", source: str = "full", limit: int = 2
     trade: List[Dict[str, Any]] = []
     watch: List[Dict[str, Any]] = []
     reject: List[Dict[str, Any]] = []
+    near: List[Dict[str, Any]] = []
     errors: List[Dict[str, str]] = []
     scanned = 0
     waiting = 0
+    rsi_os = 0
+    rsi_ob = 0
+    gaps: List[float] = []
+    mag: List[float] = []
 
     for sym in symbols:
         ev = evaluate_divergence_symbol(sym, tf=tf_key)
@@ -1042,27 +1220,46 @@ def scan_divergence_book(*, tf: str = "15", source: str = "full", limit: int = 2
                 waiting += 1
             continue
         scanned += 1
+        if ev.get("rsi_os"):
+            rsi_os += 1
+        if ev.get("rsi_ob"):
+            rsi_ob += 1
         board = ev.get("board")
-        if board == "IGNORE" or not ev.get("div_live"):
+        if board == "IGNORE":
             continue
+        if ev.get("div_rsi_gap") is not None:
+            gaps.append(float(ev.get("div_rsi_gap") or 0))
+        if ev.get("div_magnitude") is not None:
+            mag.append(float(ev.get("div_magnitude") or 0))
         if board == "TRADE":
             trade.append(ev)
         elif board == "WATCH":
             watch.append(ev)
+        elif board == "NEAR":
+            near.append(ev)
         else:
             reject.append(ev)
 
     def _key(r: Dict[str, Any]):
-        return (-(r.get("desk_score") or 0), r.get("name") or "")
+        qrank = {"A": 0, "B": 1, "C": 2}.get(str(r.get("quality") or ""), 3)
+        return (qrank, -(r.get("desk_score") or 0), r.get("name") or "")
 
     trade.sort(key=_key)
     watch.sort(key=_key)
+    near.sort(key=_key)
     reject.sort(key=_key)
+    live_rows = trade + watch
     harvest = {}
     try:
         harvest = store.status()
     except Exception:
         harvest = {}
+
+    def _avg(xs: List[float]) -> Optional[float]:
+        return round(sum(xs) / len(xs), 2) if xs else None
+
+    knives = sum(1 for r in reject if "OC" in str(r.get("board_reason") or "") or "knife" in str(r.get("board_reason") or "").lower())
+    h4_veto = sum(1 for r in reject if "4H" in str(r.get("board_reason") or "") or "MTF" in str(r.get("board_reason") or ""))
     return {
         "success": True,
         "tf": tf_key,
@@ -1070,14 +1267,34 @@ def scan_divergence_book(*, tf: str = "15", source: str = "full", limit: int = 2
         "universe": len(symbols),
         "trade": trade,
         "watch": watch,
+        "near": near,
         "reject": reject,
         "counts": {
             "trade": len(trade),
             "watch": len(watch),
+            "near": len(near),
             "reject": len(reject),
-            "bull": sum(1 for r in trade + watch if r.get("thesis") == "BOUNCE"),
-            "bear": sum(1 for r in trade + watch if r.get("thesis") == "FADE"),
+            "bull": sum(1 for r in live_rows + near if r.get("thesis") == "BOUNCE"),
+            "bear": sum(1 for r in live_rows + near if r.get("thesis") == "FADE"),
+            "fresh": sum(1 for r in live_rows if r.get("div_fresh")),
+            "priority_a": sum(1 for r in live_rows if r.get("htf_priority") == "A"),
+            "quality_a": sum(1 for r in live_rows if r.get("quality") == "A"),
+            "rsi_os": rsi_os,
+            "rsi_ob": rsi_ob,
+            "knives": knives,
+            "h4_veto": h4_veto,
             "waiting_harvest": waiting,
+        },
+        "stats": {
+            "live": len(live_rows),
+            "near": len(near),
+            "mean_rsi_gap": _avg(gaps),
+            "mean_magnitude": _avg(mag),
+            "rsi_os": rsi_os,
+            "rsi_ob": rsi_ob,
+            "breadth_live_pct": round(100.0 * len(live_rows) / max(scanned, 1), 1),
+            "breadth_os_pct": round(100.0 * rsi_os / max(scanned, 1), 1),
+            "breadth_ob_pct": round(100.0 * rsi_ob / max(scanned, 1), 1),
         },
         "harvest": {
             "symbols": harvest.get("symbols"),
@@ -1092,8 +1309,8 @@ def scan_divergence_book(*, tf: str = "15", source: str = "full", limit: int = 2
             "tf": tf_key,
             "classic_only": True,
             "description": (
-                f"{tf_key} Wilder RSI(14) classic divergence. TRADE needs live div + "
-                "OC permission + 4H not opposite. No Fyers."
+                f"{tf_key} Wilder RSI(14) classic divergence with 1H confirm, OC permission, "
+                "4H gate. NEAR = price diverged but RSI zone/gap is short of classic. No Fyers."
             ),
         },
         "source": source,

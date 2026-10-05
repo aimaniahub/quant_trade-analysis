@@ -522,12 +522,19 @@ class FNOIntelligenceEngine:
         
         # Time-based restrictions (skip if bypass_time_check is True)
         if not bypass_time_check:
-            # Market closed
+            # Market closed — keep last analysis numbers, mark not tradable.
             if time_window in ["pre_market", "post_market"]:
                 return {
                     "state": MarketState.NO_TRADE.value,
                     "confidence": 100,
-                    "message": "Market is closed"
+                    "tradable": False,
+                    "message": "Session closed — showing last prints",
+                    "data_mode": "last_close",
+                    "atm_analysis": atm_analysis,
+                    "oi_analysis": oi_analysis,
+                    "institutional_flow": institutional_flow,
+                    "pcr": pcr,
+                    "vix": vix,
                 }
             
             # High risk window

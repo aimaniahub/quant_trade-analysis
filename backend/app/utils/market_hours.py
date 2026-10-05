@@ -7,7 +7,14 @@ Hardcoded holidays for 2025 and 2026.
 from datetime import datetime, date, time
 import pytz
 
+from app.core.config import get_settings
+
 IST = pytz.timezone("Asia/Kolkata")
+
+
+def allow_off_hours_scan() -> bool:
+    """Allow live/old cached scans outside normal market hours for debugging."""
+    return bool(get_settings().allow_off_hours_scan)
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
@@ -63,8 +70,8 @@ def is_trading_day(dt: date | None = None) -> bool:
     return True
 
 
-def is_market_open(now: datetime | None = None) -> bool:
-    """Return True if the market is currently open (09:15–15:30 IST)."""
+def session_is_open(now: datetime | None = None) -> bool:
+    """True only during 09:15–15:30 IST on a trading day. Ignores debug override."""
     if now is None:
         now = datetime.now(IST)
     elif now.tzinfo is None:
@@ -78,8 +85,22 @@ def is_market_open(now: datetime | None = None) -> bool:
     return MARKET_OPEN <= current_time <= MARKET_CLOSE
 
 
+def is_market_open(now: datetime | None = None) -> bool:
+    """Return True if the market is currently open (09:15–15:30 IST).
+
+    A debug override can force this path on outside market hours so cached/live
+    board analysis can be inspected without waiting for the next session.
+    """
+    if allow_off_hours_scan():
+        return True
+    return session_is_open(now)
+
+
 def seconds_to_market_open() -> float:
     """Return seconds until next market open (0 if already open)."""
+    if allow_off_hours_scan():
+        return 0.0
+
     now = datetime.now(IST)
     if is_market_open(now):
         return 0.0
@@ -108,3 +129,35 @@ def market_open_time_ist() -> str:
     hrs, rem = divmod(int(secs), 3600)
     mins, secs2 = divmod(rem, 60)
     return f"Market opens in {hrs}h {mins}m {secs2}s"
+
+
+def last_session_date(now: datetime | None = None) -> date:
+    """Most recent NSE session date (today if that session has started)."""
+    if now is None:
+        now = datetime.now(IST)
+    elif now.tzinfo is None:
+        now = IST.localize(now)
+    d = now.date()
+    if is_trading_day(d) and now.time().replace(tzinfo=None) >= MARKET_OPEN:
+        return d
+    from datetime import timedelta
+    d = d - timedelta(days=1)
+    while not is_trading_day(d):
+        d = d - timedelta(days=1)
+    return d
+
+
+def session_snapshot_ttl_seconds(now: datetime | None = None) -> int:
+    """Keep last-session board/quotes until the next open (weekend-safe)."""
+    try:
+        from app.core.config import get_settings
+        configured = int(getattr(get_settings(), "session_snapshot_ttl_secs", 259200) or 259200)
+    except Exception:
+        configured = 259200
+    until_open = int(seconds_to_market_open()) + 3600
+    return max(int(configured), until_open, 18 * 3600)
+
+
+def data_mode(now: datetime | None = None) -> str:
+    """UI freshness label. Debug off-hours harvest still shows as last_close."""
+    return "live" if session_is_open(now) else "last_close"

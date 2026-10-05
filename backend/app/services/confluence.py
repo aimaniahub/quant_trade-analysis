@@ -221,8 +221,6 @@ class ConfluenceEngine:
 
             chain = store.get_chain("NSE:NIFTY50-INDEX", 20)
             if not chain or not chain.get("success"):
-                chain = self.market.get_option_chain("NSE:NIFTY50-INDEX", strike_count=20)
-            if not chain.get("success"):
                 return None
             return self.intel.get_analysis_summary(chain, bypass_time_check=True)
         except Exception as exc:

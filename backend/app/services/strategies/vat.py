@@ -234,8 +234,8 @@ class EnhancedVATStrategy:
             # Get recent historical data (5-minute candles for last hour)
             hist_data = self.market_service.get_historical_data(
                 symbol=symbol,
-                resolution="5",
-                days=1
+                resolution="15",
+                days=5,
             )
             
             # get_historical_data returns "candles" (list of dicts with open/high/low/close)

@@ -1,0 +1,54 @@
+services:
+  # Backend Web Service (FastAPI + Background Radar & Schedulers)
+  - type: web
+    name: optiongreek-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: FYERS_APP_ID
+        sync: false
+      - key: FYERS_SECRET_KEY
+        sync: false
+      - key: FYERS_REDIRECT_URI
+        sync: false
+      - key: FYERS_ACCESS_TOKEN
+        sync: false
+      - key: FYERS_USER_ID
+        sync: false
+      - key: FYERS_PIN
+        sync: false
+      - key: FYERS_TOTP_SECRET
+        sync: false
+      - key: GROK_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: REDIS_ENABLED
+        value: "false"
+
+  # Frontend Web Service (Next.js Standalone Container on Render)
+  # NOTE: If you prefer frontend on Vercel, you can deploy only the backend on Render
+  # and point your Vercel frontend NEXT_PUBLIC_API_URL to this backend service!
+  - type: web
+    name: optiongreek-frontend
+    env: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_API_URL
+        value: /api/v1
+      - key: BACKEND_URL
+        fromService:
+          type: web
+          name: optiongreek-backend
+          property: host

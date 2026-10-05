@@ -13,8 +13,9 @@ Spec: Option_Flow_Radar_Complete_Specification_v3.txt
 
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 import math
+import threading
 import time
 import logging
 
@@ -23,6 +24,7 @@ from app.services.fyers_auth import get_auth_service
 from app.services.fno_stocks import (
     FNO_STOCKS,
     FNO_INDICES,
+    TOP_FNO_STOCKS,
     get_fno_universe,
     filter_valid_symbols,
     is_valid_symbol,
@@ -44,6 +46,8 @@ from app.services.radar_signal_engine import (
     count_cluster_hits,
     interpret_greeks,
     build_scored_contract,
+    derive_oi_change_pct,
+    MIN_PREMIUM_CHG_PCT,
 )
 from app.services.levels import get_levels_service
 from app.services.idea_book import get_idea_book, snapshot_from_contract
@@ -59,6 +63,13 @@ logger = logging.getLogger(__name__)
 ALL_FNO_STOCKS = filter_valid_symbols(list(FNO_STOCKS))
 INDICES_WATCHLIST = filter_valid_symbols(list(FNO_INDICES))
 ALL_FNO_WATCHLIST = filter_valid_symbols(get_fno_universe(include_indices=True))
+
+# Phase 2 harvest — concurrency hides RTT; limiter owns quota
+CHAIN_WORKERS = 4
+HARVEST_RPS = 3.0
+SYMBOL_TIMEOUT_SEC = 8.0
+RETRY_BACKOFF_SEC = 1.5
+MAX_CHAIN_RETRIES = 0
 
 # Human-readable name map (auto-builds from symbol, override specific ones)
 _OVERRIDES = {
@@ -128,27 +139,61 @@ class OptionFlowRadarService:
         self._last_scan_at: Optional[datetime] = None
         self._scan_running = False
         self._scan_heartbeat = 0.0
+        self._scan_lock = threading.Lock()
+        self._live_all_hits: List[Dict[str, Any]] = []
+        self._symbol_states: Dict[str, Dict[str, Any]] = {}
+        self._ok_chain = 0
+        self._attempted = 0
+        self._skipped_syms: List[str] = []
+        self._error_syms: List[str] = []
+        self._harvest_symbol_telemetry: List[Dict[str, Any]] = []
+        self._harvest_id: Optional[str] = None
+        self._harvest_t0 = 0.0
+        self._harvest_grants0 = 0
+        self._harvest_trips0 = 0
+        self._history_stop = threading.Event()
+        self._history_thread: Optional[threading.Thread] = None
+        self._board_lock = threading.Lock()
+        self._skip_symbols: set = set()
+        self._failed_remaining: List[str] = []
+        self._last_board_persist_at = 0.0
+        self._rescored_store = False
+        self._hot_symbols: List[str] = []
+        self._news_focus: List[Dict[str, Any]] = []
+
+    def set_news_focus(self, symbols: List[str], picks: Optional[List[Dict[str, Any]]] = None) -> None:
+        self._hot_symbols = [s for s in (symbols or []) if s]
+        self._news_focus = list(picks or [])
+
+    def get_hot_symbols(self) -> List[str]:
+        return list(self._hot_symbols)
 
     def _is_authenticated(self) -> bool:
         return bool(self.auth_service.get_fyers_model())
 
     def _persist_last_scan(self) -> None:
-        """Optional Redis durability for last radar scan (confluence after restart)."""
+        """Redis + memory durability for last radar board (restart-safe)."""
         if not self._last_scan or not self._last_scan_at:
             return
+        slim = dict(self._last_scan)
+        slim.pop("all_hits", None)
+        try:
+            from app.services import symbol_store as store
+            store.set_board(slim)
+        except Exception:
+            pass
         try:
             from app.services import redis_client as rc
             if not rc.is_available():
                 return
-            slim = dict(self._last_scan)
-            slim.pop("all_hits", None)
+            from app.services.symbol_store import session_snapshot_ttl
             rc.set_json(
                 rc.key("radar", "last_scan"),
                 {
                     "scan": slim,
                     "at": self._last_scan_at.isoformat(),
                 },
-                ttl=14400,
+                ttl=session_snapshot_ttl(),
             )
         except Exception:
             pass
@@ -156,45 +201,612 @@ class OptionFlowRadarService:
     def _hydrate_last_scan_from_redis(self) -> None:
         if self._last_scan:
             return
+        scan = None
+        at = None
         try:
-            from app.services import redis_client as rc
-            if not rc.is_available():
-                return
-            raw = rc.get_json(rc.key("radar", "last_scan"))
-            if not raw or not isinstance(raw, dict):
-                return
-            scan = raw.get("scan")
-            at = raw.get("at")
-            if not scan:
-                return
-            self._last_scan = scan
-            try:
-                self._last_scan_at = datetime.fromisoformat(at) if at else datetime.now()
-            except Exception:
-                self._last_scan_at = datetime.now()
+            from app.services import symbol_store as store
+            scan = store.get_board()
         except Exception:
-            pass
+            scan = None
+        if not scan:
+            try:
+                from app.services import redis_client as rc
+                if rc.is_available():
+                    raw = rc.get_json(rc.key("radar", "last_scan"))
+                    if isinstance(raw, dict):
+                        scan = raw.get("scan")
+                        at = raw.get("at")
+            except Exception:
+                scan = None
+        if not scan:
+            return
+        self._last_scan = scan
+        try:
+            self._last_scan_at = datetime.fromisoformat(at) if at else datetime.now()
+        except Exception:
+            self._last_scan_at = datetime.now()
 
     def get_cached_scan(self, max_age_seconds: int = 900) -> Optional[Dict[str, Any]]:
-        """Return last scan if fresh enough (memory, then Redis)."""
+        """Return last scan if fresh enough (memory, then Redis / last session)."""
         self._hydrate_last_scan_from_redis()
-        if not self._last_scan or not self._last_scan_at:
+        last = self._last_scan
+        at = self._last_scan_at
+        if not last:
+            try:
+                from app.services import symbol_store as store
+                last = store.get_session_board()
+            except Exception:
+                last = None
+            if last:
+                at = None
+        if not last:
             return None
-        age = (datetime.now() - self._last_scan_at).total_seconds()
-        if age > max_age_seconds:
+        age = None
+        if at:
+            age = (datetime.now() - at).total_seconds()
+            if age > max_age_seconds:
+                # Display path may still want last_session; callers that need
+                # freshness use a large max_age. Drop only when explicitly tight.
+                if max_age_seconds < 3600:
+                    return None
+        return self._annotate_board({**last, "cache_age_seconds": round(age, 1) if age is not None else None})
+
+    def _annotate_board(self, board: Dict[str, Any]) -> Dict[str, Any]:
+        from app.utils.market_hours import data_mode, last_session_date, market_open_time_ist, session_is_open
+        out = dict(board)
+        live = session_is_open()
+        out["market_hours"] = live
+        out["data_mode"] = data_mode()
+        out["session_date"] = out.get("session_date") or last_session_date().isoformat()
+        out["as_of"] = out.get("timestamp") or out.get("as_of")
+        out["next_open"] = market_open_time_ist() if not live else "Market is OPEN"
+        return out
+
+    def pin_last_session(self) -> Optional[Dict[str, Any]]:
+        """Freeze the current board as the after-hours last-session snapshot."""
+        self._hydrate_last_scan_from_redis()
+        last = self._last_scan
+        if not last:
+            try:
+                from app.services import symbol_store as store
+                last = store.get_board()
+            except Exception:
+                last = None
+        if not last:
             return None
-        return {**self._last_scan, "cache_age_seconds": round(age, 1)}
+        pinned = self._annotate_board(dict(last))
+        pinned["data_mode"] = "last_close"
+        try:
+            from app.services import symbol_store as store
+            store.set_session_board(pinned)
+        except Exception:
+            pass
+        return pinned
 
     def get_last_scan(self) -> Optional[Dict[str, Any]]:
         self._hydrate_last_scan_from_redis()
-        if not self._last_scan:
+        last = self._last_scan
+        if (
+            last
+            and not self._scan_running
+            and not self._rescored_store
+            and not (last.get("flagged") or last.get("flow") or last.get("watch"))
+            and int(last.get("ok_chain") or 0) > 0
+        ):
+            self._rescored_store = True
+            threading.Thread(
+                target=self.rescore_from_store,
+                name="radar-rescore",
+                daemon=True,
+            ).start()
+        if not last:
+            try:
+                from app.services import symbol_store as store
+                last = store.get_session_board() or store.get_board()
+            except Exception:
+                last = None
+            if last:
+                self._last_scan = last
+        if not last:
             return None
         age = (
             (datetime.now() - self._last_scan_at).total_seconds()
             if self._last_scan_at
             else None
         )
-        return {**self._last_scan, "cache_age_seconds": age, "scan_running": self._scan_running}
+        return self._annotate_board({**last, "cache_age_seconds": age, "scan_running": self._scan_running})
+
+    def rescore_from_store(self) -> Dict[str, Any]:
+        """Re-run LIS/process on chains already in the book — 0 Fyers calls."""
+        if getattr(self, "_rescore_running", False):
+            return self._last_scan or {}
+        self._rescore_running = True
+        try:
+            return self._rescore_from_store_body()
+        finally:
+            self._rescore_running = False
+
+    def _rescore_from_store_body(self) -> Dict[str, Any]:
+        from app.services import symbol_store as store
+        from app.services.chain_desk import evaluate
+        from app.services.chain_anomaly import summarize_report
+
+        watch = filter_valid_symbols(ALL_FNO_WATCHLIST)
+        for row in (self._last_scan or {}).get("symbol_states") or []:
+            sym = (row or {}).get("symbol")
+            if sym and sym not in self._symbol_states:
+                self._symbol_states[str(sym)] = dict(row)
+        hits: List[Dict[str, Any]] = []
+        for sym in watch:
+            chain_resp = store.get_chain(sym, 14) or {}
+            if not chain_resp.get("success") or len(chain_resp.get("chain") or []) < 2:
+                continue
+            try:
+                report = evaluate(
+                    sym,
+                    chain_resp,
+                    name=_sym_name(sym),
+                    pass_id=str((self._last_scan or {}).get("pass_id") or "rescore"),
+                )
+                best = summarize_report(report)
+            except Exception as exc:
+                logger.debug("rescore %s: %s", sym, exc)
+                continue
+            hits.append(best)
+            fetch_status, grade = self._fetch_status_for(best, None)
+            self._symbol_states[sym] = {
+                **(self._symbol_states.get(sym) or {}),
+                "symbol": sym,
+                "name": _sym_name(sym),
+                "fetch_status": fetch_status,
+                "grade": grade,
+                "direction": best.get("chain_bias"),
+                "chain_bias": best.get("chain_bias"),
+                "pcr": best.get("oi_pcr"),
+                "spot": best.get("spot"),
+                "signal": (best.get("top_anomaly") or {}).get("label"),
+                "setup_score": best.get("setup_score"),
+                "flags": best.get("flags") or {},
+                "error": None,
+            }
+        self._live_all_hits = hits
+        self._ok_chain = max(int(self._ok_chain or 0), len(hits))
+        total = int((self._last_scan or {}).get("universe_requested") or len(watch) or 1)
+        board = self._publish_live_board(
+            total=total,
+            pass_id=str((self._last_scan or {}).get("pass_id") or "rescore"),
+            phase="idle",
+            persist=True,
+        )
+        self._last_board_persist_at = 0.0
+        self._persist_last_scan()
+        logger.info(
+            "RESCORE_STORE hits=%s tradeable=%s watch=%s",
+            len(hits),
+            len(board.get("flagged") or []),
+            len(board.get("watch") or []),
+        )
+        return board
+
+    def _load_skip_symbols(self) -> None:
+        """Load only confirmed invalid symbols; transient failures must retry."""
+        try:
+            from app.services import symbol_store as store
+            from app.services.fno_stocks import is_valid_symbol
+
+            meta = store.get_harvest_meta() or {}
+            for s in meta.get("skip_symbols") or []:
+                if isinstance(s, str) and s and not is_valid_symbol(s):
+                    self._skip_symbols.add(s)
+        except Exception:
+            pass
+
+    def _persist_skip_symbols(self) -> None:
+        try:
+            from app.services import symbol_store as store
+
+            store.set_harvest_meta({"skip_symbols": sorted(self._skip_symbols)})
+        except Exception:
+            pass
+
+    def _is_hard_fail(self, err: Optional[str]) -> bool:
+        """Return True only when Fyers confirms that the symbol is invalid."""
+        if not err:
+            return False
+        e = str(err).lower()
+        return "invalid symbol" in e or ("invalid" in e and "symbol" in e)
+
+    def _fetch_status_for(self, hit: Optional[Dict[str, Any]], err: Optional[str]) -> Tuple[str, Optional[str]]:
+        """Return (fetch_status, grade). Grade is independent of fetch outcome."""
+        if hit:
+            return "SUCCESS", hit.get("grade") or "QUIET"
+        if not err:
+            return "SUCCESS", "QUIET"
+        e = str(err).lower()
+        if e in ("timeout", "invalid_symbol", "left_behind") or e.startswith("invalid_symbol"):
+            return "SKIPPED", None
+        if "quota" in e or "rate" in e or "429" in e or e == "wait":
+            return "SKIPPED", None
+        return "ERROR", None
+
+    def _repartition_hits(self, all_hits: List[Dict[str, Any]]) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
+        try:
+            from app.services.chain_anomaly import apply_universe_rank
+            apply_universe_rank(all_hits)
+        except Exception:
+            pass
+
+        def _rank(x: Dict[str, Any]) -> tuple:
+            top = x.get("top_anomaly") or {}
+            return (
+                0 if x.get("grade") == "TRADEABLE" else 1,
+                0 if (x.get("flags") or {}).get("unique") else 1,
+                -float(x.get("unique_score") or 0),
+                -float(x.get("setup_score") or 0),
+                0 if x.get("trade") else 1,
+                -float(top.get("oi_added") or 0),
+                str(x.get("symbol") or ""),
+            )
+
+        radar = [h for h in all_hits if h.get("grade") == "TRADEABLE"]
+        watch_list = [h for h in all_hits if h.get("grade") == "WATCH"]
+        flow = [h for h in all_hits if h.get("grade") in ("TRADEABLE", "WATCH")]
+        alert_box = [
+            h for h in all_hits
+            if (h.get("top_anomaly") or {}).get("type") in (
+                "WALL_SUPPORT", "WALL_RESISTANCE", "CLUSTER", "OTM_SIZE", "WALL_SHIFT"
+            )
+        ]
+        radar.sort(key=_rank)
+        watch_list.sort(key=_rank)
+        alert_box.sort(key=_rank)
+        flow.sort(key=_rank)
+        self._stamp_present_volume_flags(all_hits)
+        return radar, watch_list, alert_box, flow
+
+    def _stamp_present_volume_flags(self, hits: List[Dict[str, Any]]) -> None:
+        """Fill present-session option volume on every harvest row. Do not rewrite engine flags."""
+        for h in hits:
+            tot = 0.0
+            try:
+                tot = float(
+                    ((h.get("flags") or {}).get("opt_volume"))
+                    or ((h.get("volume") or {}).get("total_volume"))
+                    or h.get("chain_volume")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                tot = 0.0
+            flags = dict(h.get("flags") or {})
+            flags["opt_volume"] = tot
+            h["flags"] = flags
+            h["chain_volume"] = tot
+
+    def _screen_rows(self, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Slim universe for the middle AND-filter pane (includes QUIET)."""
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for h in hits:
+            sym = h.get("symbol")
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            flags = h.get("flags") or {}
+            top = h.get("top_anomaly") or {}
+            out.append({
+                "symbol": sym,
+                "name": h.get("name"),
+                "grade": h.get("grade"),
+                "chain_bias": h.get("chain_bias"),
+                "setup_score": h.get("setup_score"),
+                "flags": flags,
+                "spot": h.get("spot"),
+                "put_wall": h.get("put_wall"),
+                "call_wall": h.get("call_wall"),
+                "chain_volume": h.get("chain_volume")
+                or (h.get("volume") or {}).get("total_volume")
+                or flags.get("opt_volume"),
+                "session": h.get("session") or {},
+                "top_anomaly": {
+                    "type": top.get("type"),
+                    "oi_added": top.get("oi_added"),
+                    "volume": top.get("volume"),
+                    "strike": top.get("strike"),
+                    "vor": top.get("vor") or flags.get("vor"),
+                    "oi_velocity": top.get("oi_velocity"),
+                    "label": top.get("label"),
+                } if top else None,
+                "top_anomaly_label": h.get("top_anomaly_label") or top.get("label"),
+                "vor": top.get("vor") or flags.get("vor"),
+                "ts": h.get("ts"),
+                "unique_score": h.get("unique_score") or flags.get("unique_score"),
+                "why_not": h.get("why_not"),
+            })
+        try:
+            from app.services.chain_anomaly import cap_screen_by_tag
+            return cap_screen_by_tag(out)
+        except Exception:
+            return out
+
+    def _live_board_shell(self, *, total: int, pass_id: str, phase: str) -> Dict[str, Any]:
+        flagged, watch_list, alert_box, flow = self._repartition_hits(self._live_all_hits)
+        skipped = list(self._skipped_syms)
+        errors = list(self._error_syms)
+        ok_chain = int(self._ok_chain)
+        attempted = int(self._attempted)
+        failed_remaining = list(self._failed_remaining)
+        quiet_n = sum(1 for h in self._live_all_hits if h.get("grade") == "QUIET")
+        return {
+            "success": True,
+            "engine": "v6-anomaly",
+            "phase": phase,
+            "pass_id": pass_id,
+            "scanned": attempted,
+            "attempted": attempted,
+            "ok_chain": ok_chain,
+            "hits": len(flagged) + len(watch_list),
+            "universe_requested": total,
+            "total": total,
+            "total_flagged": len(flagged),
+            "partial": ok_chain < total,
+            "flagged": flagged,
+            "tradeable": flagged,
+            "watch": watch_list,
+            "bullish": [h for h in flow if h.get("chain_bias") == "BULLISH"],
+            "bearish": [h for h in flow if h.get("chain_bias") == "BEARISH"],
+            "top": (flagged or flow)[:8],
+            "flow": flow,
+            "unique": [h for h in flagged if (h.get("flags") or {}).get("unique")][:12],
+            "screen": self._screen_rows(self._live_all_hits),
+            "alert_box": alert_box,
+            "quiet_count": quiet_n,
+            "all_hits": [h for h in self._live_all_hits if h.get("grade") in ("TRADEABLE", "WATCH")],
+            "skipped": skipped,
+            "errors": errors,
+            "symbol_states": list(self._symbol_states.values()),
+            "scan_running": True,
+            "retry_attempted": 0,
+            "retry_recovered": 0,
+            "failed_remaining": failed_remaining,
+            "grade_counts": {
+                "TRADEABLE": len(flagged),
+                "WATCH": len(watch_list),
+                "QUIET": quiet_n,
+            },
+            "completion_pct": round(100.0 * min(attempted, total) / max(total, 1), 1),
+            "timestamp": datetime.now().isoformat(),
+            "market_hours": self._is_market_hours(),
+        }
+
+    def _publish_live_board(
+        self,
+        *,
+        total: int,
+        pass_id: str,
+        phase: str,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        board = self._live_board_shell(total=total, pass_id=pass_id, phase=phase)
+        board["ideas"] = [h for h in (board.get("tradeable") or board.get("flagged") or []) if h.get("trade")]
+        board["idea_counts"] = {"active": len(board["ideas"])}
+        self._last_scan = board
+        self._last_scan_at = datetime.now()
+        if persist:
+            now = time.time()
+            # In-memory board is always current; Redis persist is throttled so
+            # 4 workers don't serialize on a growing snapshot.
+            if now - float(self._last_board_persist_at or 0) >= 0.6:
+                self._last_board_persist_at = now
+                self._persist_last_scan()
+        return board
+
+    def _upsert_symbol_state(
+        self,
+        symbol: str,
+        *,
+        hit: Optional[Dict[str, Any]] = None,
+        err: Optional[str] = None,
+        fetch_status: str,
+        grade: Optional[str] = None,
+        ms: int = 0,
+        retries: int = 0,
+        quota_wait: float = 0.0,
+        cache_hit: bool = False,
+        total: int = 0,
+        pass_id: str = "",
+        phase: str = "chains",
+    ) -> None:
+        row = hit or {}
+        self._symbol_states[symbol] = {
+            "symbol": symbol,
+            "name": _sym_name(symbol),
+            "fetch_status": fetch_status,
+            "grade": grade,
+            "ms": int(ms or 0),
+            "error": (str(err)[:120] if err else None),
+            "retries": int(retries or 0),
+            "lis": 0,
+            "strike": (row.get("trade") or {}).get("strike") or (row.get("top_anomaly") or {}).get("strike"),
+            "type": (row.get("trade") or {}).get("instrument") or (row.get("top_anomaly") or {}).get("side"),
+            "direction": row.get("chain_bias"),
+            "pcr": row.get("oi_pcr") or (row.get("structure") or {}).get("oi_pcr"),
+            "spot": row.get("spot"),
+            "signal": (row.get("top_anomaly") or {}).get("label") or row.get("regime"),
+            "chain_bias": row.get("chain_bias"),
+            "why_not": row.get("why_not"),
+            "setup_score": row.get("setup_score"),
+            "flags": row.get("flags") or {},
+        }
+        self._harvest_symbol_telemetry.append({
+            "harvest_id": pass_id or self._harvest_id,
+            "symbol": symbol,
+            "latency": int(ms or 0),
+            "status": fetch_status,
+            "retry_count": int(retries or 0),
+            "quota_wait": round(float(quota_wait or 0.0), 2),
+            "cache_hit": bool(cache_hit),
+            "grade": grade,
+        })
+        if hit:
+            self._live_all_hits = [
+                r for r in self._live_all_hits if r.get("symbol") != symbol
+            ]
+            self._live_all_hits.append(hit)
+        try:
+            from app.services import symbol_store as store
+            store.put(symbol, {
+                "radar": {
+                    "grade": grade,
+                    "chain_bias": (hit or {}).get("chain_bias"),
+                    "hit": bool(hit) and (hit or {}).get("grade") in ("TRADEABLE", "WATCH"),
+                    "fetch_status": fetch_status,
+                    "ts": time.time(),
+                }
+            })
+        except Exception:
+            pass
+        self._publish_live_board(total=total, pass_id=pass_id, phase=phase, persist=True)
+
+    def build_harvest_priority(self, watch: List[str]) -> Tuple[List[str], List[str]]:
+        """Ordered harvest queue + TOP 34 set (indices + TOP_FNO_STOCKS)."""
+        watch_set = set(watch)
+        seen: set = set()
+        ordered: List[str] = []
+
+        def _add(syms: List[str]) -> None:
+            for s in syms:
+                if s in watch_set and s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+
+        last = self._last_scan or {}
+        locked: List[str] = []
+        try:
+            book = get_idea_book().board(limit=25)
+            for idea in (book.get("active") or []) + (book.get("confirmed") or []):
+                if idea.get("symbol"):
+                    locked.append(str(idea["symbol"]))
+        except Exception:
+            pass
+        prev_hits: List[str] = []
+        for row in (last.get("flagged") or []):
+            if row.get("grade") in ("A+", "A") and row.get("symbol"):
+                prev_hits.append(str(row["symbol"]))
+
+        _add(locked)
+        try:
+            _add(list(self._hot_symbols or []))
+        except Exception:
+            pass
+        _add(prev_hits)
+        _add(filter_valid_symbols(list(FNO_INDICES)))
+        _add(filter_valid_symbols(list(TOP_FNO_STOCKS)))
+        top34 = filter_valid_symbols(list(dict.fromkeys([*FNO_INDICES, *TOP_FNO_STOCKS])))
+        top34 = [s for s in top34 if s in watch_set]
+        rest = [s for s in watch if s not in seen]
+        _add(rest)
+        for s in watch:
+            if s not in seen:
+                ordered.append(s)
+        return ordered, top34
+
+    def _harvest_futures_batch(self, symbols: List[str]) -> int:
+        """One quotes call per ≤50 futures — not N serial REST calls."""
+        from app.services.levels import (
+            classify_futures_buildup,
+            fut_symbol_for,
+            get_levels_service,
+        )
+        from app.services import symbol_store as store
+
+        def _f(v):
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        mapping: Dict[str, str] = {}
+        futs: List[str] = []
+        for s in dict.fromkeys([x for x in symbols if x]):
+            fs = fut_symbol_for(s)
+            if not fs:
+                continue
+            mapping[fs] = s
+            futs.append(fs)
+        if not futs:
+            return 0
+        calls = 0
+        levels = get_levels_service()
+        for i in range(0, len(futs), 50):
+            chunk = futs[i: i + 50]
+            calls += 1
+            try:
+                q = self.market_service.get_quotes(chunk)
+            except Exception as exc:
+                logger.warning("futures batch %s: %s", i, exc)
+                continue
+            by_name = {}
+            for item in q.get("data") or []:
+                n = str(item.get("n") or "")
+                by_name[n] = item
+            for fut in chunk:
+                item = by_name.get(fut)
+                if item is None:
+                    for n, it in by_name.items():
+                        if fut in n or n.endswith(fut.split(":")[-1]):
+                            item = it
+                            break
+                if item is None and q.get("data") and len(chunk) == 1:
+                    item = q["data"][0]
+                if not item:
+                    continue
+                v = item.get("v") or {}
+                lp = _f(v.get("lp"))
+                chp = _f(v.get("chp"))
+                oi = v.get("oi") if v.get("oi") is not None else v.get("open_interest")
+                oi_f = _f(oi)
+                prev_oi = v.get("poi") or v.get("prev_oi") or v.get("previous_oi")
+                under = mapping.get(fut)
+                if prev_oi is not None and oi_f is not None:
+                    oi_chg = oi_f - _f(prev_oi)
+                elif under and oi_f is not None and under in levels._fut_last_oi:
+                    oi_chg = oi_f - levels._fut_last_oi[under]
+                else:
+                    oi_chg = None
+                if under and oi_f is not None:
+                    levels._fut_last_oi[under] = oi_f
+                packed = classify_futures_buildup(chp, oi_chg, oi_f)
+                packed.update({"ok": True, "symbol": fut, "ltp": lp, "change_pct": chp})
+                if under:
+                    store.put_futures(under, packed)
+                    levels._fut_cache[under] = (time.time(), packed)
+        return calls
+
+    def _stop_history_sweeper(self) -> None:
+        """Pause the process-wide sweeper so it cannot compete with chain harvest."""
+        self._history_stop.set()
+        try:
+            from app.services.history_sweeper import get_history_sweeper
+            get_history_sweeper().pause()
+        except Exception:
+            pass
+
+    def _start_history_sweeper(self, symbols: List[str]) -> None:
+        """Start leftover-RPM history fills AFTER chains finish. Never at boot."""
+        try:
+            from app.services.history_sweeper import get_history_sweeper
+            from app.services.rate_limiter import get_fyers_limiter
+
+            sw = get_history_sweeper()
+            sw.nudge(list(symbols or []))
+            if get_fyers_limiter().in_cooldown:
+                sw.pause()
+                logger.info("history sweeper stays paused — fyers cooldown")
+                return
+            sw.start()
+            sw.resume()
+        except Exception as exc:
+            logger.debug("history sweeper start: %s", exc)
 
     # ── Underlying spot + 5-min history ──────────────────────────
 
@@ -305,6 +917,59 @@ class OptionFlowRadarService:
 
     # ── Process option chain → best single strike (v3 multi-layer) ─
 
+    def _structural_candidate(self, chain: List[Dict[str, Any]], spot: float) -> Optional[Dict[str, Any]]:
+        """Highest volume/OI ATM-ish contract when unusual-flow filters find nothing."""
+        best: Optional[Dict[str, Any]] = None
+        best_score = -1.0
+        if not chain or not spot:
+            return None
+        for row in chain:
+            strike = row.get("strike_price")
+            if not strike or strike <= 0:
+                continue
+            atm_dist_pct = abs(float(strike) - float(spot)) / float(spot) * 100
+            if atm_dist_pct > MAX_ATM_DISTANCE_PCT:
+                continue
+            for opt_type, key in [("CE", "call"), ("PE", "put")]:
+                opt = row.get(key)
+                if not opt:
+                    continue
+                oi = float(opt.get("oi") or 0)
+                volume = float(opt.get("volume") or 0)
+                ltp = float(opt.get("ltp") or 0)
+                if oi <= 0 and volume <= 0:
+                    continue
+                score = volume + oi * 0.02
+                if score <= best_score:
+                    continue
+                best_score = score
+                ltp_chg = float(opt.get("chg_pct") or 0)
+                oi_pct = derive_oi_change_pct(opt)
+                if opt_type == "CE":
+                    direction = "BULLISH" if ltp_chg >= 0 else "BEARISH"
+                else:
+                    direction = "BEARISH" if ltp_chg >= 0 else "BULLISH"
+                best = {
+                    "strike": strike,
+                    "opt_type": opt_type,
+                    "opt": opt,
+                    "atm_dist_pct": atm_dist_pct,
+                    "oi_change_pct": oi_pct,
+                    "ltp_chg_pct": ltp_chg,
+                    "oi": oi,
+                    "volume": volume,
+                    "ltp": ltp,
+                    "iv": float(opt.get("iv") or 0),
+                    "prelim_signal": {
+                        "signal": "ACCUMULATION",
+                        "label": "Chain structure",
+                        "icon": "🔵",
+                        "color": "blue",
+                        "direction": direction,
+                    },
+                }
+        return best
+
     def _process_option_chain(
         self,
         symbol: str,
@@ -314,6 +979,7 @@ class OptionFlowRadarService:
         fetch_vol_history: bool = False,
         enrich_underlying: bool = True,
         attach_heavy: bool = True,
+        attach_process: bool = True,
         chain_resp: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -373,25 +1039,50 @@ class OptionFlowRadarService:
                 opt = row.get(key)
                 if not opt:
                     continue
-                oi_change_pct = float(opt.get("oi_change_pct") or 0)
+                oi_change_pct = derive_oi_change_pct(opt)
                 ltp_chg_pct = float(opt.get("chg_pct") or 0)
                 oi = float(opt.get("oi") or 0)
                 volume = float(opt.get("volume") or 0)
                 ltp = float(opt.get("ltp") or 0)
                 iv = float(opt.get("iv") or 0)
 
-                if oi <= 0 or volume <= 0:
+                if oi <= 0 and volume <= 0:
                     continue
-                if abs(oi_change_pct) < MIN_OI_CHANGE_PCT:
-                    continue
-                if volume < MIN_OPTION_VOLUME:
+                if (
+                    abs(oi_change_pct) < MIN_OI_CHANGE_PCT
+                    and volume < MIN_OPTION_VOLUME
+                    and abs(ltp_chg_pct) < MIN_PREMIUM_CHG_PCT
+                ):
                     continue
 
                 prelim_sig = classify_signal(
                     oi_change_pct, ltp_chg_pct, ul_chg_pct, opt_type=opt_type
                 )
                 if prelim_sig.get("signal") == "NEUTRAL":
-                    continue
+                    if volume >= MIN_OPTION_VOLUME and abs(ltp_chg_pct) >= MIN_PREMIUM_CHG_PCT:
+                        if opt_type == "CE":
+                            direction = "BULLISH" if ltp_chg_pct > 0 else "BEARISH"
+                            label = "Call premium bid" if ltp_chg_pct > 0 else "Call premium dump"
+                        else:
+                            direction = "BEARISH" if ltp_chg_pct > 0 else "BULLISH"
+                            label = "Put premium bid" if ltp_chg_pct > 0 else "Put premium dump"
+                        prelim_sig = {
+                            "signal": "ACCUMULATION",
+                            "label": label,
+                            "icon": "🔵",
+                            "color": "blue",
+                            "direction": direction,
+                        }
+                    elif volume >= MIN_OPTION_VOLUME or oi >= 50_000:
+                        prelim_sig = {
+                            "signal": "ACCUMULATION",
+                            "label": "Tape / OI build",
+                            "icon": "🔵",
+                            "color": "blue",
+                            "direction": "NEUTRAL",
+                        }
+                    else:
+                        continue
 
                 candidates.append({
                     "strike": strike,
@@ -408,7 +1099,15 @@ class OptionFlowRadarService:
                 })
 
         if not candidates:
-            return None
+            fallback = self._structural_candidate(chain, spot)
+            if fallback:
+                candidates = [fallback]
+            else:
+                try:
+                    get_idea_book().ingest_neutral(symbol, float(spot or 0))
+                except Exception:
+                    pass
+                return None
 
         def prelim_score(c: Dict) -> float:
             atm_boost = max(0.0, 1.0 - (c["atm_dist_pct"] / MAX_ATM_DISTANCE_PCT))
@@ -491,11 +1190,34 @@ class OptionFlowRadarService:
                 scored.append(row)
 
         if not scored:
-            try:
-                get_idea_book().ingest_neutral(symbol, float(spot or 0))
-            except Exception:
-                pass
-            return None
+            fallback = self._structural_candidate(chain, spot)
+            if fallback:
+                row = build_scored_contract(
+                    symbol=symbol,
+                    name=sym_name,
+                    nearest_expiry=nearest_expiry,
+                    cand=fallback,
+                    signal=fallback.get("prelim_signal") or classify_signal(
+                        fallback["oi_change_pct"], fallback["ltp_chg_pct"], ul_chg_pct,
+                        opt_type=fallback["opt_type"],
+                    ),
+                    vol_3day_avg=0.0,
+                    vol_spike_ratio=1.0,
+                    vol_spike_source="chain_median",
+                    spot=float(spot or 0),
+                    ul_chg_pct=ul_chg_pct,
+                    vwap_dev=vwap_dev,
+                    above_ema=above_ema,
+                    cluster_hits=1,
+                )
+                if row:
+                    scored.append(row)
+            if not scored:
+                try:
+                    get_idea_book().ingest_neutral(symbol, float(spot or 0))
+                except Exception:
+                    pass
+                return None
 
         # Best by composite (LIS + greek + unusual), then grade, then LIS
         _g = {"A+": 4, "A": 3, "B": 2, "C": 1}
@@ -509,6 +1231,8 @@ class OptionFlowRadarService:
             reverse=True,
         )
         best = scored[0]
+        if chain_resp.get("pcr") is not None:
+            best["pcr"] = chain_resp.get("pcr")
         opposing = False
         if len(scored) >= 2:
             d0 = (scored[0].get("direction") or "").upper()
@@ -528,6 +1252,9 @@ class OptionFlowRadarService:
                 best["vwap_dev_pct"] = rich.get("vwap_dev_pct", best.get("vwap_dev_pct"))
                 best["above_ema20"] = rich.get("above_ema20", best.get("above_ema20"))
                 best["spot"] = rich.get("ltp") or best.get("spot")
+
+        if not attach_process:
+            return best
 
         return self._attach_process_trade(
             symbol,
@@ -622,9 +1349,25 @@ class OptionFlowRadarService:
         }
 
     def _harvest_quotes_pass(self, symbols: List[str]) -> None:
-        """Pass A — batched quotes (≤50) into the symbol store."""
-        from app.services import symbol_store as store
+        """Pass A — batched quotes (≤50) into the symbol store.
+
+        Skipped when the WebSocket is connected (ticks may not have arrived
+        yet — REST quotes still burn quota). Also skipped in cooldown.
+        """
         from app.services.fno_stocks import filter_valid_symbols
+        from app.services.rate_limiter import get_fyers_limiter
+
+        if get_fyers_limiter().in_cooldown:
+            logger.info("harvest quotes skip — fyers cooldown")
+            return
+        try:
+            from app.services.spot_stream import get_spot_stream
+            stream = get_spot_stream()
+            if stream.is_connected() or stream.is_live():
+                logger.info("harvest quotes skip — websocket connected")
+                return
+        except Exception:
+            pass
 
         universe = filter_valid_symbols(list(dict.fromkeys([
             *symbols,
@@ -633,6 +1376,9 @@ class OptionFlowRadarService:
         ])))
         logger.info("harvest quotes pass n=%s", len(universe))
         for i in range(0, len(universe), 50):
+            if get_fyers_limiter().in_cooldown:
+                logger.info("harvest quotes abort — cooldown after chunk %s", i)
+                return
             chunk = universe[i: i + 50]
             try:
                 self.market_service.get_quotes(chunk)
@@ -807,6 +1553,7 @@ class OptionFlowRadarService:
         progress_callback(scanned, total, current_symbol, flagged_row|None, error|None)
         """
         from app.services import symbol_store as store
+        from app.services.rate_limiter import get_fyers_limiter
 
         if not self._is_authenticated():
             return {
@@ -816,42 +1563,72 @@ class OptionFlowRadarService:
                 "watch": [],
                 "alert_box": [],
             }
-        if self._scan_running:
-            stuck_for = time.time() - float(getattr(self, "_scan_heartbeat", 0) or 0)
-            if stuck_for < 90:
-                return {
-                    "success": False,
-                    "error": "Scan already running",
-                    "flagged": [],
-                    "watch": [],
-                    "alert_box": [],
-                }
-            logger.warning("Radar stealing stuck scan lock (idle %.0fs)", stuck_for)
+        if not self._scan_lock.acquire(blocking=False):
+            return {
+                "success": False,
+                "error": "Scan already running",
+                "flagged": [],
+                "watch": [],
+                "alert_box": [],
+                "scan_running": True,
+            }
 
         self._scan_running = True
         self._scan_heartbeat = time.time()
-        watch = filter_valid_symbols(symbols or ALL_FNO_WATCHLIST)
-        try:
-            prev_fail = list((store.get_harvest_meta() or {}).get("failed_remaining") or [])
-            if prev_fail:
-                head = [s for s in prev_fail if s in watch]
-                tail = [s for s in watch if s not in head]
-                watch = head + tail
-                logger.info("Radar prioritizing %s previously missed chains", len(head))
-        except Exception:
-            pass
-        total = len(watch)
+        self._rescored_store = False
+        self._stop_history_sweeper()
+        self._load_skip_symbols()
+        raw_watch = filter_valid_symbols(symbols or ALL_FNO_WATCHLIST)
+        excluded = [s for s in raw_watch if s in self._skip_symbols]
+        watch = [s for s in raw_watch if s not in self._skip_symbols]
+        total = len(raw_watch)
         all_hits: List[Dict] = []
         errors: List[str] = []
         scanned = 0
         rate_limited_skips = 0
-        SYMBOL_TIMEOUT_SEC = 25.0
-        BATCH_SIZE = 12
-        BATCH_SLEEP = 0.2
-        CHAIN_WAIT_ATTEMPTS = 6
         pass_id = f"h{int(time.time())}"
+        limiter = get_fyers_limiter()
+        self._harvest_id = pass_id
+        self._harvest_t0 = time.perf_counter()
+        self._harvest_grants0 = int(limiter.total_grants)
+        self._harvest_trips0 = int(limiter.trip_count)
+        self._hydrate_last_scan_from_redis()
+        prev = self._last_scan or {}
+        seeded: List[Dict[str, Any]] = []
+        seen_seed = set()
+        for row in (prev.get("flagged") or []) + (prev.get("watch") or []) + (prev.get("alert_box") or []):
+            sym = (row or {}).get("symbol")
+            if not sym or sym in seen_seed:
+                continue
+            seen_seed.add(sym)
+            seeded.append(row)
+        self._live_all_hits = seeded
+        prev_states: Dict[str, Dict[str, Any]] = {}
+        for row in (prev.get("symbol_states") or []):
+            sym = (row or {}).get("symbol")
+            if sym:
+                prev_states[str(sym)] = dict(row)
+        self._symbol_states = prev_states
+        self._ok_chain = 0
+        self._attempted = 0
+        self._skipped_syms = list(excluded)
+        self._error_syms = []
+        self._harvest_symbol_telemetry = []
+        self._failed_remaining = list(excluded)
+        self._attempted = len(excluded)
+        for s in excluded:
+            self._symbol_states[s] = {
+                "symbol": s,
+                "name": _sym_name(s),
+                "fetch_status": "SKIPPED",
+                "grade": (self._symbol_states.get(s) or {}).get("grade"),
+                "ms": 0,
+                "error": "left_behind",
+                "retries": 0,
+            }
         _hw = store.harvest_writer()
         _hw.__enter__()
+        quotes_phase = "cooldown" if limiter.in_cooldown else "quotes"
         store.set_harvest_meta({
             "running": True,
             "started_at": datetime.now().isoformat(),
@@ -860,8 +1637,12 @@ class OptionFlowRadarService:
             "total": total,
             "current": None,
             "pass_id": pass_id,
-            "phase": "quotes",
+            "phase": quotes_phase,
+            "ok_chain": 0,
+            "attempted": len(excluded),
+            "cooldown_remaining": round(limiter.cooldown_remaining, 1),
         })
+        self._publish_live_board(total=total, pass_id=pass_id, phase=quotes_phase)
         try:
             self._harvest_quotes_pass(watch)
         except Exception as exc:
@@ -870,14 +1651,16 @@ class OptionFlowRadarService:
         def _progress(sym: str, flagged_row=None, err=None, *, status: str = "ok", ms: int = 0):
             if progress_callback:
                 try:
-                    progress_callback(scanned, total, sym, flagged_row, err, status, ms)
+                    progress_callback(self._attempted, total, sym, flagged_row, err, status, ms)
                 except TypeError:
                     try:
-                        progress_callback(scanned, total, sym, flagged_row, err)
+                        progress_callback(self._attempted, total, sym, flagged_row, err)
                     except Exception:
                         pass
                 except Exception:
                     pass
+
+        _tl = threading.local()
 
         def _scan_one(
             sym: str,
@@ -885,14 +1668,41 @@ class OptionFlowRadarService:
             chain_only: bool = False,
             force_chain: bool = False,
         ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+            from app.services import symbol_store as _st
+            if not _st.is_harvest_writer():
+                with _st.harvest_writer():
+                    return _scan_one(sym, chain_only=chain_only, force_chain=force_chain)
             if not is_valid_symbol(sym):
                 return None, "invalid_symbol"
+            stored = _st.get_chain(sym, strike_count) or {}
+            have_store = bool(stored.get("success") and len(stored.get("chain") or []) >= 2)
+            t_http = time.perf_counter()
+            if get_fyers_limiter().in_cooldown:
+                if have_store and not force_chain:
+                    chain_resp = stored
+                    try:
+                        _tl.http_ms = 0
+                        _tl.limiter_wait = 0.0
+                        _tl.cache_hit = True
+                    except Exception:
+                        pass
+                else:
+                    return None, "rate_limit"
+            else:
+                chain_resp = self.market_service.get_option_chain(
+                    sym, strike_count, force_refresh=force_chain
+                )
+                try:
+                    _tl.http_ms = int((time.perf_counter() - t_http) * 1000)
+                    _tl.limiter_wait = get_fyers_limiter().last_wait_s()
+                    _tl.cache_hit = bool(
+                        (chain_resp or {}).get("_store") or (chain_resp or {}).get("_cache") == "hit"
+                    )
+                except Exception:
+                    pass
             underlying = self._underlying_from_store(sym)
             if not underlying and not chain_only:
                 underlying = self._get_underlying_data(sym, light=True)
-            chain_resp = self.market_service.get_option_chain(
-                sym, strike_count, force_refresh=force_chain
-            )
             if not chain_resp or not chain_resp.get("success"):
                 why = (chain_resp or {}).get("error") or "no_chain"
                 return None, f"no_chain:{why}"[:120]
@@ -912,204 +1722,239 @@ class OptionFlowRadarService:
                     "candles_5min": [],
                     "light": True,
                 }
-            # Fast path: chain + LIS only. No 3-day hist, no 5m, no MTF.
-            best = self._process_option_chain(
-                sym,
-                underlying,
-                strike_count,
-                fetch_vol_history=False,
-                enrich_underlying=False,
-                attach_heavy=False,
-                chain_resp=chain_resp,
-            )
-            if best is None:
-                return None, None
-            if opt_type_filter and best.get("type") != opt_type_filter:
-                return None, None
-            if min_lis > 0 and float(best.get("lis") or 0) < min_lis:
-                return None, None
-            return best, None
+            from app.services.chain_desk import evaluate
+            from app.services.chain_anomaly import summarize_report
 
-        def _retryable(err: Optional[str]) -> bool:
-            if not err:
-                return False
-            e = str(err).lower()
-            if e == "invalid_symbol" or e.startswith("invalid_symbol"):
-                return False
-            return True
-
-        def _quota_err(err: Optional[str]) -> bool:
-            if not err:
-                return False
-            e = str(err).lower()
-            if e in ("invalid_symbol", "no_chain:empty", "no_underlying"):
-                return False
             try:
-                from app.services.rate_limiter import is_rate_limit_error
-                if is_rate_limit_error(e):
-                    return True
-            except Exception:
-                pass
-            return e == "timeout" or e.startswith("no_chain:")
+                report = evaluate(
+                    sym, chain_resp, name=_sym_name(sym), pass_id=self._harvest_id
+                )
+                summary = summarize_report(report)
+            except Exception as exc:
+                logger.warning("anomaly evaluate %s: %s", sym, exc)
+                return None, f"analyze:{exc}"[:120]
+            if opt_type_filter:
+                inst = ((summary.get("trade") or {}).get("instrument") or "")
+                if inst and inst != opt_type_filter:
+                    return None, None
+            return summary, None
 
         def _weight_hit(hit: Dict[str, Any]) -> Dict[str, Any]:
-            try:
-                from app.services.strategies.rsi_desk import weight_radar_row
+            return hit
 
-                return weight_radar_row(hit)
-            except Exception as wexc:
-                logger.debug("desk weight %s: %s", hit.get("symbol"), wexc)
-                return hit
-
-        logger.info("Radar harvest start n=%s strike_count=%s pass=%s", total, strike_count, pass_id)
-        store.set_harvest_meta({"phase": "chains", "running": True, "total": total})
-        workers = {"pool": ThreadPoolExecutor(max_workers=1, thread_name_prefix="radar-sym")}
-        failed_syms: List[str] = []
-        retry_attempted = 0
-        retry_recovered = 0
-
-        def _reset_pool() -> None:
-            try:
-                workers["pool"].shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                pass
-            workers["pool"] = ThreadPoolExecutor(max_workers=1, thread_name_prefix="radar-sym")
-
-        def _run_one(
-            sym: str,
-            timeout: float,
-            *,
-            chain_only: bool = False,
-            force_chain: bool = False,
-        ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-            nonlocal rate_limited_skips
-            try:
-                fut = workers["pool"].submit(
-                    _scan_one, sym, chain_only=chain_only, force_chain=force_chain
-                )
-                return fut.result(timeout=timeout)
-            except FuturesTimeout:
-                logger.warning("Radar skip %s — exceeded %.0fs", sym, timeout)
-                _reset_pool()
-                return None, "timeout"
-            except Exception as exc:
-                msg = str(exc)
-                if "invalid symbol" in msg.lower():
-                    mark_invalid_symbol(sym)
-                try:
-                    from app.services.rate_limiter import is_rate_limit_error
-                    if is_rate_limit_error(exc) or is_rate_limit_error(msg):
-                        rate_limited_skips += 1
-                except Exception:
-                    pass
-                logger.warning("Radar scan error for %s: %s", sym, exc)
-                return None, msg[:120]
-
-        def _cooldown_if_needed(cap: float = 120.0) -> None:
-            try:
-                from app.services.rate_limiter import get_fyers_limiter
-                lim = get_fyers_limiter()
-                if lim.in_cooldown:
-                    wait = min(max(lim.cooldown_remaining, 0.5), cap)
-                    logger.info("Radar cooldown %.0fs — staying on this name", wait)
-                    _sleep_hb(wait)
-            except Exception:
-                pass
-
-        def _sleep_hb(seconds: float) -> None:
-            end = time.time() + max(0.0, seconds)
-            while time.time() < end:
-                self._scan_heartbeat = time.time()
-                time.sleep(min(5.0, max(0.05, end - time.time())))
-
-        def _fetch_chain_wait(sym: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-            """Do not walk past this symbol on quota. Wait, then fetch again."""
-            nonlocal retry_attempted, retry_recovered
-            last_err = None
-            for attempt in range(CHAIN_WAIT_ATTEMPTS):
-                _cooldown_if_needed(120.0)
-                self._scan_heartbeat = time.time()
-                force = attempt > 0
-                hit, err = _run_one(
-                    sym,
-                    SYMBOL_TIMEOUT_SEC,
-                    chain_only=True,
-                    force_chain=force,
-                )
-                if not err:
-                    if attempt > 0:
-                        retry_recovered += 1
-                    return hit, None
-                last_err = err
-                if not _quota_err(err):
-                    return hit, err
-                retry_attempted += 1
-                try:
-                    from app.services.rate_limiter import get_fyers_limiter
-                    lim = get_fyers_limiter()
-                    if not lim.in_cooldown:
-                        lim.trip_limit(f"harvest {sym}: {err}")
-                    wait = min(max(lim.cooldown_remaining, 4.0), 45.0)
-                except Exception:
-                    wait = 8.0
-                _progress(sym, err=err, status="wait", ms=int(wait * 1000))
-                logger.info("Radar WAIT %s attempt %s/%s %s — sleep %.0fs", sym, attempt + 1, CHAIN_WAIT_ATTEMPTS, err, wait)
-                _sleep_hb(wait)
-            return None, last_err
+        from app.core.config import get_settings
+        from app.services.rate_limiter import HARVEST_MIN_INTERVAL, IDLE_MIN_INTERVAL
 
         try:
-            for batch_start in range(0, len(watch), BATCH_SIZE):
-                batch = watch[batch_start: batch_start + BATCH_SIZE]
-                for sym in batch:
-                    t0 = time.perf_counter()
-                    self._scan_heartbeat = time.time()
-                    _progress(sym, status="start")
-                    hit, err = _fetch_chain_wait(sym)
+            workers_n = int(get_settings().harvest_chain_workers or CHAIN_WORKERS)
+        except Exception:
+            workers_n = CHAIN_WORKERS
+        workers_n = max(1, min(workers_n, 4))
 
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    scanned += 1
-                    if hit:
-                        hit = _weight_hit(hit)
-                        all_hits.append(hit)
-                        _progress(sym, flagged_row=hit, status="hit", ms=ms)
-                        logger.info("Radar HIT %s %s%s lis=%.0f %dms", sym, hit.get("strike"), hit.get("type"), float(hit.get("lis") or 0), ms)
-                    elif err:
-                        errors.append(f"{sym}: {err}")
-                        if _retryable(err):
-                            failed_syms.append(sym)
-                        _progress(sym, err=err, status="err", ms=ms)
-                        logger.info("Radar %s %s %dms", err, sym, ms)
-                    else:
-                        _progress(sym, status="skip", ms=ms)
+        watch, top34 = self.build_harvest_priority(watch)
+        top34_set = set(top34)
+        limiter.set_min_interval(HARVEST_MIN_INTERVAL)
 
-                    store.set_harvest_meta({
-                        "scanned": scanned,
-                        "current": sym,
-                        "phase": "chains",
-                    })
+        logger.info(
+            "HARVEST_START pass=%s requested=%s walk=%s left_behind=%s workers=%s rps=%.1f top34=%s",
+            pass_id, total, len(watch), len(excluded), workers_n, HARVEST_RPS, len(top34),
+        )
+        store.set_harvest_meta({
+            "phase": "chains",
+            "running": True,
+            "total": total,
+            "workers": workers_n,
+            "left_behind": len(excluded),
+            "skip_symbols": sorted(self._skip_symbols),
+        })
+        failed_syms: List[str] = list(excluded)
+        retry_attempted = 0
+        retry_recovered = 0
+        top_tier_elapsed_sec: Optional[float] = None
+        rpm_peak = 0
+        futures_calls = 0
 
-                if batch_start + BATCH_SIZE < len(watch):
-                    _cooldown_if_needed(120.0)
-                    time.sleep(BATCH_SLEEP)
-
-            # History only after every name has had a real chance at a chain.
-            store.set_harvest_meta({"phase": "history", "running": True})
+        def _work(sym: str) -> Dict[str, Any]:
+            t0 = time.perf_counter()
+            retries = 0
             try:
-                from app.services.rate_limiter import get_fyers_limiter
-                for sym in watch:
-                    if get_fyers_limiter().in_cooldown:
+                hit, err = _scan_one(sym, chain_only=True, force_chain=False)
+                while err and retries < 2 and not self._is_hard_fail(err):
+                    if "rate_limit" in str(err).lower() or "429" in str(err).lower():
                         break
-                    try:
-                        self._maybe_harvest_history(sym)
-                    except Exception as hist_exc:
-                        logger.debug("harvest history %s: %s", sym, hist_exc)
-                    self._scan_heartbeat = time.time()
+                    retries += 1
+                    time.sleep(0.5 * retries)
+                    hit, err = _scan_one(sym, chain_only=True, force_chain=True)
+                if err and "invalid symbol" in str(err).lower():
+                    mark_invalid_symbol(sym)
+            except Exception as exc:
+                hit, err = None, str(exc)[:120]
+                if "invalid symbol" in str(exc).lower():
+                    mark_invalid_symbol(sym)
+            return {
+                "symbol": sym,
+                "hit": hit,
+                "err": err,
+                "retries": retries,
+                "ms": int((time.perf_counter() - t0) * 1000),
+                "http_ms": int(getattr(_tl, "http_ms", 0) or 0),
+                "limiter_wait": float(getattr(_tl, "limiter_wait", 0) or 0),
+                "cache_hit": bool(getattr(_tl, "cache_hit", False)),
+            }
+
+        def _accept(res: Dict[str, Any]) -> None:
+            nonlocal scanned, top_tier_elapsed_sec, rpm_peak, retry_attempted, retry_recovered, rate_limited_skips
+            sym = res["symbol"]
+            hit = res.get("hit")
+            err = res.get("err")
+            ms = int(res.get("ms") or 0)
+            retries_this = 0
+            try:
+                from app.services.rate_limiter import is_rate_limit_error
+                if res.get("err") and is_rate_limit_error(res.get("err")):
+                    rate_limited_skips += 1
             except Exception:
                 pass
+            scanned += 1
+            self._attempted = len(excluded) + scanned
+            self._scan_heartbeat = time.time()
+            try:
+                rpm_peak = max(rpm_peak, int(limiter.requests_last_minute()))
+            except Exception:
+                pass
+            if hit:
+                hit = _weight_hit(hit)
+                all_hits.append(hit)
+                self._ok_chain += 1
+                fetch_status, grade = self._fetch_status_for(hit, None)
+                prog_status = "hit"
+                logger.info(
+                    "CHAIN_DONE pass=%s symbol=%s latency_ms=%s grade=%s",
+                    pass_id, sym, ms, grade,
+                )
+            elif err:
+                errors.append(f"{sym}: {err}")
+                if self._is_hard_fail(err):
+                    if sym not in failed_syms:
+                        failed_syms.append(sym)
+                    self._skip_symbols.add(sym)
+                    self._failed_remaining = list(failed_syms)
+                fetch_status, grade = self._fetch_status_for(None, err)
+                if fetch_status == "SKIPPED":
+                    self._skipped_syms.append(sym)
+                else:
+                    self._error_syms.append(f"{sym}: {err}")
+                prog_status = "err"
+                logger.info(
+                    "CHAIN_SKIP pass=%s symbol=%s reason=%s left_behind=%s",
+                    pass_id, sym, err, self._is_hard_fail(err),
+                )
+            else:
+                self._ok_chain += 1
+                fetch_status, grade = "SUCCESS", "NO_SIGNAL"
+                prog_status = "skip"
+                logger.info(
+                    "CHAIN_DONE pass=%s symbol=%s latency_ms=%s grade=NO_SIGNAL",
+                    pass_id, sym, ms,
+                )
+            t_pub = time.perf_counter()
+            self._upsert_symbol_state(
+                sym,
+                hit=hit,
+                err=err,
+                fetch_status=fetch_status,
+                grade=grade,
+                ms=ms,
+                retries=retries_this,
+                quota_wait=float(res.get("limiter_wait") or 0),
+                cache_hit=bool(res.get("cache_hit")),
+                total=total,
+                pass_id=pass_id,
+                phase="chains",
+            )
+            _progress(
+                sym,
+                flagged_row=hit if hit else None,
+                err=err,
+                status=prog_status,
+                ms=ms,
+            )
+            tel = self._harvest_symbol_telemetry[-1] if self._harvest_symbol_telemetry else {}
+            tel["http_latency_ms"] = int(res.get("http_ms") or 0)
+            tel["limiter_wait_ms"] = int(float(res.get("limiter_wait") or 0) * 1000)
+            tel["processing_ms"] = max(0, ms - int(tel.get("http_latency_ms") or 0))
+            tel["publish_ms"] = int((time.perf_counter() - t_pub) * 1000)
+            tel["total_symbol_ms"] = ms
+            store.set_harvest_meta({
+                "scanned": scanned,
+                "attempted": self._attempted,
+                "ok_chain": self._ok_chain,
+                "current": sym,
+                "phase": "chains",
+            })
+            if top_tier_elapsed_sec is None:
+                done_top = [s for s in top34_set if s in self._symbol_states and self._symbol_states[s].get("fetch_status") != "FETCHING"]
+                if len(done_top) >= len(top34_set) and top34_set:
+                    top_tier_elapsed_sec = time.perf_counter() - self._harvest_t0
+                    logger.info("TOP_TIER_DONE pass=%s elapsed_sec=%.2f n=%s", pass_id, top_tier_elapsed_sec, len(top34_set))
+
+        try:
+            pool = ThreadPoolExecutor(max_workers=workers_n, thread_name_prefix="radar-sym")
+            try:
+                futs = {pool.submit(_work, sym): sym for sym in watch}
+                for fut in as_completed(futs):
+                    self._scan_heartbeat = time.time()
+                    try:
+                        res = fut.result()
+                    except Exception as exc:
+                        res = {"symbol": futs[fut], "hit": None, "err": str(exc)[:120], "retries": 0, "ms": 0}
+                    _accept(res)
+            finally:
+                pool.shutdown(wait=True, cancel_futures=False)
+
+            scored = [h.get("symbol") for h in all_hits if h.get("symbol")]
+            try:
+                universe_futs = [s for s in watch if s in self._symbol_states]
+                if universe_futs and not limiter.in_cooldown:
+                    futures_calls = self._harvest_futures_batch(universe_futs)
+            except Exception as fut_exc:
+                logger.debug("futures batch: %s", fut_exc)
+            try:
+                from app.services.chain_desk import reevaluate_with_stored_futures
+                from app.services.chain_anomaly import summarize_report as _sum
+
+                refreshed: List[Dict[str, Any]] = []
+                seen = set()
+                for h in list(self._live_all_hits):
+                    sym_r = h.get("symbol")
+                    if not sym_r or sym_r in seen:
+                        continue
+                    seen.add(sym_r)
+                    try:
+                        full = reevaluate_with_stored_futures(sym_r)
+                        refreshed.append(_sum(full) if full else h)
+                    except Exception:
+                        refreshed.append(h)
+                if refreshed:
+                    self._live_all_hits = refreshed
+                    all_hits[:] = [r for r in refreshed if r.get("grade") in ("TRADEABLE", "WATCH", "QUIET")]
+                    self._publish_live_board(total=total, pass_id=pass_id, phase="futures", persist=True)
+            except Exception as re_exc:
+                logger.debug("futures reanalyze: %s", re_exc)
 
             got = {h.get("symbol") for h in all_hits}
             failed_syms = [s for s in failed_syms if s not in got]
+            self._failed_remaining = failed_syms
+            for s in failed_syms:
+                self._skip_symbols.add(s)
+            self._persist_skip_symbols()
+            self._last_board_persist_at = 0.0
+            self._persist_last_scan()
         except Exception:
+            try:
+                limiter.set_min_interval(IDLE_MIN_INTERVAL)
+            except Exception:
+                pass
             try:
                 _hw.__exit__(None, None, None)
             except Exception:
@@ -1117,59 +1962,86 @@ class OptionFlowRadarService:
             raise
         finally:
             try:
-                workers["pool"].shutdown(wait=False, cancel_futures=True)
+                limiter.set_min_interval(IDLE_MIN_INTERVAL)
             except Exception:
                 pass
             self._scan_running = False
+            try:
+                if self._scan_lock.locked():
+                    self._scan_lock.release()
+            except RuntimeError:
+                pass
 
-        # Partition per v3 product rules — rank by stacked desk score
-        from app.services.strategies.rsi_desk import weight_radar_rows
+        self._live_all_hits = list(self._live_all_hits or all_hits)
+        flagged, watch_list, alert_box, flow = self._repartition_hits(self._live_all_hits)
 
-        all_hits = weight_radar_rows(all_hits)
-        radar = [h for h in all_hits if h.get("grade") in ("A", "A+")]
-        watch_list = [h for h in all_hits if h.get("grade") == "B"]
-        alert_box = [h for h in all_hits if h.get("alert_box")]
-
-        radar.sort(
-            key=lambda x: (
-                float(x.get("desk_score") or 0),
-                1 if x.get("grade") == "A+" else 0,
-                float(x.get("composite_score") or 0),
-                float(x.get("lis") or 0),
-            ),
-            reverse=True,
-        )
-        watch_list.sort(
-            key=lambda x: (
-                float(x.get("desk_score") or 0),
-                float(x.get("composite_score") or 0),
-            ),
-            reverse=True,
-        )
-        alert_box.sort(key=lambda x: float(x.get("unusual_score") or 0), reverse=True)
-
-        # flagged = actionable main radar (backward compatible primary list)
-        # include watch when user wants full board — keep flagged = A/A+ only for quality
-        flagged = list(radar)
+        elapsed_ms = int((time.perf_counter() - self._harvest_t0) * 1000)
+        fyers_requests = int(limiter.total_grants) - int(self._harvest_grants0)
+        trips = int(limiter.trip_count) - int(self._harvest_trips0)
+        ok_chain = int(self._ok_chain)
+        attempted = int(self._attempted or scanned)
+        partial = attempted < total
+        no_signal = sum(1 for s in self._symbol_states.values() if s.get("grade") == "NO_SIGNAL")
+        try:
+            rpm_peak = max(rpm_peak, int(limiter.rpm_peak), int(limiter.requests_last_minute()))
+        except Exception:
+            pass
 
         logger.info(
-            "Radar full FNO scan done scanned=%s/%s hits=%s errors=%s retry=%s/%s",
-            scanned, total, len(all_hits), len(errors), retry_recovered, retry_attempted,
+            "HARVEST_DONE pass=%s attempted=%s ok=%s skipped=%s errors=%s elapsed_ms=%s rpm_peak=%s cooldowns=%s workers=%s top_tier_sec=%s futures_batches=%s",
+            pass_id, attempted, ok_chain, len(self._skipped_syms), len(self._error_syms),
+            elapsed_ms, rpm_peak, trips, workers_n,
+            round(top_tier_elapsed_sec, 2) if top_tier_elapsed_sec is not None else None,
+            futures_calls,
         )
         board = get_idea_book().board(limit=8)
+        telemetry = {
+            "harvest_id": pass_id,
+            "requested": total,
+            "total_symbols": total,
+            "attempted": attempted,
+            "successful": ok_chain,
+            "ok_chain": ok_chain,
+            "no_signal": no_signal,
+            "skipped": len(self._skipped_syms),
+            "errors": len(self._error_syms),
+            "hits": len(all_hits),
+            "elapsed_ms": elapsed_ms,
+            "elapsed_sec": round(elapsed_ms / 1000.0, 2),
+            "top_tier_elapsed_sec": round(top_tier_elapsed_sec, 2) if top_tier_elapsed_sec is not None else None,
+            "fyers_requests": fyers_requests,
+            "futures_batches": futures_calls,
+            "workers": workers_n,
+            "rps": HARVEST_RPS,
+            "429_count": trips,
+            "rate_limit_events": trips,
+            "cooldown_count": trips,
+            "rpm_peak": rpm_peak,
+            "symbols": list(self._harvest_symbol_telemetry),
+        }
         result = {
             "success": True,
-            "engine": "v5-mtf",
-            "scanned": scanned,
+            "engine": "v6-anomaly",
+            "phase": "idle",
+            "pass_id": pass_id,
+            "scanned": attempted,
+            "attempted": attempted,
+            "ok_chain": ok_chain,
+            "hits": len(all_hits),
             "universe_requested": total,
+            "total": total,
             "total_flagged": len(flagged),
             "flagged": flagged,
             "watch": watch_list,
+            "flow": flow,
             "alert_box": alert_box,
+            "screen": self._screen_rows(self._live_all_hits or all_hits),
             "all_hits": all_hits,
             "retry_attempted": retry_attempted,
             "retry_recovered": retry_recovered,
             "failed_remaining": failed_syms,
+            "skipped": list(self._skipped_syms),
+            "symbol_states": list(self._symbol_states.values()),
             "ideas": board.get("active") or [],
             "ideas_confirmed": board.get("confirmed") or [],
             "ideas_bullish": board.get("bullish") or [],
@@ -1178,61 +2050,59 @@ class OptionFlowRadarService:
             "ideas_watch": board.get("watch") or [],
             "ideas_conflict": board.get("conflict") or [],
             "idea_counts": board.get("counts") or {},
+            "tradeable": flagged,
+            "bullish": [h for h in flow if h.get("chain_bias") == "BULLISH"],
+            "bearish": [h for h in flow if h.get("chain_bias") == "BEARISH"],
+            "top": flagged[:8] if flagged else flow[:8],
+            "quiet_count": sum(1 for h in self._live_all_hits if h.get("grade") == "QUIET"),
             "grade_counts": {
-                "A+": sum(1 for h in all_hits if h.get("grade") == "A+"),
-                "A": sum(1 for h in all_hits if h.get("grade") == "A"),
-                "B": sum(1 for h in all_hits if h.get("grade") == "B"),
-                "C": sum(1 for h in all_hits if h.get("grade") == "C"),
+                "TRADEABLE": len(flagged),
+                "WATCH": len(watch_list),
+                "QUIET": sum(1 for h in self._live_all_hits if h.get("grade") == "QUIET"),
             },
+            "flow_count": len(flow),
             "errors": errors,
             "rate_limited_skips": rate_limited_skips,
-            "partial": scanned < total,
-            "completion_pct": round(100.0 * min(scanned, total) / max(total, 1), 1),
+            "partial": partial,
+            "scan_running": False,
+            "completion_pct": round(100.0 * min(attempted, total) / max(total, 1), 1),
             "timestamp": datetime.now().isoformat(),
             "market_hours": self._is_market_hours(),
+            "telemetry": telemetry,
             "rules": {
-                "max_atm_pct": MAX_ATM_DISTANCE_PCT,
-                "min_vol_spike": MIN_VOL_SPIKE,
-                "min_oi_change_pct": MIN_OI_CHANGE_PCT,
-                "min_volume": MIN_OPTION_VOLUME,
                 "description": (
-                    "v4 process: CE/PE matrix → institutional levels (pivot/CPR/"
-                    "Camarilla/OI walls/VWAP) → persistence + hysteresis lock. "
-                    "Headline is the Active Idea, not the last snapshot."
+                    "v6 anomaly: whole-chain structure (PCR/walls/pin/skew) + "
+                    "futures OI + size/cluster flags. WAIT unless they agree "
+                    "and persist one more harvest. No LIS."
                 ),
             },
         }
-        # Only the full FNO universe may replace the board. A TOP / subset
-        # pass (scheduler) must not reshuffle filters mid-session.
-        full_n = len(filter_valid_symbols(ALL_FNO_WATCHLIST))
-        is_full_pass = total >= full_n and not result.get("partial")
-        if is_full_pass or not self._last_scan:
-            if is_full_pass or symbols is None:
-                self._last_scan = result
-                self._last_scan_at = datetime.now()
-                self._persist_last_scan()
-        try:
-            from app.services.levels import get_levels_service
-
-            flagged_syms = list(dict.fromkeys(
-                [h.get("symbol") for h in flagged if h.get("symbol")]
-            ))
-            for fsym in flagged_syms[:40]:
+        # Incremental board is already live. Always publish the finished snapshot
+        # so a partial walk remains visible (ok_chain < total is valid).
+        if symbols is None or total >= len(filter_valid_symbols(ALL_FNO_WATCHLIST)) or not self._last_scan:
+            self._last_scan = result
+            self._last_scan_at = datetime.now()
+            self._persist_last_scan()
+            if not self._is_market_hours():
                 try:
-                    get_levels_service().get_futures(fsym)
+                    self.pin_last_session()
                 except Exception:
                     pass
-        except Exception:
-            pass
         try:
             self._rebuild_hv_index()
         except Exception:
             pass
         try:
+            self._start_history_sweeper(watch)
+        except Exception as hist_exc:
+            logger.debug("history sweeper start: %s", hist_exc)
+        try:
             store.set_harvest_meta({
                 "running": False,
                 "finished_at": datetime.now().isoformat(),
                 "scanned": scanned,
+                "attempted": attempted,
+                "ok_chain": ok_chain,
                 "total": total,
                 "current": None,
                 "pass_id": pass_id,
@@ -1241,6 +2111,8 @@ class OptionFlowRadarService:
                 "retry_attempted": retry_attempted,
                 "retry_recovered": retry_recovered,
                 "failed_remaining": failed_syms,
+                "skip_symbols": sorted(self._skip_symbols),
+                "partial": partial,
             })
         except Exception:
             pass
@@ -1256,23 +2128,51 @@ class OptionFlowRadarService:
         self,
         symbol: str,
         strike_count: int = 14,
+        live: bool = False,
     ) -> Dict[str, Any]:
-        if not self._is_authenticated():
-            return {"success": False, "error": "Not authenticated", "flagged": []}
+        from app.services import symbol_store as store
 
         try:
-            underlying = self._get_underlying_data(symbol, light=False)
-            if not underlying:
-                underlying = self._get_underlying_data(symbol, light=True)
+            snap = store.get(symbol) or {}
+            spot = store.get_spot(symbol) or snap.get("spot") or {}
+            chain_resp = store.get_chain(symbol, strike_count) or {}
+            m15 = store.get_history(symbol, "15", min_bars=1) or []
+            derived = snap.get("derived") or {}
+            ltp = float(spot.get("ltp") or chain_resp.get("spot_price") or 0)
+            if ltp > 0 and chain_resp.get("success"):
+                underlying = {
+                    "ltp": ltp,
+                    "change_pct": float(spot.get("chg_pct") or spot.get("change_percent") or 0),
+                    "vwap": derived.get("vwap") or ltp,
+                    "ema20": derived.get("ema20_15") or ltp,
+                    "vwap_dev_pct": 0.0,
+                    "above_ema20": True,
+                    "candles_5min": m15[-60:] if m15 else [],
+                    "light": True,
+                }
+            else:
+                underlying = {}
 
-            chain_resp: Dict[str, Any] = {}
-            try:
-                chain_resp = self.market_service.get_option_chain(symbol, strike_count)
-            except Exception as exc:
-                logger.debug("option chain failed for %s: %s", symbol, exc)
-                chain_resp = {}
+            if not chain_resp.get("success") or len(chain_resp.get("chain") or []) < 2:
+                try:
+                    live_chain = self.market_service.get_option_chain(symbol, strike_count)
+                    if live_chain and live_chain.get("success") and len(live_chain.get("chain") or []) >= 2:
+                        chain_resp = live_chain
+                except Exception as exc:
+                    logger.debug("get_symbol_flow live fetch fallback for %s failed: %s", symbol, exc)
 
-            spot = chain_resp.get("spot_price") or (underlying or {}).get("ltp") or 0
+            if live and (not chain_resp.get("success") or ltp <= 0):
+                if getattr(self, "_scan_running", False):
+                    live = False
+                else:
+                    underlying = self._get_underlying_data(symbol, light=True) or underlying
+                    if not chain_resp.get("success"):
+                        chain_resp = self.market_service.get_option_chain(symbol, strike_count)
+
+            if not self._is_authenticated() and not chain_resp.get("success") and ltp <= 0:
+                return {"success": False, "error": "Not authenticated", "flagged": []}
+
+            spot = chain_resp.get("spot_price") or (underlying or {}).get("ltp") or ltp or 0
             if (not underlying or not underlying.get("ltp")) and spot:
                 underlying = {
                     **(underlying or {}),
@@ -1286,47 +2186,45 @@ class OptionFlowRadarService:
                     "light": True,
                 }
 
+            stored_rep = ((snap.get("anomaly") or {}).get("report")) if isinstance(snap.get("anomaly"), dict) else None
+            last = self.get_last_scan() or {}
+            board_row = next(
+                (
+                    r
+                    for r in (last.get("tradeable") or [])
+                    + (last.get("flagged") or [])
+                    + (last.get("watch") or [])
+                    + (last.get("bullish") or [])
+                    + (last.get("bearish") or [])
+                    if r.get("symbol") == symbol
+                ),
+                None,
+            )
+
             if not underlying or not underlying.get("ltp"):
-                idea = get_idea_book().get(symbol)
-                last = self.get_last_scan() or {}
-                row = next(
-                    (
-                        r
-                        for r in (last.get("flagged") or [])
-                        + (last.get("watch") or [])
-                        + (last.get("ideas") or [])
-                        if r.get("symbol") == symbol
-                    ),
-                    None,
-                )
-                if idea or row:
-                    px = float((idea or {}).get("spot") or (row or {}).get("spot") or 0)
+                report = stored_rep or board_row
+                if report:
+                    px = float(report.get("spot") or 0)
                     return {
                         "success": True,
+                        "engine": "v6-anomaly",
                         "symbol": symbol,
                         "name": _sym_name(symbol),
-                        "underlying": {
-                            "ltp": px,
-                            "change_pct": 0,
-                            "vwap": px,
-                            "ema20": px,
-                            "vwap_dev_pct": 0,
-                            "above_ema20": True,
-                            "candles_5min": [],
-                            "light": True,
+                        "report": stored_rep or report,
+                        "trade": (stored_rep or report).get("trade"),
+                        "anomalies": (stored_rep or {}).get("anomalies") or [],
+                        "structure": (stored_rep or {}).get("structure") or {
+                            "oi_pcr": report.get("oi_pcr"),
+                            "call_wall": report.get("call_wall"),
+                            "put_wall": report.get("put_wall"),
+                            "gamma_wall": report.get("gamma_wall"),
                         },
-                        "chain": [],
+                        "grade": (stored_rep or report).get("grade"),
+                        "chain_bias": (stored_rep or report).get("chain_bias"),
+                        "why_not": (stored_rep or report).get("why_not"),
+                        "chain": (chain_resp.get("chain") if chain_resp else []) or [],
                         "spot_price": px,
-                        "pcr": None,
-                        "india_vix": None,
-                        "atm_strike": None,
-                        "expiries": [],
-                        "flagged_contracts": [row] if row and row.get("strike") else [],
-                        "candles_5min": [],
-                        "idea": idea,
-                        "levels": (row or {}).get("levels_map") if row else None,
                         "partial": True,
-                        "warning": "Live quote unavailable — showing last process idea",
                         "timestamp": datetime.now().isoformat(),
                     }
                 return {"success": False, "error": f"Failed to get data for {symbol}", "flagged": []}
@@ -1337,49 +2235,71 @@ class OptionFlowRadarService:
                 for e in expiries
             ]
 
-            # Get best contract (reuse _process_option_chain)
-            best = None
-            try:
-                best = self._process_option_chain(symbol, underlying, strike_count)
-            except Exception as exc:
-                logger.warning("process attach in flow failed for %s: %s", symbol, exc)
-            flagged = [best] if best else []
-            try:
-                from app.services.strategies.rsi_desk import weight_radar_rows
+            from app.services.chain_desk import evaluate
 
-                flagged = weight_radar_rows(flagged)
-                if flagged:
-                    best = flagged[0]
-            except Exception:
-                pass
-            idea = get_idea_book().get(symbol)
-            levels_map = (best or {}).get("levels_map")
-            if levels_map is None:
-                try:
-                    levels_map = get_levels_service().build_full_map(
-                        symbol,
-                        float(spot or underlying.get("ltp") or 0),
-                        chain=chain_resp.get("chain") or [],
-                        candles_5m=underlying.get("candles_5min") or [],
-                    )
-                except Exception:
-                    levels_map = None
+            if stored_rep and stored_rep.get("grade") and len(chain_resp.get("chain") or []) < 2:
+                report = stored_rep
+            else:
+                report = evaluate(symbol, chain_resp, name=_sym_name(symbol))
+            st = report.get("structure") or {}
+            raw_chain = chain_resp.get("chain", [])
+            annotated_chain = []
+            for r in raw_chain:
+                rc = dict(r)
+                call = dict(r.get("call") or {})
+                put = dict(r.get("put") or {})
+
+                c_oi_chg = derive_oi_change_pct(call)
+                c_pr_chg = float(call.get("chg_pct") or call.get("chp") or 0)
+                c_sig = classify_signal(c_oi_chg, c_pr_chg, opt_type="CE")
+                call["signal"] = c_sig["label"]
+                call["signal_icon"] = c_sig["icon"]
+                call["signal_direction"] = c_sig["direction"]
+                call["oi_change_pct"] = round(c_oi_chg, 2)
+
+                p_oi_chg = derive_oi_change_pct(put)
+                p_pr_chg = float(put.get("chg_pct") or put.get("chp") or 0)
+                p_sig = classify_signal(p_oi_chg, p_pr_chg, opt_type="PE")
+                put["signal"] = p_sig["label"]
+                put["signal_icon"] = p_sig["icon"]
+                put["signal_direction"] = p_sig["direction"]
+                put["oi_change_pct"] = round(p_oi_chg, 2)
+
+                rc["call"] = call
+                rc["put"] = put
+                annotated_chain.append(rc)
 
             return {
                 "success": True,
+                "engine": "v6-anomaly",
                 "symbol": symbol,
                 "name": _sym_name(symbol),
                 "underlying": underlying,
-                "chain": chain_resp.get("chain", []),
+                "chain": annotated_chain,
                 "spot_price": underlying.get("ltp"),
-                "pcr": chain_resp.get("pcr"),
+                "pcr": st.get("oi_pcr") or chain_resp.get("pcr"),
                 "india_vix": chain_resp.get("india_vix"),
-                "atm_strike": chain_resp.get("atm_strike"),
+                "atm_strike": chain_resp.get("atm_strike") or report.get("atm"),
                 "expiries": normalized_expiries,
-                "flagged_contracts": flagged,
+                "report": report,
+                "trade": report.get("trade"),
+                "anomalies": report.get("anomalies") or [],
+                "structure": st,
+                "futures": report.get("futures"),
+                "htf": report.get("htf"),
+                "why_not": report.get("why_not"),
+                "grade": report.get("grade"),
+                "chain_bias": report.get("chain_bias"),
                 "candles_5min": underlying.get("candles_5min", []),
-                "idea": idea,
-                "levels": levels_map,
+                "freshness": {
+                    "spot": store.classify_freshness(symbol, "spot"),
+                    "chain": store.classify_freshness(symbol, "chain"),
+                    "history_15": store.classify_freshness(symbol, "history.15"),
+                    "history_d": store.classify_freshness(symbol, "history.D"),
+                    "spot_age": store.age(symbol, "spot"),
+                    "chain_age": store.age(symbol, "chain"),
+                    "history_15_age": store.age(symbol, "history.15"),
+                },
                 "timestamp": datetime.now().isoformat(),
             }
 

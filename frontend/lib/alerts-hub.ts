@@ -153,7 +153,15 @@ class AlertsHub {
       }
     };
 
-    this.ws = new WSClient('/ws/alerts', handleMessage);
+    this.ws = new WSClient('/ws/alerts', handleMessage, {
+      onOpen: () => {
+        this.ws?.send({ action: 'subscribe' });
+      },
+      onClose: () => {
+        this.connected = false;
+        this.emit();
+      },
+    });
     this.ws.connect();
     this.subscribeTimer = setTimeout(() => {
       this.ws?.send({ action: 'subscribe' });

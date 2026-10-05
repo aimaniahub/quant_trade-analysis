@@ -6,6 +6,7 @@ from app.core.config import get_settings
 from app.routes import health, market_data, option_chain, websocket, auth, mcp
 from app.routes import ma_crossover as ma_crossover_routes
 from app.routes import option_flow_radar as radar_routes
+from app.routes import ai_chain as ai_chain_routes
 from app.routes import confluence as confluence_routes
 from app.routes import ma7200 as ma7200_routes
 from app.routes import rsi as rsi_routes
@@ -57,6 +58,38 @@ async def lifespan(app: FastAPI):
     print("[MA] Legacy multi-TF MA crossover auto-scan DISABLED (use /strategies/ma7200)")
     _asyncio.create_task(radar_sched.start())
 
+    async def _trade_watch_loop():
+        await _asyncio.sleep(8)
+        while True:
+            try:
+                from app.services.trade_watch import tick
+                await _asyncio.to_thread(tick)
+            except Exception as watch_exc:
+                print(f"[WATCH] tick: {watch_exc}")
+            await _asyncio.sleep(30)
+
+    _asyncio.create_task(_trade_watch_loop())
+    print("[WATCH] paper desk loop started (09:23 entry / 3m mark)")
+
+    try:
+        from app.services.option_flow_radar import get_radar_service
+        last = get_radar_service().get_last_scan()
+        n = len((last or {}).get("flagged") or []) + len((last or {}).get("symbol_states") or [])
+        print(f"[RADAR] hydrated last board rows={n}")
+    except Exception as e:
+        print(f"[RADAR] hydrate skipped: {e}")
+
+    try:
+        from app.services.spot_stream import get_spot_stream
+        get_spot_stream().start()
+        print("[WS] spot stream starting (canonical F&O universe)")
+    except Exception as e:
+        print(f"[WS] spot stream skipped: {e}")
+
+    # History sweeper must NOT start at boot. It competes with the chain
+    # harvest for Fyers RPM. Radar starts it after the first harvest ends.
+    print("[HISTORY] sweeper idle until first harvest completes")
+
     yield
 
     # ── Shutdown ───────────────────────────────────────────────────────
@@ -66,6 +99,16 @@ async def lifespan(app: FastAPI):
         ma_svc = get_ma_crossover_service()
         if getattr(ma_svc, "_running", False):
             await ma_svc.stop()
+    except Exception:
+        pass
+    try:
+        from app.services.spot_stream import get_spot_stream
+        get_spot_stream().stop()
+    except Exception:
+        pass
+    try:
+        from app.services.history_sweeper import get_history_sweeper
+        get_history_sweeper().stop()
     except Exception:
         pass
     aggregator.stop()
@@ -94,10 +137,16 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
+        allow_origin_regex=r"^https:\/\/.*\.vercel\.app$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # Root health endpoint for platform probes (Render, AWS, uptime monitors)
+    @app.get("/health", tags=["Health"])
+    async def root_health():
+        return {"status": "healthy", "service": settings.app_name}
     
     # Include routers
     app.include_router(health.router, prefix=settings.api_prefix, tags=["Health"])
@@ -105,8 +154,14 @@ def create_app() -> FastAPI:
     app.include_router(market_data.router, prefix=settings.api_prefix, tags=["Market Data"])
     app.include_router(option_chain.router, prefix=settings.api_prefix, tags=["Option Chain"])
     app.include_router(websocket.router, prefix=settings.api_prefix, tags=["WebSocket"])
+    app.include_router(websocket.router, tags=["WebSocket Root"])
     app.include_router(ma_crossover_routes.router, prefix=settings.api_prefix, tags=["MA Crossover"])
     app.include_router(radar_routes.router, prefix=settings.api_prefix, tags=["Option Flow Radar"])
+    from app.routes import nifty_quant as nifty_quant_routes
+    app.include_router(nifty_quant_routes.router, prefix=settings.api_prefix, tags=["Nifty Quant"])
+    app.include_router(ai_chain_routes.router, prefix=settings.api_prefix, tags=["AI + Chain"])
+    from app.routes import trade_watch as trade_watch_routes
+    app.include_router(trade_watch_routes.router, prefix=settings.api_prefix, tags=["Trade Watch"])
     app.include_router(confluence_routes.router, prefix=settings.api_prefix, tags=["Confluence"])
     app.include_router(mcp.router, prefix=settings.api_prefix, tags=["Agentic AI (MCP)"])
     

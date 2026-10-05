@@ -301,3 +301,272 @@ def near_session_vwap(spot: float, vwap: Optional[float]) -> bool:
     if not vwap or spot <= 0 or vwap <= 0:
         return False
     return abs(spot - vwap) / vwap * 100.0 <= NEAR_VWAP_PCT
+
+
+NEAR_MIN_RSI_GAP = 2.5
+NEAR_BULL_RSI_MAX = 48.0
+NEAR_BEAR_RSI_MIN = 52.0
+
+
+def _pair_indices(pivots: List[Tuple[int, float]]) -> List[Tuple[int, int]]:
+    """Newest-first pivot pairs. Last two first, then skip-one pairs."""
+    n = len(pivots)
+    out: List[Tuple[int, int]] = []
+    if n >= 2:
+        out.append((n - 2, n - 1))
+    if n >= 3:
+        out.append((n - 3, n - 1))
+        out.append((n - 3, n - 2))
+    if n >= 4:
+        out.append((n - 4, n - 1))
+    seen = set()
+    uniq: List[Tuple[int, int]] = []
+    for a, b in out:
+        if a == b or (a, b) in seen:
+            continue
+        seen.add((a, b))
+        uniq.append((a, b))
+    return uniq
+
+
+def _geometry(div: Dict[str, Any]) -> Dict[str, Any]:
+    p1 = _f(div.get("price_l1"))
+    p2 = _f(div.get("price_l2"))
+    r1 = _f(div.get("rsi_l1"))
+    r2 = _f(div.get("rsi_l2"))
+    i1 = div.get("bar_l1")
+    i2 = div.get("bar_l2")
+    price_pct = ((p2 - p1) / p1 * 100.0) if p1 else 0.0
+    rsi_move = r2 - r1
+    span = (int(i2) - int(i1)) if i1 is not None and i2 is not None else None
+    mag = abs(rsi_move) / max(abs(price_pct), 0.08)
+    out = dict(div)
+    out["price_move_pct"] = round(price_pct, 3)
+    out["rsi_move"] = round(rsi_move, 2)
+    out["pivot_span"] = span
+    out["div_magnitude"] = round(mag, 2)
+    return out
+
+
+def _bull_pair(
+    i1: int,
+    p1: float,
+    i2: int,
+    p2: float,
+    rsi: Sequence[Optional[float]],
+    *,
+    n: int,
+    tf: int,
+    fresh_bars: int,
+    stale_bars: int,
+    allow_near: bool,
+) -> Optional[Dict[str, Any]]:
+    if i2 - i1 < MIN_PIVOT_GAP or p2 >= p1:
+        return None
+    r1 = rsi[i1] if i1 < len(rsi) else None
+    r2 = rsi[i2] if i2 < len(rsi) else None
+    if r1 is None or r2 is None or r2 <= r1:
+        return None
+    gap = r2 - r1
+    classic = gap >= MIN_RSI_GAP and r2 <= BULL_RSI_MAX
+    if classic:
+        pack = _pack(
+            kind="BULL_DIV", tf=tf, i1=i1, i2=i2, p1=p1, p2=p2, r1=r1, r2=r2, n=n,
+            fresh_bars=fresh_bars, stale_bars=stale_bars,
+        )
+        pack["near"] = False
+        return pack
+    if not allow_near:
+        return None
+    if gap < NEAR_MIN_RSI_GAP or r2 > NEAR_BULL_RSI_MAX:
+        return None
+    pack = _pack(
+        kind="BULL_DIV", tf=tf, i1=i1, i2=i2, p1=p1, p2=p2, r1=r1, r2=r2, n=n,
+        fresh_bars=fresh_bars, stale_bars=stale_bars,
+    )
+    if pack.get("stale") or int(pack.get("bars_ago") or 99) > stale_bars:
+        return None
+    pack["live"] = False
+    pack["type"] = "BULL_DIV"
+    pack["side"] = "BULLISH"
+    pack["event"] = "NEAR_BULL"
+    pack["near"] = True
+    pack["near_why"] = "zone" if r2 > BULL_RSI_MAX else "gap"
+    pack["stale"] = False
+    return pack
+
+
+def _bear_pair(
+    i1: int,
+    p1: float,
+    i2: int,
+    p2: float,
+    rsi: Sequence[Optional[float]],
+    *,
+    n: int,
+    tf: int,
+    fresh_bars: int,
+    stale_bars: int,
+    allow_near: bool,
+) -> Optional[Dict[str, Any]]:
+    if i2 - i1 < MIN_PIVOT_GAP or p2 <= p1:
+        return None
+    r1 = rsi[i1] if i1 < len(rsi) else None
+    r2 = rsi[i2] if i2 < len(rsi) else None
+    if r1 is None or r2 is None or r2 >= r1:
+        return None
+    gap = r1 - r2
+    classic = gap >= MIN_RSI_GAP and r2 >= BEAR_RSI_MIN
+    if classic:
+        pack = _pack(
+            kind="BEAR_DIV", tf=tf, i1=i1, i2=i2, p1=p1, p2=p2, r1=r1, r2=r2, n=n,
+            fresh_bars=fresh_bars, stale_bars=stale_bars,
+        )
+        pack["near"] = False
+        return pack
+    if not allow_near:
+        return None
+    if gap < NEAR_MIN_RSI_GAP or r2 < NEAR_BEAR_RSI_MIN:
+        return None
+    pack = _pack(
+        kind="BEAR_DIV", tf=tf, i1=i1, i2=i2, p1=p1, p2=p2, r1=r1, r2=r2, n=n,
+        fresh_bars=fresh_bars, stale_bars=stale_bars,
+    )
+    if pack.get("stale") or int(pack.get("bars_ago") or 99) > stale_bars:
+        return None
+    pack["live"] = False
+    pack["type"] = "BEAR_DIV"
+    pack["side"] = "BEARISH"
+    pack["event"] = "NEAR_BEAR"
+    pack["near"] = True
+    pack["near_why"] = "zone" if r2 < BEAR_RSI_MIN else "gap"
+    pack["stale"] = False
+    return pack
+
+
+def _pick_best(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not cands:
+        return None
+    live = [c for c in cands if c.get("live") and not c.get("near")]
+    pool = live or cands
+    pool.sort(
+        key=lambda c: (
+            0 if c.get("live") else 1,
+            int(c.get("bars_ago") or 99),
+            -_f(c.get("rsi_gap")),
+        )
+    )
+    return pool[0]
+
+
+def analyze_divergence(
+    candles: List[Dict[str, Any]],
+    rsi_series: Sequence[Optional[float]],
+    *,
+    tf: int = 15,
+    period_minutes: Optional[int] = None,
+    drop_forming: bool = True,
+    now: Optional[datetime] = None,
+    fresh_bars: int = FRESH_BARS,
+    stale_bars: int = STALE_BARS,
+) -> Dict[str, Any]:
+    """Classic live div, extra pivot pairs, then near-miss. Never Fyers."""
+    bars = list(candles or [])
+    rsi = list(rsi_series or [])
+    if drop_forming:
+        period = period_minutes if period_minutes is not None else (
+            1440 if tf >= 1440 else 60 if tf == 60 else 15
+        )
+        closed = closed_bars(bars, period, now=now)
+        if len(closed) != len(bars):
+            cut = len(bars) - len(closed)
+            if cut > 0:
+                rsi = rsi[:-cut] if cut < len(rsi) else []
+            bars = closed
+    n = min(len(bars), len(rsi))
+    empty = _empty(tf)
+    empty["near"] = False
+    empty["pivot_lows"] = 0
+    empty["pivot_highs"] = 0
+    if n < PIVOT_LEFT + PIVOT_RIGHT + MIN_PIVOT_GAP + 2:
+        return empty
+    bars = bars[:n]
+    rsi = rsi[:n]
+    lows = [_f(c.get("low")) for c in bars]
+    highs = [_f(c.get("high")) for c in bars]
+    price_lows = detect_pivots(lows, kind="low")
+    price_highs = detect_pivots(highs, kind="high")
+
+    live_cands: List[Dict[str, Any]] = []
+    near_cands: List[Dict[str, Any]] = []
+    for a, b in _pair_indices(price_lows):
+        i1, p1 = price_lows[a]
+        i2, p2 = price_lows[b]
+        hit = _bull_pair(
+            i1, p1, i2, p2, rsi, n=n, tf=tf,
+            fresh_bars=fresh_bars, stale_bars=stale_bars, allow_near=False,
+        )
+        if hit and hit.get("live"):
+            live_cands.append(hit)
+        else:
+            near = _bull_pair(
+                i1, p1, i2, p2, rsi, n=n, tf=tf,
+                fresh_bars=fresh_bars, stale_bars=stale_bars, allow_near=True,
+            )
+            if near and near.get("near"):
+                near_cands.append(near)
+    for a, b in _pair_indices(price_highs):
+        i1, p1 = price_highs[a]
+        i2, p2 = price_highs[b]
+        hit = _bear_pair(
+            i1, p1, i2, p2, rsi, n=n, tf=tf,
+            fresh_bars=fresh_bars, stale_bars=stale_bars, allow_near=False,
+        )
+        if hit and hit.get("live"):
+            live_cands.append(hit)
+        else:
+            near = _bear_pair(
+                i1, p1, i2, p2, rsi, n=n, tf=tf,
+                fresh_bars=fresh_bars, stale_bars=stale_bars, allow_near=True,
+            )
+            if near and near.get("near"):
+                near_cands.append(near)
+
+    chosen = _pick_best(live_cands) or _pick_best(near_cands)
+    if not chosen:
+        empty["pivot_lows"] = len(price_lows)
+        empty["pivot_highs"] = len(price_highs)
+        return empty
+    chosen = _geometry(chosen)
+    chosen["pivot_lows"] = len(price_lows)
+    chosen["pivot_highs"] = len(price_highs)
+    return chosen
+
+
+def quality_grade(
+    div: Optional[Dict[str, Any]],
+    div_htf: Optional[Dict[str, Any]] = None,
+    *,
+    rsi_now: Optional[float] = None,
+    permission: float = 0.0,
+    h4_hard: bool = False,
+) -> Optional[str]:
+    d = div or {}
+    if d.get("near"):
+        return "C"
+    if not d.get("live") or not d.get("type"):
+        return None
+    if h4_hard:
+        return "C"
+    htf_ok = bool((div_htf or {}).get("live") and (div_htf or {}).get("type") == d.get("type"))
+    extreme = False
+    if rsi_now is not None:
+        if d.get("side") == "BULLISH" and rsi_now <= 30:
+            extreme = True
+        if d.get("side") == "BEARISH" and rsi_now >= 70:
+            extreme = True
+    if d.get("fresh") and extreme and htf_ok and permission >= 60:
+        return "A"
+    if d.get("fresh") or extreme or htf_ok:
+        return "B"
+    return "C"

@@ -57,6 +57,7 @@ export default function MarketIndices() {
     }
 
     const hasData = Object.keys(indicesData).length > 0;
+    const dataMode = (data as any)?.data_mode || ((data as any)?.market_hours ? 'live' : 'last_close');
 
     return (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 w-full">
@@ -76,8 +77,8 @@ export default function MarketIndices() {
                             <span className="text-sm font-semibold text-zinc-500 dark:text-zinc-400">
                                 {INDEX_LABELS[symbol]}
                             </span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${hasData && ltp > 0 ? "bg-emerald-500/10 text-emerald-500" : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"}`}>
-                                {isLoading ? "LOADING" : hasData && ltp > 0 ? "LIVE" : "CLOSED"}
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${hasData && ltp > 0 ? (dataMode === 'live' ? "bg-emerald-500/10 text-emerald-500" : "bg-amber-500/10 text-amber-500") : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"}`}>
+                                {isLoading ? "LOADING" : hasData && ltp > 0 ? (dataMode === 'live' ? "LIVE" : "LAST CLOSE") : "NO DATA"}
                             </span>
                         </div>
                         <div className="flex items-baseline gap-2">

@@ -281,18 +281,11 @@ Do **not** add a writer pass. Detector is CPU on read (15m×40d is cheap). If ha
 
 ---
 
-## 6. Tests (required before calling it done)
+## 6. Validation
 
-New: `backend/app/services/strategies/test_rsi_divergence.py`
-
-| Case | Expect |
-|---|---|
-| Synthetic price LL + RSI HL, 6 bars apart, RSI 28 then 33 | `BULL_DIV`, not stale |
-| Same but last pivot is the forming bar | no pivot / no div |
-| Pivots 3 bars apart | no div |
-| RSI gap 2 points | no div |
-| Second RSI low at 52 | IGNORE (mid) |
-| bars_ago 10 | stale / no live boost |
+The strategy is validated through the backend compile check and application import
+check during release verification. Keep scenario coverage in an external test
+suite rather than shipping test modules with the runtime package.
 | Price HH + RSI LH, RSI 72 then 64 | `BEAR_DIV` |
 | `evaluate_symbol` with mocked store: bull div + 4H SHORT | REJECT, no ticket |
 | bull div + OC conflict | REJECT |

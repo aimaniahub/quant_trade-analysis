@@ -3,19 +3,27 @@
 import { api } from "../lib/api";
 import { useApiQuery } from "../lib/hooks/useApiQuery";
 
+import NiftyQuantTerminal from "./NiftyQuantTerminal";
+
 interface OptionChainProps {
     symbol?: string;
 }
 
 export default function OptionChainTable({ symbol = 'NSE:NIFTY50-INDEX' }: OptionChainProps) {
+    const isNifty = symbol.includes('NIFTY50') || symbol === 'NIFTY';
+
     const { data: chain, isLoading, error, refetch } = useApiQuery<any>(
         ["options", "chain", symbol],
         () => api.options.getChain(symbol),
         {
             refetchInterval: 45000,
-            enabled: Boolean(symbol),
+            enabled: Boolean(symbol) && !isNifty,
         },
     );
+
+    if (isNifty) {
+        return <NiftyQuantTerminal autoRefresh={true} refreshInterval={15000} />;
+    }
 
     if (isLoading && !chain) {
         return (

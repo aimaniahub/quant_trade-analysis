@@ -81,7 +81,8 @@ class NiftySentimentService:
         """Get Nifty 50 Put-Call Ratio from option chain."""
         try:
             if chain_data is None:
-                chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
+                from app.services import symbol_store as store
+                chain_data = store.get_chain(self.nifty_symbol, 20) or {}
             if not chain_data.get("success"):
                 return {"error": "Unable to fetch Nifty OC", "pcr": None}
             
@@ -135,12 +136,8 @@ class NiftySentimentService:
 
             spots = store.get_spots(sample_stocks)
             if len(spots) < 15:
-                # one batched quotes call — store-first will fill idx:quotes
-                try:
-                    self.market_service.get_quotes(sample_stocks[:50])
-                    spots = store.get_spots(sample_stocks)
-                except Exception:
-                    pass
+                logger = __import__("logging").getLogger(__name__)
+                logger.debug("breadth waiting for harvest spots n=%s", len(spots))
 
             for symbol in sample_stocks:
                 try:
@@ -197,7 +194,8 @@ class NiftySentimentService:
         """Get Nifty OI change analysis."""
         try:
             if chain_data is None:
-                chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
+                from app.services import symbol_store as store
+                chain_data = store.get_chain(self.nifty_symbol, 20) or {}
             if not chain_data.get("success"):
                 return {"error": "Unable to fetch OC", "call_oi_change": 0, "put_oi_change": 0}
             
@@ -252,7 +250,8 @@ class NiftySentimentService:
         """Get current Nifty spot with support/resistance from OI."""
         try:
             if chain_data is None:
-                chain_data = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
+                from app.services import symbol_store as store
+                chain_data = store.get_chain(self.nifty_symbol, 20) or {}
             if not chain_data.get("success"):
                 return {"error": "Unable to fetch OC"}
             
@@ -289,8 +288,21 @@ class NiftySentimentService:
             return {"error": str(e)}
     
     def get_full_sentiment(self) -> Dict[str, Any]:
-        """One stored Nifty chain reused for PCR / OI / levels."""
-        chain = self.market_service.get_option_chain(self.nifty_symbol, strike_count=20)
+        """One stored Nifty chain reused for PCR / OI / levels. Store-only."""
+        from app.services import symbol_store as store
+
+        chain = store.get_chain(self.nifty_symbol, 20) or {}
+        if not chain.get("success"):
+            from app.services.symbol_store import harvest_age_seconds
+            return {
+                "success": False,
+                "error": "store_miss",
+                "waiting_for_harvest": True,
+                "harvest_age": harvest_age_seconds(),
+                "vix": self.get_vix_data(),
+                "pcr": {"pcr": None, "error": "store_miss"},
+                "timestamp": datetime.now().isoformat(),
+            }
         return {
             "vix": self.get_vix_data(),
             "pcr": self.get_nifty_pcr(chain),

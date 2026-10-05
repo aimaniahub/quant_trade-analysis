@@ -52,6 +52,6 @@ export function useMarketData(symbols: string[]) {
     return {
         marketData: data,
         connected,
-        ws: wsRef.current
+        getWs: () => wsRef.current,
     };
 }

@@ -33,6 +33,26 @@ TTL_HISTORY = 45.0
 TTL_HISTORY_15M = 900.0
 
 
+def _reader_escape_allowed() -> bool:
+    """HTTP/UI readers may hit Fyers only when FYERS_READER_ESCAPE=true."""
+    try:
+        return bool(get_settings().fyers_reader_escape)
+    except Exception:
+        return False
+
+
+def _store_miss(kind: str, **extra) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "success": False,
+        "error": "store_miss",
+        "_store": True,
+        "_cache": "miss",
+        "kind": kind,
+    }
+    body.update(extra)
+    return body
+
+
 class FyersMarketService:
     """Service for fetching market data from Fyers API."""
     
@@ -46,9 +66,17 @@ class FyersMarketService:
         return self.auth_service.get_fyers_model()
 
     def _invoke(self, api_name: str, fn):
-        """Pace Fyers REST and trip cooldown on 429 / empty gateway bodies."""
+        """Pace Fyers REST. Skip immediately during cooldown — never block 180s."""
         lim = get_fyers_limiter()
-        lim.acquire_sync()
+        granted = lim.try_acquire_sync()
+        if granted is None:
+            return {
+                "s": "error",
+                "code": 429,
+                "message": "429 cooldown",
+                "error": "rate_limit",
+                "success": False,
+            }
         try:
             resp = fn()
         except Exception as exc:
@@ -62,9 +90,11 @@ class FyersMarketService:
             if isinstance(nested, dict):
                 code = code if code is not None else nested.get("code")
                 msg = msg or nested.get("message") or nested.get("error") or ""
-            blob = f"{code} {msg} {resp}"
-            if is_rate_limit_error(blob) or code == 429:
-                lim.trip_limit(f"{api_name}: {msg or code}")
+            # Check code + message only. Never scan the full chain body —
+            # a strike/OI of 429 was tripping cooldown on HTTP 200.
+            if is_rate_limit_error({"code": code, "message": msg, "error": resp.get("error")}) or code == 429:
+                if str(code) != "200" and resp.get("s") not in ("ok", "OK"):
+                    lim.trip_limit(f"{api_name}: {msg or code}")
             elif resp.get("s") in ("ok", "OK") or resp.get("code") == 200:
                 lim.clear_soft()
         return resp
@@ -163,11 +193,21 @@ class FyersMarketService:
                     continue
                 if not store.is_fresh(s, "spot", store.quotes_ttl()):
                     age = store.age(s, "spot")
-                    if age is None or age > store.stale_hard():
+                    # After hours, last LTP is the product. Do not drop a valid close.
+                    from app.utils.market_hours import session_is_open
+                    if session_is_open() and (age is None or age > store.stale_hard()):
                         missing.append(s)
             if not missing:
                 store.note_reader_hit("quotes", ",".join(syms[:3]))
                 return store.quotes_response_from_spots(syms, spots)
+            if not _reader_escape_allowed():
+                if spots:
+                    store.note_reader_hit("quotes.stale", f"n={len(spots)} miss={len(missing)}")
+                    resp = store.quotes_response_from_spots(syms, spots)
+                    resp["missing"] = missing
+                    return resp
+                store.note_reader_miss("quotes", f"n={len(missing)}")
+                return _store_miss("quotes", data=[], missing=missing)
             store.note_reader_miss("quotes", f"n={len(missing)}")
 
         key = make_key("quotes", sorted(syms))
@@ -276,8 +316,13 @@ class FyersMarketService:
                     ):
                         store.note_reader_hit(f"history.{store_res}", symbol)
                         return store.history_as_response(symbol, res, cached, days)
+                    if cached and not store.is_harvest_writer() and not _reader_escape_allowed():
+                        store.note_reader_hit(f"history.{store_res}.stale", symbol)
+                        return store.history_as_response(symbol, res, cached, days)
                 if not store.is_harvest_writer() and not cached:
                     store.note_reader_miss(f"history.{store_res}", symbol)
+                    if not _reader_escape_allowed():
+                        return _store_miss("history", candles=[], symbol=symbol, resolution=resolution)
 
         key = make_key("history", symbol, resolution, from_date, to_date, days)
 
@@ -399,21 +444,17 @@ class FyersMarketService:
         if stored:
             width = store.chain_width(stored.get("chain") or [], stored.get("atm_strike"))
             fresh = store.is_fresh(symbol, "chain", store.oc_ttl())
-            age = store.age(symbol, "chain") or 0
             if width >= want and fresh:
                 store.note_reader_hit("chain", symbol)
                 return stored
-            if (
-                width >= want
-                and not store.is_harvest_writer()
-                and age <= store.stale_hard()
-            ):
+            if not store.is_harvest_writer():
                 store.note_reader_hit("chain.stale", symbol)
                 return stored
 
         if not store.is_harvest_writer():
             store.note_reader_miss("chain", symbol, extra=f"want={want}")
-            # Hard-stale or missing: one escape-hatch Fyers fetch (flow click / first paint)
+            if not _reader_escape_allowed():
+                return _store_miss("chain", chain=[], symbol=symbol)
 
         fetch_width = max(want, store.canonical_strike_count(symbol))
         # Key WITHOUT strike_count — one chain per symbol
@@ -432,6 +473,9 @@ class FyersMarketService:
             sliced = store.get_chain(symbol, want)
             if sliced:
                 return sliced
+        if stored:
+            store.note_reader_hit("chain.fallback", symbol)
+            return stored
         return result
 
     def _get_option_chain_uncached(self, symbol: str, strike_count: int = 10) -> Dict[str, Any]:
@@ -498,19 +542,27 @@ class FyersMarketService:
                         option_type=opt_type
                     )
                     
+                    volume = (
+                        opt.get("volume")
+                        or opt.get("vol")
+                        or opt.get("tot_vol")
+                        or opt.get("pVol")
+                        or opt.get("pvol")
+                        or 0
+                    )
                     option_data = {
                         "symbol": opt.get("symbol"),
                         "ltp": opt.get("ltp"),
                         "oi": opt.get("oi", 0),
                         "oi_change": opt.get("oich", 0),
                         "oi_change_pct": opt.get("oichp", 0),
-                        "volume": opt.get("volume", 0),
+                        "volume": volume,
                         "iv": opt.get("iv"),
                         "bid": opt.get("bid"),
                         "ask": opt.get("ask"),
                         "chg": opt.get("ltpch", 0),
                         "chg_pct": opt.get("ltpchp", 0),
-                        "prev_oi": opt.get("prev_oi", 0),
+                        "prev_oi": opt.get("prev_oi") or opt.get("poi") or 0,
                         # Greeks
                         "delta": greeks["delta"],
                         "gamma": greeks["gamma"],
@@ -551,9 +603,12 @@ class FyersMarketService:
                     "timestamp": datetime.now().isoformat()
                 }
             else:
+                code = response.get("code")
+                message = response.get("message") or response.get("error") or "Failed to fetch option chain"
                 return {
                     "success": False,
-                    "error": response.get("message", "Failed to fetch option chain"),
+                    "error": f"fyers_code={code}: {message}" if code is not None else message,
+                    "fyers_code": code,
                     "chain": []
                 }
         except Exception as e:
@@ -622,15 +677,11 @@ class FyersMarketService:
         Returns:
             Dict with major indices (NIFTY, BANKNIFTY, etc.)
         """
-        indices = [
-            "NSE:NIFTY50-INDEX",
-            "NSE:NIFTYBANK-INDEX",
-            "NSE:NIFTYIT-INDEX",
-            "NSE:FINNIFTY-INDEX",
-            "BSE:SENSEX-INDEX"
-        ]
-        
-        return self.get_quotes(indices)
+        from app.services.fno_stocks import FNO_INDICES
+        return self.get_quotes(list(dict.fromkeys([
+            *FNO_INDICES,
+            "NSE:INDIAVIX-INDEX",
+        ])))
     
     def get_spot_price(self, symbol: str) -> Dict[str, Any]:
         """
@@ -651,9 +702,14 @@ class FyersMarketService:
             if fresh or (not store.is_harvest_writer() and age <= store.stale_hard()):
                 store.note_reader_hit("spot", symbol)
                 return store.spot_response(symbol, stored)
+            if not store.is_harvest_writer() and not _reader_escape_allowed():
+                store.note_reader_hit("spot.stale", symbol)
+                return store.spot_response(symbol, stored)
 
         if not store.is_harvest_writer():
             store.note_reader_miss("spot", symbol)
+            if not _reader_escape_allowed():
+                return _store_miss("spot", symbol=symbol)
 
         key = make_key("spot", symbol)
 

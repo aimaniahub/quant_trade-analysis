@@ -32,14 +32,24 @@ async def readiness_check():
 
     rate = {}
     try:
-        from app.services.rate_limiter import get_fyers_limiter
+        from app.services.rate_limiter import get_fyers_limiter, FYERS_RPM_LIMIT
         lim = get_fyers_limiter()
-        rate = {
-            "in_cooldown": lim.in_cooldown,
-            "cooldown_remaining": round(lim.cooldown_remaining, 1),
-        }
+        rate = lim.stats()
+        rate["in_cooldown"] = lim.in_cooldown
+        rate["cooldown_remaining"] = round(lim.cooldown_remaining, 1)
+        try:
+            rate["limit"] = int(settings.fyers_rpm_limit or FYERS_RPM_LIMIT)
+        except Exception:
+            rate["limit"] = FYERS_RPM_LIMIT
     except Exception:
         pass
+
+    radar = {}
+    try:
+        from app.services.radar_scheduler import get_radar_scheduler
+        radar = get_radar_scheduler().get_status()
+    except Exception as e:
+        radar = {"error": str(e)}
 
     redis_stats = {}
     try:
@@ -67,8 +77,51 @@ async def readiness_check():
     except Exception as e:
         harvest = {"error": str(e)}
 
+    ws = {}
+    try:
+        from app.services.spot_stream import get_spot_stream
+        ws = get_spot_stream().status()
+    except Exception as e:
+        ws = {"status": "error", "error": str(e)}
+
+    hist = {}
+    try:
+        from app.services.history_sweeper import get_history_sweeper
+        hist = get_history_sweeper().status()
+    except Exception as e:
+        hist = {"error": str(e)}
+
+    fyers_state = {}
+    try:
+        from app.services.market_gateway import get_market_gateway
+        fyers_state = get_market_gateway().stats()
+    except Exception:
+        fyers_state = {
+            "state": "COOLDOWN" if rate.get("cooldown") else "HEALTHY",
+            "rpm": rate.get("requests_last_minute", 0),
+            "rpm_limit": rate.get("limit", 200),
+            "429_count": rate.get("429_count", 0),
+            "cooldown": bool(rate.get("cooldown")),
+            "cooldown_remaining": rate.get("cooldown_remaining", 0),
+        }
+
+    redis_health = "disabled"
+    if redis_stats.get("enabled"):
+        redis_health = "healthy" if redis_stats.get("connected") else "degraded"
+
+    ready = fyers_ok
+    if redis_stats.get("enabled") and not redis_stats.get("connected"):
+        ready = False
+
+    last_age = radar.get("last_scan_age_seconds")
+    radar_out = {
+        **radar,
+        "last_harvest_age": last_age,
+        "running": bool(radar.get("scan_running") or radar.get("running")),
+    }
+
     return {
-        "status": "ready" if fyers_ok else "degraded",
+        "status": "ready" if ready else "degraded",
         "dependencies": {
             "fyers_api": "ok" if fyers_ok else "unauthenticated",
             "grok_api": "configured" if settings.grok_api_key else "not_configured",
@@ -78,7 +131,11 @@ async def readiness_check():
         "authenticated": fyers_ok,
         "cache": cache_stats,
         "rate_limit": rate,
-        "redis": redis_stats,
+        "radar": radar_out,
+        "fyers": fyers_state,
+        "websocket": ws,
+        "history_sweeper": hist,
+        "redis": {**redis_stats, "status": redis_health},
         "scan_jobs": job_stats,
         "harvest": harvest,
     }

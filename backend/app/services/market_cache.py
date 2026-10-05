@@ -24,11 +24,13 @@ class MarketCache:
     def __init__(self):
         self._lock = threading.Lock()
         self._store: Dict[str, Tuple[float, Any]] = {}  # key -> (expires_at, value)
+        self._inflight: Dict[str, Tuple[threading.Event, list]] = {}
         self.hits = 0
         self.misses = 0
         self.l2_hits = 0
         self.l2_misses = 0
         self.l2_writes = 0
+        self.single_flight_joins = 0
 
     def _redis_key(self, key: str) -> str:
         from app.services.redis_client import key as rkey
@@ -155,6 +157,7 @@ class MarketCache:
                 "l2_hits": self.l2_hits,
                 "l2_misses": self.l2_misses,
                 "l2_writes": self.l2_writes,
+                "single_flight_joins": self.single_flight_joins,
                 "l2_backend": "redis" if rc.is_available() else "off",
             }
 
@@ -173,17 +176,64 @@ class MarketCache:
                 return out
             return hit
 
-        value = fn()
-        ok = True
-        if isinstance(value, dict) and value.get("success") is False:
-            ok = False
-        if ok or cache_errors:
-            self.set(key, value, ttl)
-        if isinstance(value, dict):
-            out = dict(value)
-            out["_cache"] = "miss"
-            return out
-        return value
+        leader = False
+        event: Optional[threading.Event] = None
+        box: list = []
+        with self._lock:
+            hit2 = self._store.get(key)
+            if hit2 and hit2[0] > time.time():
+                self.hits += 1
+                val = hit2[1]
+                if isinstance(val, dict):
+                    out = dict(val)
+                    out["_cache"] = "hit"
+                    return out
+                return val
+            slot = self._inflight.get(key)
+            if slot:
+                event, box = slot
+                self.single_flight_joins += 1
+            else:
+                event = threading.Event()
+                box = []
+                self._inflight[key] = (event, box)
+                leader = True
+
+        if not leader:
+            event.wait(timeout=30.0)
+            if box:
+                value = box[0]
+                if isinstance(value, dict):
+                    out = dict(value)
+                    out["_cache"] = "hit"
+                    out["_single_flight"] = True
+                    return out
+                return value
+            hit = self.get(key)
+            if hit is not None:
+                if isinstance(hit, dict):
+                    out = dict(hit)
+                    out["_cache"] = "hit"
+                    return out
+                return hit
+
+        try:
+            value = fn()
+            ok = True
+            if isinstance(value, dict) and value.get("success") is False:
+                ok = False
+            if ok or cache_errors:
+                self.set(key, value, ttl)
+            box.append(value)
+            if isinstance(value, dict):
+                out = dict(value)
+                out["_cache"] = "miss"
+                return out
+            return value
+        finally:
+            event.set()
+            with self._lock:
+                self._inflight.pop(key, None)
 
 
 def make_key(prefix: str, *parts: Any) -> str:

@@ -37,7 +37,7 @@ function loadSettings(): ScanSettings {
 }
 
 function normalizeSettings(s: ScanSettings): ScanSettings {
-    let fast = Math.max(2, Math.min(100, Math.round(Number(s.fast_ma) || 7)));
+    const fast = Math.max(2, Math.min(100, Math.round(Number(s.fast_ma) || 7)));
     let slow = Math.max(5, Math.min(500, Math.round(Number(s.slow_ma) || 200)));
     if (slow <= fast) slow = fast + 1;
     return {

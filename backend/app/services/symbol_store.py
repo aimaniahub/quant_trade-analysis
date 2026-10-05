@@ -20,7 +20,8 @@ from app.utils.market_hours import IST
 
 logger = logging.getLogger(__name__)
 
-SNAPSHOT_TTL = 14400  # 4 hours
+SNAPSHOT_TTL = 14400  # 4 hours (live harvest docs)
+SESSION_SNAPSHOT_TTL = 259200  # 72h last-session board / quotes
 STALE_SOFT = 90
 STALE_HARD = 300
 OC_TTL = 120
@@ -32,7 +33,7 @@ HARVEST_OC_STRIKES_INDEX = 20
 HARVEST_HISTORY_15_DAYS = 40
 HARVEST_HISTORY_D_DAYS = 30
 
-_harvest_depth = 0
+_tls = threading.local()
 _harvest_lock = threading.Lock()
 
 _store_lock = threading.RLock()
@@ -40,6 +41,8 @@ _mem_docs: Dict[str, Dict[str, Any]] = {}
 _mem_quotes: Dict[str, Dict[str, Any]] = {}
 _mem_meta: Optional[Dict[str, Any]] = None
 _mem_hv: Optional[Dict[str, Any]] = None
+_mem_board: Optional[Dict[str, Any]] = None
+_mem_session_board: Optional[Dict[str, Any]] = None
 _mem_symbols: set[str] = set()
 
 reader_hits = 0
@@ -61,6 +64,14 @@ def _cfg_int(name: str, default: int) -> int:
 
 def snapshot_ttl() -> int:
     return _cfg_int("symbol_store_ttl_secs", SNAPSHOT_TTL)
+
+
+def session_snapshot_ttl() -> int:
+    try:
+        from app.utils.market_hours import session_snapshot_ttl_seconds
+        return int(session_snapshot_ttl_seconds())
+    except Exception:
+        return _cfg_int("session_snapshot_ttl_secs", SESSION_SNAPSHOT_TTL)
 
 
 def oc_ttl() -> int:
@@ -101,19 +112,22 @@ def harvest_history_d_days() -> int:
 
 @contextmanager
 def harvest_writer():
-    """Mark this process as the universe Fyers writer (cross-thread)."""
-    global _harvest_depth
+    """Mark *this thread* as the universe Fyers writer.
+
+    HTTP worker threads stay readers even while a harvest is in flight.
+    """
     with _harvest_lock:
-        _harvest_depth += 1
+        depth = getattr(_tls, "depth", 0)
+        _tls.depth = depth + 1
     try:
         yield
     finally:
         with _harvest_lock:
-            _harvest_depth = max(0, _harvest_depth - 1)
+            _tls.depth = max(getattr(_tls, "depth", 1) - 1, 0)
 
 
 def is_harvest_writer() -> bool:
-    return _harvest_depth > 0
+    return getattr(_tls, "depth", 0) > 0
 
 
 def is_index_symbol(symbol: str) -> bool:
@@ -165,6 +179,14 @@ def _stale_key() -> str:
 
 def _hv_key() -> str:
     return _rc().key("idx", "hv")
+
+
+def _board_key() -> str:
+    return _rc().key("idx", "board")
+
+
+def _session_board_key() -> str:
+    return _rc().key("idx", "last_session")
 
 
 def _deep_merge(base: Optional[Dict[str, Any]], patch: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -246,13 +268,13 @@ def put(symbol: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     wrote_redis = False
     if rc.is_available():
         try:
-            wrote_redis = bool(rc.set_json(_sym_key(symbol), merged, ttl=snapshot_ttl()))
+            wrote_redis = bool(rc.set_json(_sym_key(symbol), merged, ttl=session_snapshot_ttl()))
             rc.zadd(_stale_key(), {symbol: now})
             # keep a cheap JSON list of the universe
             names = list_symbols()
             if symbol not in names:
                 names.append(symbol)
-                rc.set_json(_symbols_key(), names, ttl=snapshot_ttl())
+                rc.set_json(_symbols_key(), names, ttl=session_snapshot_ttl())
         except Exception as exc:
             logger.debug("symbol_store put redis %s: %s", symbol, exc)
             wrote_redis = False
@@ -458,7 +480,7 @@ def set_quote(symbol: str, spot: Dict[str, Any]) -> None:
     blob[symbol] = clean
     if rc.is_available():
         try:
-            rc.set_json(_quotes_key(), blob, ttl=snapshot_ttl())
+            rc.set_json(_quotes_key(), blob, ttl=session_snapshot_ttl())
         except Exception:
             pass
     with _store_lock:
@@ -779,7 +801,7 @@ def set_harvest_meta(patch: Dict[str, Any]) -> Dict[str, Any]:
     rc = _rc()
     if rc.is_available():
         try:
-            rc.set_json(_meta_key(), meta, ttl=snapshot_ttl())
+            rc.set_json(_meta_key(), meta, ttl=session_snapshot_ttl())
         except Exception:
             pass
     with _store_lock:
@@ -834,6 +856,113 @@ def get_hv_index(max_age: float = 1800.0) -> Optional[Dict[str, Any]]:
     return raw
 
 
+_BOARD_KEEP = (
+    "success", "engine", "pass_id", "phase", "scanned", "attempted", "ok_chain",
+    "hits", "total", "universe_requested", "total_flagged", "partial",
+    "flagged", "watch", "flow", "alert_box", "errors", "skipped", "symbol_states",
+    "screen", "tradeable", "bullish", "bearish", "top", "unique",
+    "timestamp", "telemetry", "ideas", "idea_counts", "grade_counts",
+    "ideas_confirmed", "ideas_bullish", "ideas_bearish", "ideas_pullbacks",
+    "ideas_watch", "ideas_conflict", "market_hours", "retry_attempted",
+    "retry_recovered", "failed_remaining", "completion_pct",
+    "data_mode", "as_of", "session_date",
+)
+
+
+def slim_board(board: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    src = dict(board or {})
+    src.pop("all_hits", None)
+    out = {k: src[k] for k in _BOARD_KEEP if k in src}
+    out["timestamp"] = src.get("timestamp") or _iso()
+    return out
+
+
+def set_board(board: Dict[str, Any]) -> Dict[str, Any]:
+    global _mem_board
+    slim = slim_board(board)
+    rc = _rc()
+    ttl = session_snapshot_ttl()
+    if rc.is_available():
+        try:
+            rc.set_json(_board_key(), slim, ttl=ttl)
+        except Exception:
+            pass
+    with _store_lock:
+        _mem_board = slim
+    return slim
+
+
+def get_board() -> Optional[Dict[str, Any]]:
+    rc = _rc()
+    if rc.is_available():
+        try:
+            raw = rc.get_json(_board_key())
+            if isinstance(raw, dict) and raw:
+                return raw
+        except Exception:
+            pass
+    with _store_lock:
+        return dict(_mem_board) if _mem_board else None
+
+
+def set_session_board(board: Dict[str, Any]) -> Dict[str, Any]:
+    """Pin the last completed session so after-hours UI is never blank."""
+    global _mem_session_board
+    slim = slim_board(board)
+    slim["data_mode"] = slim.get("data_mode") or "last_close"
+    rc = _rc()
+    if rc.is_available():
+        try:
+            rc.set_json(_session_board_key(), slim, ttl=session_snapshot_ttl())
+        except Exception:
+            pass
+    with _store_lock:
+        _mem_session_board = slim
+    return slim
+
+
+def get_session_board() -> Optional[Dict[str, Any]]:
+    rc = _rc()
+    if rc.is_available():
+        try:
+            raw = rc.get_json(_session_board_key())
+            if isinstance(raw, dict) and raw:
+                return raw
+        except Exception:
+            pass
+    with _store_lock:
+        return dict(_mem_session_board) if _mem_session_board else None
+
+
+def classify_freshness(symbol: str, field: str, ttl: Optional[float] = None) -> str:
+    a = age(symbol, field)
+    if a is None:
+        return "MISSING"
+    limit = float(ttl if ttl is not None else (oc_ttl() if field == "chain" else quotes_ttl() if field == "spot" else history_15_ttl() if field.startswith("history.15") else stale_soft()))
+    if field.startswith("history.D"):
+        return "FRESH" if is_fresh(symbol, "history.D") else "STALE"
+    return "FRESH" if a <= limit else "STALE"
+
+
+def harvest_age_seconds() -> Optional[float]:
+    meta = get_harvest_meta() or {}
+    finished = meta.get("finished_at") or meta.get("updated_at")
+    if finished:
+        try:
+            dt = datetime.fromisoformat(str(finished).replace("Z", "+00:00")).replace(tzinfo=None)
+            return max(0.0, (_now() - dt.timestamp()))
+        except Exception:
+            pass
+    ages = []
+    for s in list_symbols()[:40]:
+        a = age(s, "chain")
+        if a is not None:
+            ages.append(a)
+    if not ages:
+        return None
+    return min(ages)
+
+
 def note_reader_hit(kind: str, symbol: str = "") -> None:
     global reader_hits
     reader_hits += 1
@@ -884,6 +1013,8 @@ def status() -> Dict[str, Any]:
         "oc_ttl_secs": oc_ttl(),
         "stale_soft_secs": stale_soft(),
         "stale_hard_secs": stale_hard(),
+        "harvest_age": harvest_age_seconds(),
+        "board": bool(get_board()),
     }
 
 

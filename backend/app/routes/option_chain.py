@@ -23,9 +23,19 @@ async def get_option_chain(
     """
     result = await asyncio.to_thread(market_service.get_option_chain, symbol, strike_count)
     if result.get("success"):
+        from app.services.symbol_store import classify_freshness, age, harvest_age_seconds
+        result["freshness"] = classify_freshness(symbol, "chain")
+        result["chain_age"] = age(symbol, "chain")
+        result["harvest_age"] = harvest_age_seconds()
         return result
-    else:
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed to fetch option chain"))
+    from app.services.symbol_store import harvest_age_seconds
+    return {
+        "success": False,
+        "error": result.get("error") or "store_miss",
+        "harvest_age": harvest_age_seconds(),
+        "waiting_for_harvest": True,
+        "chain": [],
+    }
 
 
 @router.get("/options/analysis/{symbol}")
@@ -36,7 +46,13 @@ async def analyze_option_structure(
     """Analyze option structure using the F&O Intelligence Engine."""
     result = await asyncio.to_thread(market_service.get_option_chain, symbol, strike_count)
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed to fetch option chain"))
+        from app.services.symbol_store import harvest_age_seconds
+        return {
+            "success": False,
+            "error": result.get("error") or "store_miss",
+            "harvest_age": harvest_age_seconds(),
+            "waiting_for_harvest": True,
+        }
 
     analysis = await asyncio.to_thread(
         intelligence_engine.analyze_option_chain, result, True
@@ -80,7 +96,13 @@ async def detect_adjustments(
     """Detect adjustment / actionable trade setups from intelligence summary."""
     result = await asyncio.to_thread(market_service.get_option_chain, symbol, strike_count)
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed to fetch option chain"))
+        from app.services.symbol_store import harvest_age_seconds
+        return {
+            "success": False,
+            "error": result.get("error") or "store_miss",
+            "harvest_age": harvest_age_seconds(),
+            "waiting_for_harvest": True,
+        }
 
     summary = await asyncio.to_thread(
         intelligence_engine.get_analysis_summary, result, False

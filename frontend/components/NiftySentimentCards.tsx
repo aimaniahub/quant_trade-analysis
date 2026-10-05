@@ -133,59 +133,88 @@ export default function NiftySentimentCards({ autoRefresh = true, refreshInterva
             {/* Cards Grid */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 {/* VIX Card */}
-                <div className={`p-4 rounded-xl border ${getColorClass(data.vix.color)} transition-all hover:scale-105`}>
+                <div
+                    title="India VIX measures expected 30-day market volatility (fear gauge). <14 = Low Fear, 14-18 = Normal, >18 = High Fear"
+                    className={`p-4 rounded-xl border ${getColorClass(data.vix.color)} transition-all hover:scale-105 cursor-help`}
+                >
                     <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">VIX</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">VIX (FEAR INDEX)</span>
                         <span className={`text-xs ${data.vix.trend === 'up' ? 'text-rose-500' : 'text-emerald-500'}`}>
                             {getTrendIcon(data.vix.trend)} {data.vix.change_pct?.toFixed(1)}%
                         </span>
                     </div>
                     <div className="text-2xl font-black">{data.vix.value?.toFixed(1) || '–'}</div>
-                    <div className="text-[10px] mt-1 opacity-70">{data.vix.sentiment?.replace(/_/g, ' ')}</div>
+                    <div className="text-[10px] mt-1 font-semibold opacity-90">
+                        {data.vix.value && data.vix.value < 13
+                            ? '🟢 Low Fear / Stable'
+                            : data.vix.value && data.vix.value < 18
+                            ? '🟡 Normal Volatility'
+                            : '🔴 High Fear / Hedging'}
+                    </div>
                 </div>
 
                 {/* PCR Card */}
-                <div className={`p-4 rounded-xl border ${getColorClass(data.pcr.color)} transition-all hover:scale-105`}>
+                <div
+                    title="Put-Call Ratio (Put OI / Call OI). >1.15 = Put Writing Floor (Bullish), <0.85 = Call Writing Ceiling (Bearish)"
+                    className={`p-4 rounded-xl border ${getColorClass(data.pcr.color)} transition-all hover:scale-105 cursor-help`}
+                >
                     <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">PCR</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">PCR (OI REGIME)</span>
                     </div>
                     <div className="text-2xl font-black">{data.pcr.pcr?.toFixed(2) || '–'}</div>
-                    <div className="text-[10px] mt-1 opacity-70">{data.pcr.sentiment?.replace(/_/g, ' ')}</div>
+                    <div className="text-[10px] mt-1 font-semibold opacity-90">
+                        {data.pcr.pcr && data.pcr.pcr >= 1.15
+                            ? '🟢 PUT FLOOR (Support)'
+                            : data.pcr.pcr && data.pcr.pcr <= 0.85
+                            ? '🔴 CALL CEILING (Cap)'
+                            : '🟡 BALANCED RANGE'}
+                    </div>
                 </div>
 
                 {/* Market Breadth Card */}
-                <div className={`p-4 rounded-xl border ${getColorClass(data.breadth.color)} transition-all hover:scale-105`}>
+                <div
+                    title="Advance / Decline ratio across Nifty 50 constituents"
+                    className={`p-4 rounded-xl border ${getColorClass(data.breadth.color)} transition-all hover:scale-105 cursor-help`}
+                >
                     <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">BREADTH</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">BREADTH (A/D)</span>
                     </div>
                     <div className="flex items-baseline gap-1">
                         <span className="text-xl font-black text-emerald-500">{data.breadth.advances}</span>
                         <span className="text-zinc-500">/</span>
                         <span className="text-xl font-black text-rose-500">{data.breadth.declines}</span>
                     </div>
-                    <div className="text-[10px] mt-1 opacity-70">A/D Ratio: {data.breadth.ratio}</div>
+                    <div className="text-[10px] mt-1 opacity-70">Ratio: {data.breadth.ratio} ({data.breadth.sentiment?.replace(/_/g, ' ')})</div>
                 </div>
 
                 {/* OI Change Card */}
-                <div className={`p-4 rounded-xl border ${getColorClass(data.oi_change.color)} transition-all hover:scale-105`}>
+                <div
+                    title="Net difference between Put OI change and Call OI change across Nifty strikes"
+                    className={`p-4 rounded-xl border ${getColorClass(data.oi_change.color)} transition-all hover:scale-105 cursor-help`}
+                >
                     <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">OI CHANGE</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">NET OI FLOW</span>
                     </div>
                     <div className="text-lg font-black">
                         {data.oi_change.net_change > 0 ? '+' : ''}{(data.oi_change.net_change / 1000).toFixed(0)}K
                     </div>
-                    <div className="text-[10px] mt-1 opacity-70">{data.oi_change.sentiment?.replace(/_/g, ' ')}</div>
+                    <div className="text-[10px] mt-1 font-semibold opacity-90">
+                        {data.oi_change.net_change > 0 ? '🟢 Put Writing Dominates' : '🔴 Call Writing Dominates'}
+                    </div>
                 </div>
 
                 {/* Nifty Levels Card */}
-                <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/50 transition-all hover:scale-105">
+                <div
+                    title="Current Nifty 50 spot price with Option Wall Support & Resistance levels"
+                    className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/50 transition-all hover:scale-105 cursor-help"
+                >
                     <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">NIFTY RANGE</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">NIFTY BOUNDS</span>
                     </div>
                     <div className="text-lg font-black text-white">{data.levels.spot?.toFixed(0) || '–'}</div>
                     <div className="flex items-center gap-2 mt-1">
-                        <span className="text-[10px] text-emerald-500">S: {data.levels.support}</span>
-                        <span className="text-[10px] text-rose-500">R: {data.levels.resistance}</span>
+                        <span className="text-[10px] text-emerald-500 font-bold">S: {data.levels.support}</span>
+                        <span className="text-[10px] text-rose-500 font-bold">R: {data.levels.resistance}</span>
                     </div>
                 </div>
             </div>

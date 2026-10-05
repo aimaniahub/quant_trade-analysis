@@ -54,7 +54,13 @@ async def get_market_state(symbol: str = Query("NSE:NIFTY50-INDEX", description=
     )
     
     if not chain_data.get("success"):
-        raise HTTPException(status_code=400, detail=chain_data.get("error", "Failed to fetch option chain"))
+        from app.services.symbol_store import harvest_age_seconds
+        return {
+            "success": False,
+            "error": chain_data.get("error") or "store_miss",
+            "harvest_age": harvest_age_seconds(),
+            "waiting_for_harvest": True,
+        }
     
     analysis = await asyncio.to_thread(intelligence_engine.get_analysis_summary, chain_data)
 
@@ -683,16 +689,89 @@ async def get_store_status():
     return {"success": True, **st}
 
 
+def _tape_ltp(spot: dict, quote_v: dict) -> object:
+    return (
+        (spot or {}).get("ltp")
+        or (quote_v or {}).get("lp")
+        or (quote_v or {}).get("ltp")
+    )
+
+
 @router.get("/market/indices")
 async def get_indices():
-    """Get major market indices data."""
+    """NIFTY / BANKNIFTY / VIX tape. Writer-fetch when store is empty/stale."""
     import asyncio
-    result = await asyncio.to_thread(market_service.get_indices)
-    if result.get("success"):
-        return result
-    else:
-        # Return graceful degradation
-        return {"success": False, "data": [], "error": result.get("error")}
+    from app.services import symbol_store as store
+    from app.utils.market_hours import data_mode, last_session_date, session_is_open
+
+    tape_spec = [
+        ("NSE:NIFTY50-INDEX", "NIFTY"),
+        ("NSE:NIFTYBANK-INDEX", "BANKNIFTY"),
+        ("NSE:INDIAVIX-INDEX", "VIX"),
+    ]
+    symbols = [s for s, _ in tape_spec]
+    spots = store.get_spots(symbols)
+
+    def _needs_fetch(sym: str) -> bool:
+        sp = spots.get(sym) or {}
+        if not sp.get("ltp"):
+            return True
+        if not session_is_open():
+            return False
+        age = store.age(sym, "spot")
+        return age is None or age > 20
+
+    need = [s for s in symbols if _needs_fetch(s)]
+    quotes: dict = {}
+    if need:
+        def _fill():
+            with store.harvest_writer():
+                return market_service.get_quotes(symbols)
+        quotes = await asyncio.to_thread(_fill) or {}
+        spots = store.get_spots(symbols)
+
+    quote_by_n: dict = {}
+    for item in quotes.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        n = item.get("n") or item.get("symbol")
+        v = item.get("v") if isinstance(item.get("v"), dict) else item
+        if n:
+            quote_by_n[str(n)] = v or {}
+            parsed = store.spot_from_quote_item(item)
+            if parsed and parsed.get("symbol") and parsed.get("ltp"):
+                store.put_spot(parsed["symbol"], parsed)
+                spots[parsed["symbol"]] = parsed
+
+    live = session_is_open()
+    tape = []
+    as_of = None
+    for sym, label in tape_spec:
+        sp = spots.get(sym) or store.get_spot(sym) or {}
+        v = quote_by_n.get(sym) or {}
+        ltp = _tape_ltp(sp, v)
+        ch = sp.get("chg") if sp.get("chg") is not None else (v.get("ch") or sp.get("change"))
+        chp = sp.get("chg_pct") if sp.get("chg_pct") is not None else (v.get("chp") or sp.get("change_percent"))
+        as_of = as_of or sp.get("ts") or sp.get("harvest_iso")
+        tape.append({
+            "symbol": sym,
+            "label": label,
+            "ltp": ltp,
+            "ch": ch,
+            "chp": chp,
+            "ok": bool(ltp),
+            "as_of": sp.get("ts") or sp.get("harvest_iso"),
+        })
+    return {
+        "success": any(t.get("ok") for t in tape),
+        "data": tape,
+        "tape": tape,
+        "data_mode": data_mode(),
+        "market_hours": live,
+        "session_date": last_session_date().isoformat(),
+        "as_of": as_of,
+        "error": None if any(t.get("ok") for t in tape) else (quotes.get("error") or "no index quotes"),
+    }
 
 
 @router.get("/market/history/{symbol}")
@@ -948,7 +1027,13 @@ async def get_live_trade_signal(symbol: str):
         )
         
         if not chain_data.get("success"):
-            raise HTTPException(status_code=400, detail=chain_data.get("error", "Failed to fetch OC"))
+            from app.services.symbol_store import harvest_age_seconds
+            return {
+                "success": False,
+                "error": chain_data.get("error") or "store_miss",
+                "harvest_age": harvest_age_seconds(),
+                "waiting_for_harvest": True,
+            }
         
         spot_price = chain_data.get("spot_price") or 0
         atm_strike = chain_data.get("atm_strike") or 0
@@ -1072,7 +1157,14 @@ async def get_greeks_heatmap(
     )
     
     if not chain_data.get("success"):
-        raise HTTPException(status_code=400, detail=chain_data.get("error", "Failed to fetch OC"))
+        from app.services.symbol_store import harvest_age_seconds
+        return {
+            "success": False,
+            "error": chain_data.get("error") or "store_miss",
+            "harvest_age": harvest_age_seconds(),
+            "waiting_for_harvest": True,
+            "heatmap": [],
+        }
     
     spot_price = chain_data.get("spot_price") or 0
     atm_strike = chain_data.get("atm_strike") or 0

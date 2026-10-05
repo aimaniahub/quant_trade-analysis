@@ -31,6 +31,29 @@ ALERT_ABS_OI_FLOOR = 50_000  # absolute OI contracts added (soft, scaled by pric
 # Classification (spec §3)
 # ─────────────────────────────────────────────────────────────────
 
+def derive_oi_change_pct(opt: Optional[Dict[str, Any]]) -> float:
+    """Fyers often sends oichp=0 while oi/prev_oi/oich are populated."""
+    if not opt:
+        return 0.0
+    try:
+        pct = float(opt.get("oi_change_pct") or 0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    if abs(pct) >= 0.01:
+        return pct
+    try:
+        oi = float(opt.get("oi") or 0)
+        prev = float(opt.get("prev_oi") or 0)
+        chg = float(opt.get("oi_change") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if prev > 0 and oi != prev:
+        return (oi - prev) / prev * 100.0
+    if chg and oi > abs(chg):
+        return chg / max(oi - chg, 1.0) * 100.0
+    return 0.0
+
+
 def classify_signal(
     oi_change_pct: float,
     option_price_change_pct: float,
@@ -110,6 +133,119 @@ def compute_momentum_score(
     return 0.0
 
 
+def compute_vor(volume: float, oi: float) -> float:
+    """
+    Volume-to-Open-Interest ratio (VOR).
+    VOR >= 0.8: Aggressive urgency — today's traded volume exceeds standing open interest!
+    VOR >= 0.5: Active institutional accumulation.
+    VOR < 0.2: Routine / low conviction.
+    """
+    vol = float(volume or 0.0)
+    open_int = float(oi or 0.0)
+    if open_int <= 0.0:
+        return 0.0
+    return round(min(vol / open_int, 10.0), 3)
+
+
+def compute_footstep_score(
+    vor: float,
+    oi_velocity: float,
+    is_accelerating: bool,
+    chain_vol_expansion: float = 1.0,
+    premium_direction_match: bool = True,
+    atm_dist_pct: float = 0.0,
+    cluster_count: int = 0,
+    straddle_state: str = "NORMAL",
+) -> Dict[str, Any]:
+    """
+    Footstep Score (0–100): Quantifies rapid institutional footprint before price explosion.
+    Weights:
+      - VOR (Urgency): up to 30 pts (VOR >= 0.8 -> 30, >= 0.5 -> 20, >= 0.3 -> 10)
+      - OI Velocity (Accumulation rate): up to 25 pts (> 3000/min -> 25, > 1000/min -> 16, > 300/min -> 8)
+      - Acceleration (Momentum ramp): 15 pts
+      - Premium Direction Match (Genuine buyers): 15 pts
+      - ATM Proximity (High delta impact): up to 10 pts (<= 1.5% -> 10, <= 3.0% -> 6)
+      - Strike Cluster Cohesion: up to 5 pts (>= 3 strikes -> 5, >= 2 -> 2)
+      - Multipliers for EXPLODING (+20%) or COMPRESSED (+10%) straddles.
+    """
+    score = 0.0
+    notes: List[str] = []
+
+    # 1. VOR (Urgency)
+    vor_val = float(vor or 0.0)
+    if vor_val >= 0.8:
+        score += 30.0
+        notes.append(f"VOR {vor_val:.2f} extreme urgency")
+    elif vor_val >= 0.5:
+        score += 20.0
+        notes.append(f"VOR {vor_val:.2f} active accumulation")
+    elif vor_val >= 0.3:
+        score += 10.0
+        notes.append(f"VOR {vor_val:.2f} elevated")
+    else:
+        score += min(vor_val / 0.3, 1.0) * 5.0
+
+    # 2. OI Velocity
+    v = abs(float(oi_velocity or 0.0))
+    if v >= 3000:
+        score += 25.0
+        notes.append(f"OI velocity {v:.0f}/min massive")
+    elif v >= 1000:
+        score += 16.0
+        notes.append(f"OI velocity {v:.0f}/min high")
+    elif v >= 300:
+        score += 8.0
+    else:
+        score += min(v / 300.0, 1.0) * 4.0
+
+    # 3. Velocity Acceleration
+    if is_accelerating:
+        score += 15.0
+        notes.append("OI velocity accelerating")
+
+    # 4. Premium Direction Match
+    if premium_direction_match:
+        score += 15.0
+    else:
+        score -= 10.0
+        notes.append("Premium mismatch")
+
+    # 5. ATM Proximity
+    dist = abs(float(atm_dist_pct or 0.0))
+    if dist <= 1.5:
+        score += 10.0
+    elif dist <= 3.0:
+        score += 6.0
+    elif dist <= 5.0:
+        score += 3.0
+
+    # 6. Cluster Cohesion
+    if cluster_count >= 3:
+        score += 5.0
+        notes.append(f"{cluster_count} strike cluster")
+    elif cluster_count >= 2:
+        score += 2.0
+
+    # Multiplier
+    state = (straddle_state or "NORMAL").upper()
+    if state == "EXPLODING":
+        score = min(score * 1.20, 100.0)
+        notes.append("Straddle expanding / IV breakout")
+    elif state == "COMPRESSED":
+        score = min(score * 1.10, 100.0)
+        notes.append("Straddle coiled spring")
+
+    final_score = round(max(0.0, min(score, 100.0)), 1)
+    return {
+        "score": final_score,
+        "vor": vor_val,
+        "oi_velocity": v,
+        "is_accelerating": is_accelerating,
+        "notes": notes,
+        "early_mover": final_score >= 55.0 and (vor_val >= 0.5 or v >= 800),
+    }
+
+
 def compute_lis_v2(
     oi_change_pct: float,
     vol_spike_ratio: float,
@@ -126,9 +262,27 @@ def compute_lis_v2(
     momentum_score = compute_momentum_score(
         option_price_change_pct, opt_type, signal_direction
     )
-    vwap_score = (1.0 - min(abs(underlying_vwap_dev_pct) / 2.0, 1.0)) * 15.0
 
     direction = (signal_direction or "NEUTRAL").upper()
+    dev = float(underlying_vwap_dev_pct or 0.0)
+    # Trend-aligned VWAP: reward directional expansion away from VWAP without extreme overextension
+    if direction == "BULLISH":
+        if 0.1 <= dev <= 2.5:
+            vwap_score = 15.0
+        elif dev > 2.5:
+            vwap_score = max(0.0, 15.0 - (dev - 2.5) * 5.0)
+        else:
+            vwap_score = max(0.0, 8.0 + dev * 4.0)
+    elif direction == "BEARISH":
+        if -2.5 <= dev <= -0.1:
+            vwap_score = 15.0
+        elif dev < -2.5:
+            vwap_score = max(0.0, 15.0 - (abs(dev) - 2.5) * 5.0)
+        else:
+            vwap_score = max(0.0, 8.0 - dev * 4.0)
+    else:
+        vwap_score = (1.0 - min(abs(dev) / 2.0, 1.0)) * 10.0
+
     if direction == "BULLISH":
         trigger = 10.0 if above_ema20 else 0.0
     elif direction == "BEARISH":
@@ -596,9 +750,7 @@ def build_scored_contract(
     above_ema: bool,
     cluster_hits: int,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Full v3 score path for one candidate. Returns None if hard-rejected (grade C with no alert).
-    """
+    """Full v3 score path for one candidate. Grade C is kept for the live tape."""
     opt = cand["opt"]
     direction = signal.get("direction") or "NEUTRAL"
     oi_added = estimate_oi_added(
@@ -650,10 +802,6 @@ def build_scored_contract(
         unusual=unusual,
         lis=lis,
     )
-
-    # Drop pure junk (C and not unusual)
-    if evald["grade"] == "C" and not unusual["is_alert_box"]:
-        return None
 
     greek_interp = interpret_greeks(
         opt.get("delta"), opt.get("gamma"), opt.get("theta"), opt.get("vega"), cand["opt_type"]
