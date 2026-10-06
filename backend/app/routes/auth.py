@@ -19,21 +19,58 @@ async def login():
 
 
 @router.get("/callback")
-async def callback(code: str = Query(...), state: Optional[str] = None):
+async def callback(
+    request: Request,
+    auth_code: Optional[str] = Query(None),
+    code: Optional[str] = Query(None),
+    s: Optional[str] = Query(None),
+    state: Optional[str] = None
+):
     """
     OAuth callback handler.
     Exchanges auth code for access token.
+    Fyers passes the actual authorization token in 'auth_code' parameter:
+    ?s=ok&code=200&auth_code=eyJhbGciOi...
     """
-    success, message, token = auth_service.handle_callback(code)
+    # 1. Prefer auth_code, else code (if not status code '200')
+    actual_code = auth_code
+    if not actual_code and code and code != "200":
+        actual_code = code
+
+    if not actual_code:
+        # Check raw query params as fallback
+        params = dict(request.query_params)
+        actual_code = params.get("auth_code") or (params.get("code") if params.get("code") != "200" else None)
+
+    if not actual_code:
+        accept_header = request.headers.get("accept", "")
+        err_msg = "Missing auth_code in callback request from Fyers"
+        if "text/html" in accept_header:
+            import urllib.parse
+            return RedirectResponse(url=f"/?auth=error&message={urllib.parse.quote(err_msg)}", status_code=303)
+        raise HTTPException(status_code=400, detail=err_msg)
+
+    success, message, token = auth_service.handle_callback(actual_code)
     
+    accept_header = request.headers.get("accept", "")
     if success:
-        # In a real app, you might redirect to a frontend success page
+        from app.core.config import reload_settings
+        reload_settings()
+        auth_service.apply_reloaded_settings()
+
+        # If user opened callback via browser, redirect them directly to frontend Home with success toast!
+        if "text/html" in accept_header:
+            return RedirectResponse(url="/?auth=success", status_code=303)
+
         return {
             "status": "success",
             "message": message,
-            "access_token": "Token generated and stored" # Don't return the full token for security
+            "access_token": "Token generated and stored"
         }
     else:
+        if "text/html" in accept_header:
+            import urllib.parse
+            return RedirectResponse(url=f"/?auth=error&message={urllib.parse.quote(message)}", status_code=303)
         raise HTTPException(status_code=400, detail=message)
 
 

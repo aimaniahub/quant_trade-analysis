@@ -52,55 +52,93 @@ class FyersAuthService:
         Handle OAuth callback and generate access token.
         
         Args:
-            auth_code: The authorization code from Fyers callback
+            auth_code: The authorization code from Fyers callback (or raw query string/URL)
             
         Returns:
             Tuple of (success, message, access_token)
         """
         try:
-            if self._session is None:
-                self._session = self._create_session()
+            if not auth_code:
+                return False, "Missing auth_code", None
+
+            auth_code = str(auth_code).strip()
             
-            self._session.set_token(auth_code)
-            response = self._session.generate_token()
+            # If the user passed a full URL, extract auth_code parameter
+            if "auth_code=" in auth_code or "http" in auth_code:
+                from urllib.parse import urlparse, parse_qs
+                try:
+                    parsed = urlparse(auth_code)
+                    qs = parse_qs(parsed.query)
+                    if "auth_code" in qs:
+                        auth_code = qs["auth_code"][0]
+                    elif "code" in qs and qs["code"][0] != "200":
+                        auth_code = qs["code"][0]
+                except Exception:
+                    pass
+
+            session = self._create_session()
+            session.set_token(auth_code)
+            response = session.generate_token()
             
-            if "access_token" in response:
+            if isinstance(response, dict) and "access_token" in response:
                 access_token = response["access_token"]
-                # Store token in environment for persistence
+                # Store token in memory, Redis, /tmp, and .env (if writable)
                 self._store_access_token(access_token)
                 return True, "Authentication successful", access_token
             else:
-                error_msg = response.get("message", "Failed to generate token")
+                error_msg = response.get("message", "Failed to generate token") if isinstance(response, dict) else str(response)
                 return False, error_msg, None
                 
         except Exception as e:
             return False, f"Authentication error: {str(e)}", None
     
     def _store_access_token(self, token: str):
-        """Store access token to .env file for persistence."""
-        import os
-        from pathlib import Path
-        
-        # Update in-memory settings
+        """Store access token in memory, Redis, /tmp cache, and .env (if writable)."""
+        token = token.strip()
         self.settings.fyers_access_token = token
-        
-        # Write to .env file for persistence
-        env_path = Path(__file__).parent.parent.parent / ".env"
-        if env_path.exists():
-            lines = env_path.read_text().splitlines()
-            updated = False
-            new_lines = []
-            for line in lines:
-                if line.startswith("FYERS_ACCESS_TOKEN="):
+        self._fyers = None
+        self._last_token = None
+        self._valid_cache = None
+        self._cached_profile = None
+
+        # 1. Store in Redis / Upstash if configured (persists across serverless instances)
+        try:
+            from app.services.redis_client import is_redis_configured, set_json
+            if is_redis_configured():
+                set_json("auth:fyers_access_token", token, ttl=86400)
+        except Exception:
+            pass
+
+        # 2. Store in temp directory (writable in serverless /tmp)
+        try:
+            import tempfile
+            from pathlib import Path
+            tmp_file = Path(tempfile.gettempdir()) / "fyers_access_token.txt"
+            tmp_file.write_text(token)
+        except Exception:
+            pass
+
+        # 3. Write to .env file for local dev persistence (safe against read-only FS)
+        try:
+            from pathlib import Path
+            env_path = Path(__file__).parent.parent.parent / ".env"
+            if env_path.exists():
+                lines = env_path.read_text().splitlines()
+                updated = False
+                new_lines = []
+                for line in lines:
+                    if line.startswith("FYERS_ACCESS_TOKEN="):
+                        new_lines.append(f"FYERS_ACCESS_TOKEN={token}")
+                        updated = True
+                    else:
+                        new_lines.append(line)
+                
+                if not updated:
                     new_lines.append(f"FYERS_ACCESS_TOKEN={token}")
-                    updated = True
-                else:
-                    new_lines.append(line)
-            
-            if not updated:
-                new_lines.append(f"FYERS_ACCESS_TOKEN={token}")
-            
-            env_path.write_text("\n".join(new_lines))
+                
+                env_path.write_text("\n".join(new_lines))
+        except Exception:
+            pass
     
     def generate_totp(self) -> Optional[str]:
         """
@@ -172,6 +210,30 @@ class FyersAuthService:
             FyersModel if authenticated, None otherwise
         """
         if not self.settings.fyers_access_token:
+            # 1. Check Redis if available (cross-instance Vercel persistence)
+            try:
+                from app.services.redis_client import is_redis_configured, get_json
+                if is_redis_configured():
+                    cached = get_json("auth:fyers_access_token")
+                    if cached:
+                        self.settings.fyers_access_token = str(cached).strip()
+            except Exception:
+                pass
+
+            # 2. Check /tmp token cache (writable lambda instance storage)
+            if not self.settings.fyers_access_token:
+                try:
+                    import tempfile
+                    from pathlib import Path
+                    tmp_file = Path(tempfile.gettempdir()) / "fyers_access_token.txt"
+                    if tmp_file.exists():
+                        t = tmp_file.read_text().strip()
+                        if t:
+                            self.settings.fyers_access_token = t
+                except Exception:
+                    pass
+
+        if not self.settings.fyers_access_token:
             return None
         
         # Re-initialize if token changed or model doesn't exist
@@ -240,6 +302,8 @@ class FyersAuthService:
         """
         Get current authentication status.
         """
+        if not self.settings.fyers_access_token:
+            self.get_fyers_model()
         has_token = bool(self.settings.fyers_access_token)
         is_valid = False
         user_info = getattr(self, "_cached_profile", None)

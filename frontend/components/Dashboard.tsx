@@ -40,14 +40,32 @@ export type TabKey = 'home' | 'radar' | 'quant' | 'ma7200' | 'rsi' | 'watch' | '
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<TabKey>('home');
+  const [authBanner, setAuthBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const market = useMarketPolling(15000);
 
-  // Sync with browser back/forward or hash if needed
+  // Sync with browser back/forward, hash, and OAuth callback status
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const hash = window.location.hash.replace('#', '') as TabKey;
       if (['home', 'radar', 'quant', 'ma7200', 'rsi', 'watch', 'stocks'].includes(hash)) {
         setActiveTab(hash);
+      }
+
+      // Check for OAuth redirect response
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('auth') === 'success') {
+        setAuthBanner({
+          type: 'success',
+          message: 'Fyers Authentication Successful! Access token generated and active.',
+        });
+        window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+      } else if (params.get('auth') === 'error') {
+        const msg = params.get('message') || 'Authentication failed. Please verify credentials.';
+        setAuthBanner({
+          type: 'error',
+          message: msg,
+        });
+        window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
       }
     }
   }, []);
@@ -180,6 +198,28 @@ export default function Dashboard() {
           </div>
         </div>
       </header>
+
+      {/* ── OAuth Status Toast / Banner ───────────────────────────────────────── */}
+      {authBanner && (
+        <div
+          className={`border-b px-4 py-3 text-xs flex items-center justify-between transition-all ${
+            authBanner.type === 'success'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+          }`}
+        >
+          <div className="max-w-7xl mx-auto flex items-center gap-2">
+            <span>{authBanner.type === 'success' ? '✅' : '⚠️'}</span>
+            <span className="font-medium">{authBanner.message}</span>
+          </div>
+          <button
+            onClick={() => setAuthBanner(null)}
+            className="text-zinc-400 hover:text-white font-mono text-sm px-2"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* ── Subheader Return Link when on a sub-terminal ──────────────────────── */}
       {activeTab !== 'home' && (
