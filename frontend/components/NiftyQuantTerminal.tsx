@@ -311,29 +311,29 @@ export default function NiftyQuantTerminal({
   } = data;
 
   return (
-    <div className="w-full flex flex-col bg-[#07090d] text-zinc-100 rounded-xl border border-violet-800/60 shadow-2xl overflow-hidden font-sans space-y-4 p-4">
+    <div className="w-full flex flex-col bg-[#07090d] text-zinc-100 rounded-xl border border-violet-800/60 shadow-2xl overflow-hidden font-sans space-y-4 p-3 sm:p-4">
       {/* ── Top Header / Quick Meta ────────────────────────────────────── */}
       <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-violet-900/60">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 w-full md:w-auto">
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
-              <span className="text-lg font-black tracking-tight uppercase bg-gradient-to-r from-violet-300 via-indigo-200 to-white bg-clip-text text-transparent">
+              <span className="text-base sm:text-lg font-black tracking-tight uppercase bg-gradient-to-r from-violet-300 via-indigo-200 to-white bg-clip-text text-transparent">
                 NIFTY 50 QUANT TERMINAL
               </span>
-              <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-violet-600/30 text-violet-300 border border-violet-500/40">
+              <span className="px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-black uppercase bg-violet-600/30 text-violet-300 border border-violet-500/40">
                 PRO DESK LIVE
               </span>
             </div>
-            <span className="text-[10px] font-mono text-zinc-500">
+            <span className="text-[9px] sm:text-[10px] font-mono text-zinc-500">
               Black-Scholes Greeks • Heavyweight Transmission • 4-Quadrant Flow
             </span>
           </div>
 
-          <div className="h-8 w-px bg-zinc-800" />
+          <div className="hidden sm:block h-8 w-px bg-zinc-800" />
 
           {/* Spot Price readout */}
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-black font-mono tracking-tight text-white">
+          <div className="flex items-baseline gap-2 pt-1 sm:pt-0">
+            <span className="text-xl sm:text-2xl font-black font-mono tracking-tight text-white">
               {fmt(spot_price, 2)}
             </span>
             <span className="text-xs font-mono text-zinc-400">
@@ -345,7 +345,7 @@ export default function NiftyQuantTerminal({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-between md:justify-start">
           {/* View Mode Toggle */}
           <div className="flex bg-[#0c1017] p-0.5 rounded-lg border border-violet-800/50">
             <button

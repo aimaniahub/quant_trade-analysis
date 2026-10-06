@@ -27,6 +27,42 @@ export interface ApiResponse<T = any> {
     message?: string;
 }
 
+export function getStoredFyersToken(): string | null {
+    if (typeof window === 'undefined') return null;
+    try {
+        const token = localStorage.getItem('fyers_access_token');
+        if (token && token !== 'undefined' && token !== 'null' && token.length > 10) {
+            return token;
+        }
+        const cookieMatch = document.cookie.match(/(?:^|;\s*)fyers_access_token=([^;]+)/);
+        if (cookieMatch && cookieMatch[1]) {
+            const dec = decodeURIComponent(cookieMatch[1]);
+            if (dec && dec !== 'undefined' && dec !== 'null' && dec.length > 10) {
+                return dec;
+            }
+        }
+    } catch {
+        // ignore
+    }
+    return null;
+}
+
+export function setStoredFyersToken(token: string | null | undefined): void {
+    if (typeof window === 'undefined') return;
+    try {
+        if (!token || token === 'undefined' || token === 'null') {
+            localStorage.removeItem('fyers_access_token');
+            document.cookie = 'fyers_access_token=; path=/; max-age=0; SameSite=Lax';
+        } else {
+            localStorage.setItem('fyers_access_token', token);
+            document.cookie = `fyers_access_token=${encodeURIComponent(token)}; path=/; max-age=86400; SameSite=Lax`;
+        }
+        window.dispatchEvent(new Event('fyers-auth-changed'));
+    } catch {
+        // ignore
+    }
+}
+
 export const api = {
     /**
      * Generic fetch wrapper
@@ -43,12 +79,26 @@ export const api = {
             const base = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
             url = `${base.replace(/\/+$/, '')}${cleanEndpoint}`;
         }
+
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            ...((options.headers as Record<string, string>) || {}),
+        };
+
+        const token = getStoredFyersToken();
+        if (token) {
+            if (!headers['x-fyers-access-token']) {
+                headers['x-fyers-access-token'] = token;
+            }
+            if (!headers['Authorization']) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+        }
+
         const response = await fetch(url, {
+            credentials: 'include',
             ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers,
-            },
+            headers,
         });
 
         if (!response.ok) {
@@ -78,11 +128,20 @@ export const api = {
         getStatus: () => api.fetch<{ authenticated: boolean; has_token: boolean; is_valid: boolean; user_info: any; app_id: string | null }>('/auth/status'),
         autoLogin: () => api.fetch('/auth/auto-login', { method: 'POST' }),
         refreshToken: () => api.fetch('/auth/refresh', { method: 'POST' }),
-        submitAuthCode: (authCode: string) =>
-            api.fetch<{ status: string; message: string; info: string }>('/auth/token', {
+        submitAuthCode: async (authCode: string) => {
+            const res = await api.fetch<{ status: string; message: string; access_token?: string; info?: string }>('/auth/token', {
                 method: 'POST',
                 body: JSON.stringify({ auth_code: authCode }),
-            }),
+            });
+            if (res?.access_token) {
+                setStoredFyersToken(res.access_token);
+            }
+            return res;
+        },
+        logout: async () => {
+            setStoredFyersToken(null);
+            return api.fetch<{ status: string; message: string }>('/auth/logout', { method: 'POST' });
+        },
         reloadSettings: () => api.fetch('/auth/reload-settings', { method: 'POST' }),
     },
 

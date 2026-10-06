@@ -79,9 +79,30 @@ export function useAuth() {
         }
     }, [checkStatus, invalidateMarketData]);
 
+    const logout = useCallback(async () => {
+        try {
+            setLoading(true);
+            await api.auth.logout();
+            await checkStatus();
+            await invalidateMarketData();
+        } catch (err: any) {
+            setError(err.message || 'Failed to logout');
+        } finally {
+            setLoading(false);
+        }
+    }, [checkStatus, invalidateMarketData]);
+
     useEffect(() => {
         checkStatus();
-    }, [checkStatus]);
+        const handleAuthChanged = () => {
+            checkStatus();
+            invalidateMarketData();
+        };
+        window.addEventListener('fyers-auth-changed', handleAuthChanged);
+        return () => {
+            window.removeEventListener('fyers-auth-changed', handleAuthChanged);
+        };
+    }, [checkStatus, invalidateMarketData]);
 
     return {
         status,
@@ -90,6 +111,7 @@ export function useAuth() {
         login,
         autoLogin,
         submitAuthCode,
+        logout,
         refresh: checkStatus
     };
 }

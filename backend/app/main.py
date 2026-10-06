@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
@@ -164,6 +164,27 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Middleware: Stateless token extractor for serverless (Vercel) instances
+    @app.middleware("http")
+    async def extract_client_auth_middleware(request: Request, call_next):
+        token = (
+            request.headers.get("x-fyers-access-token")
+            or request.headers.get("x-fyers-token")
+            or request.cookies.get("fyers_access_token")
+        )
+        if not token:
+            auth_header = request.headers.get("authorization") or ""
+            if auth_header.lower().startswith("bearer "):
+                token = auth_header[7:].strip()
+
+        if token and token != "undefined" and token != "null" and len(token) > 10:
+            from app.services.fyers_auth import get_auth_service
+            auth = get_auth_service()
+            auth.set_token(token)
+
+        response = await call_next(request)
+        return response
     
     # Root health endpoint for platform probes (Render, AWS, uptime monitors)
     @app.get("/health", tags=["Health"])

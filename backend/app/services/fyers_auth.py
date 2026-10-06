@@ -92,6 +92,16 @@ class FyersAuthService:
         except Exception as e:
             return False, f"Authentication error: {str(e)}", None
     
+    def set_token(self, token: str) -> None:
+        """Set access token from client request context (serverless middleware)."""
+        if not token:
+            return
+        token = token.strip()
+        if token in ("undefined", "null") or len(token) < 10:
+            return
+        if self.settings.fyers_access_token != token:
+            self._store_access_token(token)
+
     def _store_access_token(self, token: str):
         """Store access token in memory, Redis, /tmp cache, and .env (if writable)."""
         token = token.strip()

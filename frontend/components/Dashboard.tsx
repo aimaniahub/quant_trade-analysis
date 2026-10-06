@@ -6,6 +6,7 @@ import MarketIndices from './MarketIndices';
 import AuthButton from './AuthButton';
 import SystemStatus from './SystemStatus';
 import { useMarketPolling } from '../lib/hooks/useMarketPolling';
+import { setStoredFyersToken } from '../lib/api';
 
 // Lazy load heavy terminal sub-components for instant initial page render
 const OptionFlowRadar = dynamic(() => import('./OptionFlowRadar'), {
@@ -41,6 +42,7 @@ export type TabKey = 'home' | 'radar' | 'quant' | 'ma7200' | 'rsi' | 'watch' | '
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [authBanner, setAuthBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const market = useMarketPolling(15000);
 
   // Sync with browser back/forward, hash, and OAuth callback status
@@ -53,6 +55,10 @@ export default function Dashboard() {
 
       // Check for OAuth redirect response
       const params = new URLSearchParams(window.location.search);
+      const token = params.get('token');
+      if (token) {
+        setStoredFyersToken(token);
+      }
       if (params.get('auth') === 'success') {
         setAuthBanner({
           type: 'success',
@@ -72,6 +78,7 @@ export default function Dashboard() {
 
   const switchTab = (tab: TabKey) => {
     setActiveTab(tab);
+    setMobileMenuOpen(false);
     if (typeof window !== 'undefined') {
       window.location.hash = tab === 'home' ? '' : tab;
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -173,11 +180,11 @@ export default function Dashboard() {
             </button>
           </nav>
 
-          {/* Right Header Status: Market Clock & Auth */}
-          <div className="flex items-center gap-2 sm:gap-3">
+          {/* Right Header Status: Market Clock, SystemStatus & Auth */}
+          <div className="flex items-center gap-1.5 sm:gap-3">
             {/* Live IST Market Hours Gate Pill */}
             <div
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono border ${
+              className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-lg text-[10px] sm:text-[11px] font-mono border ${
                 market.isOpen
                   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
                   : 'bg-amber-500/10 text-amber-400 border-amber-500/25'
@@ -188,16 +195,102 @@ export default function Dashboard() {
                   : 'Market Closed (Adaptive 15m Refresh Active - API Rate Shield)'
               }
             >
-              <span className={`w-2 h-2 rounded-full ${market.isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span className="font-semibold hidden xs:inline">{market.statusText}</span>
+              <span className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${market.isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span className="font-semibold hidden sm:inline">{market.statusText}</span>
               <span className="text-zinc-400">({market.istTimeStr})</span>
             </div>
 
             <SystemStatus />
             <AuthButton compact />
+
+            {/* Mobile Hamburger Menu Button */}
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="lg:hidden p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-800 transition-colors"
+              aria-label="Toggle Navigation Desks"
+            >
+              {mobileMenuOpen ? (
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              )}
+            </button>
           </div>
         </div>
       </header>
+
+      {/* ── Mobile Slide-Out Navigation Drawer ─────────────────────────────────── */}
+      {mobileMenuOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex flex-col justify-end animate-fadeIn">
+          <div className="flex-1" onClick={() => setMobileMenuOpen(false)} />
+          <div className="bg-[#0b0e14] border-t border-zinc-800 rounded-t-2xl p-4 sm:p-5 space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded bg-emerald-500 flex items-center justify-center font-mono font-black text-black text-xs">
+                  OG
+                </div>
+                <span className="font-bold text-sm text-white">OPTIONGREEK Desks</span>
+              </div>
+              <button
+                onClick={() => setMobileMenuOpen(false)}
+                className="text-zinc-400 hover:text-white px-2 py-1 rounded bg-zinc-900 text-xs font-mono"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* Desk Buttons Grid in Drawer */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {[
+                { key: 'home', icon: '🏠', label: 'Command Center', desc: 'Indices & Overview' },
+                { key: 'radar', icon: '🎯', label: 'Flow Radar', desc: 'Institutional Tracking' },
+                { key: 'quant', icon: '⚡', label: 'Nifty Quant', desc: 'Greeks & Walls' },
+                { key: 'ma7200', icon: '📈', label: '7/200 MA', desc: 'Trend Crossovers' },
+                { key: 'rsi', icon: '📊', label: 'RSI Desk', desc: 'Momentum Divergence' },
+                { key: 'watch', icon: '⏱️', label: 'Paper Desk', desc: 'Simulated Execution' },
+                { key: 'stocks', icon: '🔬', label: 'F&O Stocks', desc: 'Stock Intelligence' },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  onClick={() => switchTab(item.key as TabKey)}
+                  className={`p-3 rounded-xl border text-left flex flex-col justify-between gap-1 transition-all ${
+                    activeTab === item.key
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                      : 'bg-zinc-900/80 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">{item.icon}</span>
+                    <span className="font-bold">{item.label}</span>
+                  </div>
+                  <span className="text-[10px] text-zinc-400">{item.desc}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Quick Status Inside Drawer */}
+            <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 text-xs space-y-1.5">
+              <div className="font-bold text-zinc-300 text-[11px] uppercase tracking-wider">System Telemetry</div>
+              <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
+                <span>Market Hours:</span>
+                <span className={market.isOpen ? 'text-emerald-400 font-semibold' : 'text-amber-400'}>
+                  {market.statusText} ({market.istTimeStr})
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
+                <span>Rate Shield Interval:</span>
+                <span className="text-zinc-300">
+                  {typeof market.interval === 'number' ? `${market.interval / 1000}s` : '15m (Shield)'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── OAuth Status Toast / Banner ───────────────────────────────────────── */}
       {authBanner && (
@@ -536,12 +629,12 @@ export default function Dashboard() {
       </main>
 
       {/* ── Mobile Sticky Bottom Navigation Bar ───────────────────────────────── */}
-      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#07090d]/95 backdrop-blur-lg border-t border-zinc-800/80 px-2 py-2">
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#07090d]/95 backdrop-blur-xl border-t border-zinc-800/80 px-2 pt-1.5 pb-[calc(env(safe-area-inset-bottom,0px)+8px)]">
         <div className="flex items-center justify-around">
           <button
             onClick={() => switchTab('home')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-medium transition-colors ${
-              activeTab === 'home' ? 'text-emerald-400 bg-emerald-500/10 font-bold' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'home' ? 'text-emerald-400 font-bold bg-emerald-500/10' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">🏠</span>
@@ -549,8 +642,8 @@ export default function Dashboard() {
           </button>
           <button
             onClick={() => switchTab('radar')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-medium transition-colors ${
-              activeTab === 'radar' ? 'text-emerald-400 bg-emerald-500/10 font-bold' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'radar' ? 'text-emerald-400 font-bold bg-emerald-500/10' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">🎯</span>
@@ -558,8 +651,8 @@ export default function Dashboard() {
           </button>
           <button
             onClick={() => switchTab('quant')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-medium transition-colors ${
-              activeTab === 'quant' ? 'text-cyan-400 bg-cyan-500/10 font-bold' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'quant' ? 'text-cyan-400 font-bold bg-cyan-500/10' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">⚡</span>
@@ -567,24 +660,26 @@ export default function Dashboard() {
           </button>
           <button
             onClick={() => switchTab('ma7200')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-medium transition-colors ${
-              activeTab === 'ma7200' ? 'text-amber-400 bg-amber-500/10 font-bold' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'ma7200' ? 'text-amber-400 font-bold bg-amber-500/10' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">📈</span>
             <span>7/200</span>
           </button>
           <button
-            onClick={() => switchTab('watch')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-medium transition-colors ${
-              activeTab === 'watch' ? 'text-emerald-400 bg-emerald-500/10 font-bold' : 'text-zinc-400 hover:text-white'
+            onClick={() => setMobileMenuOpen(true)}
+            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
+              ['rsi', 'watch', 'stocks'].includes(activeTab) || mobileMenuOpen
+                ? 'text-violet-400 font-bold bg-violet-500/10'
+                : 'text-zinc-400 hover:text-white'
             }`}
           >
-            <span className="text-base leading-none">⏱️</span>
-            <span>Desk</span>
+            <span className="text-base leading-none">☰</span>
+            <span>Desks</span>
           </button>
         </div>
-      </div>
+      </nav>
     </div>
   );
 }

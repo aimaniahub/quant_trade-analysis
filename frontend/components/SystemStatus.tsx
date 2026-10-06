@@ -54,31 +54,38 @@ export default function SystemStatus() {
   const coolLeft = Math.ceil(Number(data?.fyers?.cooldown_remaining || 0));
 
   return (
-    <div className="flex flex-wrap items-center gap-3 text-[10px] uppercase tracking-wider">
-      <span className="flex items-center gap-1">
+    <div className="flex items-center gap-2 sm:gap-3 text-[10px] uppercase tracking-wider">
+      {/* Backend Status */}
+      <span className="flex items-center gap-1 shrink-0" title={backendOk ? 'Backend API Connected' : 'Backend API Offline'}>
         <span
           className={`w-1.5 h-1.5 rounded-full ${
             backendOk ? 'bg-emerald-500' : isFetching ? 'bg-amber-400' : 'bg-rose-500'
           }`}
         />
-        {backendOk ? 'Backend Active' : 'Backend Down'}
+        <span className="hidden sm:inline">{backendOk ? 'Backend Active' : 'Backend Down'}</span>
+        <span className="sm:hidden">{backendOk ? 'API OK' : 'API ERR'}</span>
       </span>
-      <span className="flex items-center gap-1">
+
+      {/* Fyers Auth Status */}
+      <span className="flex items-center gap-1 shrink-0" title={fyersOk ? 'Fyers Token Valid & Active' : 'Fyers Token Missing or Expired'}>
         <span
           className={`w-1.5 h-1.5 rounded-full ${fyersOk ? 'bg-blue-500' : 'bg-zinc-500'}`}
         />
-        {fyersOk ? 'Fyers Auth OK' : 'Fyers Unauthenticated'}
+        <span className="hidden sm:inline">{fyersOk ? 'Fyers Auth OK' : 'Fyers Unauthenticated'}</span>
+        <span className="sm:hidden">{fyersOk ? 'Auth OK' : 'No Auth'}</span>
       </span>
-      <span className="flex items-center gap-1 text-zinc-500">
+
+      {/* Secondary Telemetry: Visible on Tablets & Desktops */}
+      <span className="hidden md:flex items-center gap-1 text-zinc-500">
         Trading {trading}
       </span>
-      <span className="flex items-center gap-1 text-zinc-500">
+      <span className="hidden lg:flex items-center gap-1 text-zinc-500">
         News {grok === 'configured' ? 'Key Set' : 'Off'}
       </span>
-      <span className="flex items-center gap-1 text-zinc-500">
+      <span className="hidden lg:flex items-center gap-1 text-zinc-500">
         Redis {redis === 'ok' ? 'OK' : redis === 'down' ? 'Down' : 'Off'}
       </span>
-      <span className={`flex items-center gap-1 ${cooling ? 'text-amber-400' : 'text-zinc-500'}`}>
+      <span className={`hidden md:flex items-center gap-1 ${cooling ? 'text-amber-400' : 'text-zinc-500'}`}>
         Fyers {rpm}/{rpmLimit} RPM{cooling ? ` cooldown ${coolLeft}s` : ''}
       </span>
     </div>

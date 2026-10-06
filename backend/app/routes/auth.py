@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from typing import Optional
 
 from app.services.fyers_auth import get_auth_service
@@ -58,15 +58,36 @@ async def callback(
         reload_settings()
         auth_service.apply_reloaded_settings()
 
-        # If user opened callback via browser, redirect them directly to frontend Home with success toast!
-        if "text/html" in accept_header:
-            return RedirectResponse(url="/?auth=success", status_code=303)
+        import urllib.parse
+        redirect_url = f"/?auth=success&token={urllib.parse.quote(token)}"
 
-        return {
+        # If user opened callback via browser, redirect them directly to frontend Home with token & cookie
+        if "text/html" in accept_header:
+            resp = RedirectResponse(url=redirect_url, status_code=303)
+            resp.set_cookie(
+                key="fyers_access_token",
+                value=token,
+                max_age=86400,
+                httponly=False,
+                samesite="lax",
+                path="/"
+            )
+            return resp
+
+        json_resp = JSONResponse(content={
             "status": "success",
             "message": message,
-            "access_token": "Token generated and stored"
-        }
+            "access_token": token
+        })
+        json_resp.set_cookie(
+            key="fyers_access_token",
+            value=token,
+            max_age=86400,
+            httponly=False,
+            samesite="lax",
+            path="/"
+        )
+        return json_resp
     else:
         if "text/html" in accept_header:
             import urllib.parse
@@ -155,17 +176,57 @@ async def submit_auth_code(request: Request):
             reload_settings()
             auth_service.apply_reloaded_settings()
             
-            return {
+            json_resp = JSONResponse(content={
                 "status": "success",
                 "message": message,
-                "info": "Access token saved to .env and settings reloaded"
-            }
+                "access_token": token,
+                "info": "Access token generated and settings reloaded"
+            })
+            json_resp.set_cookie(
+                key="fyers_access_token",
+                value=token,
+                max_age=86400,
+                httponly=False,
+                samesite="lax",
+                path="/"
+            )
+            return json_resp
         else:
             raise HTTPException(status_code=400, detail=message)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/logout")
+async def logout():
+    """Clear session and remove access token."""
+    auth_service.settings.fyers_access_token = None
+    auth_service._fyers = None
+    auth_service._last_token = None
+    auth_service._valid_cache = None
+    auth_service._cached_profile = None
+
+    try:
+        from app.services.redis_client import is_redis_configured, delete_key
+        if is_redis_configured():
+            delete_key("auth:fyers_access_token")
+    except Exception:
+        pass
+
+    try:
+        import tempfile
+        from pathlib import Path
+        tmp_file = Path(tempfile.gettempdir()) / "fyers_access_token.txt"
+        if tmp_file.exists():
+            tmp_file.unlink()
+    except Exception:
+        pass
+
+    json_resp = JSONResponse(content={"status": "success", "message": "Logged out successfully"})
+    json_resp.delete_cookie(key="fyers_access_token", path="/")
+    return json_resp
 
 
 def _extract_auth_code(raw_input: str) -> str:
