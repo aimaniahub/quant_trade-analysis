@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { api } from "../lib/api";
 import { useApiQuery } from "../lib/hooks/useApiQuery";
+import { useMarketPolling } from "../lib/hooks/useMarketPolling";
 
 interface GreekData {
   delta: number;
@@ -181,11 +182,13 @@ export default function NiftyQuantTerminal({
     setMounted(true);
   }, []);
 
+  const { interval } = useMarketPolling(refreshInterval, autoRefresh);
+
   const { data, isLoading, error, refetch } = useApiQuery<NiftyQuantResponse>(
     ["options", "nifty-quant"],
     () => api.options.getNiftyQuant(),
     {
-      refetchInterval: autoRefresh ? refreshInterval : false,
+      refetchInterval: interval,
     }
   );
 

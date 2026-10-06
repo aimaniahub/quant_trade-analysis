@@ -19,8 +19,12 @@ async def health_check():
 async def readiness_check():
     """Readiness check endpoint — reflects real Fyers auth state."""
     settings = get_settings()
-    auth = get_auth_service()
-    auth_status = auth.get_auth_status()
+    auth_status = {}
+    try:
+        auth = get_auth_service()
+        auth_status = auth.get_auth_status()
+    except Exception:
+        pass
     fyers_ok = bool(auth_status.get("authenticated") or auth_status.get("is_valid"))
 
     cache_stats = {}

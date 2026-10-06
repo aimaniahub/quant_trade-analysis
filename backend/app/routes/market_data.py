@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Response
 from typing import Optional, List
 from pydantic import BaseModel
 
@@ -698,11 +698,17 @@ def _tape_ltp(spot: dict, quote_v: dict) -> object:
 
 
 @router.get("/market/indices")
-async def get_indices():
+async def get_indices(response: Response):
     """NIFTY / BANKNIFTY / VIX tape. Writer-fetch when store is empty/stale."""
     import asyncio
     from app.services import symbol_store as store
     from app.utils.market_hours import data_mode, last_session_date, session_is_open
+
+    # Cache for 10s at Edge CDN, serve stale up to 60s
+    try:
+        response.headers["Cache-Control"] = "public, s-maxage=10, stale-while-revalidate=60"
+    except Exception:
+        pass
 
     tape_spec = [
         ("NSE:NIFTY50-INDEX", "NIFTY"),
@@ -710,7 +716,10 @@ async def get_indices():
         ("NSE:INDIAVIX-INDEX", "VIX"),
     ]
     symbols = [s for s, _ in tape_spec]
-    spots = store.get_spots(symbols)
+    try:
+        spots = store.get_spots(symbols)
+    except Exception:
+        spots = {}
 
     def _needs_fetch(sym: str) -> bool:
         sp = spots.get(sym) or {}
@@ -724,11 +733,14 @@ async def get_indices():
     need = [s for s in symbols if _needs_fetch(s)]
     quotes: dict = {}
     if need:
-        def _fill():
-            with store.harvest_writer():
-                return market_service.get_quotes(symbols)
-        quotes = await asyncio.to_thread(_fill) or {}
-        spots = store.get_spots(symbols)
+        try:
+            def _fill():
+                with store.harvest_writer():
+                    return market_service.get_quotes(symbols)
+            quotes = await asyncio.to_thread(_fill) or {}
+            spots = store.get_spots(symbols)
+        except Exception as fetch_err:
+            quotes = {"error": str(fetch_err)}
 
     quote_by_n: dict = {}
     for item in quotes.get("data") or []:

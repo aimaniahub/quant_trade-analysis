@@ -3,6 +3,7 @@
 import { api } from '../lib/api';
 import { useApiQuery } from '../lib/hooks/useApiQuery';
 import { useAuth } from '../lib/hooks/useAuth';
+import { useMarketPolling } from '../lib/hooks/useMarketPolling';
 
 interface ReadyResponse {
   status?: string;
@@ -32,10 +33,11 @@ interface ReadyResponse {
 
 export default function SystemStatus() {
   const { status: auth } = useAuth();
+  const { interval } = useMarketPolling(30000);
   const { data, isError, isFetching } = useApiQuery<ReadyResponse>(
     ['system', 'ready'],
     () => api.market.getReady() as Promise<ReadyResponse>,
-    { refetchInterval: 20000 },
+    { refetchInterval: interval },
   );
 
   const backendOk = !isError && Boolean(data);

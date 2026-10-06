@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { api } from "../lib/api";
 import { useApiQuery } from "../lib/hooks/useApiQuery";
+import { useMarketPolling } from "../lib/hooks/useMarketPolling";
 
 const INDEX_SYMBOLS = [
     'NSE:NIFTY50-INDEX',
@@ -27,12 +28,13 @@ interface IndexData {
 
 export default function MarketIndices() {
     const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+    const { interval, statusText, isOpen } = useMarketPolling(15000);
 
     const { data, isLoading, error } = useApiQuery(
         ["market", "indices"],
         () => api.market.getIndices(),
         {
-            refetchInterval: 45000,
+            refetchInterval: interval,
             onSuccess: () => {
                 setLastUpdate(new Date());
             },
@@ -43,21 +45,23 @@ export default function MarketIndices() {
 
     if (data && (data as any).success && (data as any).data) {
         for (const quote of (data as any).data as any[]) {
-            const symbol = quote.n;
+            const symbol = quote.symbol || quote.n;
             const v = quote.v || {};
-            indicesData[symbol] = {
-                ltp: v.lp || v.ltp || 0,
-                ch: v.ch || 0,
-                chp: v.chp || 0,
-                open: v.open_price || 0,
-                high: v.high_price || 0,
-                low: v.low_price || 0,
-            };
+            if (symbol) {
+                indicesData[symbol] = {
+                    ltp: quote.ltp ?? v.lp ?? v.ltp ?? 0,
+                    ch: quote.ch ?? v.ch ?? 0,
+                    chp: quote.chp ?? v.chp ?? 0,
+                    open: quote.open ?? v.open_price ?? 0,
+                    high: quote.high ?? v.high_price ?? 0,
+                    low: quote.low ?? v.low_price ?? 0,
+                };
+            }
         }
     }
 
     const hasData = Object.keys(indicesData).length > 0;
-    const dataMode = (data as any)?.data_mode || ((data as any)?.market_hours ? 'live' : 'last_close');
+    const dataMode = (data as any)?.data_mode || (isOpen ? 'live' : 'last_close');
 
     return (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 w-full">

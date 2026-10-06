@@ -41,8 +41,18 @@ async def callback(code: str = Query(...), state: Optional[str] = None):
 async def get_status():
     """
     Check current authentication status.
+    Guaranteed to return 200 with structured status, never 500.
     """
-    return auth_service.get_auth_status()
+    try:
+        return auth_service.get_auth_status()
+    except Exception as e:
+        return {
+            "authenticated": False,
+            "has_token": False,
+            "is_valid": False,
+            "user_info": None,
+            "error": str(e),
+        }
 
 
 @router.post("/refresh")

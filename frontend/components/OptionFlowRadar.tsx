@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import AuthButton from './AuthButton';
 import SystemStatus from './SystemStatus';
 import NiftyQuantTerminal from './NiftyQuantTerminal';
+import { getMarketHoursInfo, NON_MARKET_REFRESH_MS } from '../lib/market-hours';
 
 type Grade = 'TRADEABLE' | 'WATCH' | 'QUIET' | string;
 type Bias = 'BULLISH' | 'BEARISH' | 'CONFLICTED' | 'NEUTRAL' | string;
@@ -603,8 +604,12 @@ export default function OptionFlowRadar() {
                 }
             })
             .catch(() => {});
-        const a = setInterval(loadLast, 15000);
-        const b = setInterval(loadTape, 8000);
+        const market = getMarketHoursInfo();
+        const lastInterval = market.isOpen ? 20000 : NON_MARKET_REFRESH_MS;
+        const tapeInterval = market.isOpen ? 12000 : NON_MARKET_REFRESH_MS;
+
+        const a = setInterval(loadLast, lastInterval);
+        const b = setInterval(loadTape, tapeInterval);
         return () => {
             clearInterval(a);
             clearInterval(b);

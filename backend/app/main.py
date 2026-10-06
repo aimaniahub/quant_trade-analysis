@@ -44,32 +44,48 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[REDIS] init skipped: {e}")
 
-    # Candle aggregator (ticks) — old multi-TF MA crossover service is DISABLED
-    # so it no longer burns Fyers quota. Use 7/200 MA + OC strategy instead.
-    aggregator = get_candle_aggregator()
-    aggregator.start()
+    import os
+    is_serverless = bool(os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+    radar_sched = None
+    aggregator = None
+    ws_mgr = None
 
-    ws_mgr = get_websocket_manager()
-    ws_mgr.add_subscriber("market_data", aggregator.on_tick)
+    if is_serverless:
+        print("[SERVERLESS] Running in serverless mode (Vercel) - background loops & persistent WebSockets disabled")
+    else:
+        # Candle aggregator (ticks) — old multi-TF MA crossover service is DISABLED
+        # so it no longer burns Fyers quota. Use 7/200 MA + OC strategy instead.
+        aggregator = get_candle_aggregator()
+        aggregator.start()
 
-    import asyncio as _asyncio
-    radar_sched = get_radar_scheduler()
-    # Intentionally NOT starting get_ma_crossover_service().start()
-    print("[MA] Legacy multi-TF MA crossover auto-scan DISABLED (use /strategies/ma7200)")
-    _asyncio.create_task(radar_sched.start())
+        ws_mgr = get_websocket_manager()
+        ws_mgr.add_subscriber("market_data", aggregator.on_tick)
 
-    async def _trade_watch_loop():
-        await _asyncio.sleep(8)
-        while True:
-            try:
-                from app.services.trade_watch import tick
-                await _asyncio.to_thread(tick)
-            except Exception as watch_exc:
-                print(f"[WATCH] tick: {watch_exc}")
-            await _asyncio.sleep(30)
+        import asyncio as _asyncio
+        radar_sched = get_radar_scheduler()
+        # Intentionally NOT starting get_ma_crossover_service().start()
+        print("[MA] Legacy multi-TF MA crossover auto-scan DISABLED (use /strategies/ma7200)")
+        _asyncio.create_task(radar_sched.start())
 
-    _asyncio.create_task(_trade_watch_loop())
-    print("[WATCH] paper desk loop started (09:23 entry / 3m mark)")
+        async def _trade_watch_loop():
+            await _asyncio.sleep(8)
+            while True:
+                try:
+                    from app.services.trade_watch import tick
+                    await _asyncio.to_thread(tick)
+                except Exception as watch_exc:
+                    print(f"[WATCH] tick: {watch_exc}")
+                await _asyncio.sleep(30)
+
+        _asyncio.create_task(_trade_watch_loop())
+        print("[WATCH] paper desk loop started (09:23 entry / 3m mark)")
+
+        try:
+            from app.services.spot_stream import get_spot_stream
+            get_spot_stream().start()
+            print("[WS] spot stream starting (canonical F&O universe)")
+        except Exception as e:
+            print(f"[WS] spot stream skipped: {e}")
 
     try:
         from app.services.option_flow_radar import get_radar_service
@@ -79,13 +95,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[RADAR] hydrate skipped: {e}")
 
-    try:
-        from app.services.spot_stream import get_spot_stream
-        get_spot_stream().start()
-        print("[WS] spot stream starting (canonical F&O universe)")
-    except Exception as e:
-        print(f"[WS] spot stream skipped: {e}")
-
     # History sweeper must NOT start at boot. It competes with the chain
     # harvest for Fyers RPM. Radar starts it after the first harvest ends.
     print("[HISTORY] sweeper idle until first harvest completes")
@@ -94,7 +103,11 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ───────────────────────────────────────────────────────
     print(f"[STOP] Shutting down {settings.app_name}")
-    await radar_sched.stop()
+    if radar_sched is not None:
+        try:
+            await radar_sched.stop()
+        except Exception:
+            pass
     try:
         ma_svc = get_ma_crossover_service()
         if getattr(ma_svc, "_running", False):
@@ -111,8 +124,17 @@ async def lifespan(app: FastAPI):
         get_history_sweeper().stop()
     except Exception:
         pass
-    aggregator.stop()
-    ws_mgr.remove_subscriber("market_data", aggregator.on_tick)
+    if aggregator is not None:
+        try:
+            aggregator.stop()
+        except Exception:
+            pass
+    if ws_mgr is not None and aggregator is not None:
+        try:
+            ws_mgr.remove_subscriber("market_data", aggregator.on_tick)
+            ws_mgr.stop_all()
+        except Exception:
+            pass
     try:
         ws_mgr.stop_all()
     except Exception:

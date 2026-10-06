@@ -182,13 +182,21 @@ class FyersAuthService:
             if token_to_use and ":" in token_to_use:
                 token_to_use = token_to_use.split(":", 1)[1]
                 
-            self._fyers = fyersModel.FyersModel(
-                token=token_to_use,
-                is_async=False,
-                client_id=self.settings.fyers_app_id,
-                log_path=""
-            )
-            self._last_token = self.settings.fyers_access_token
+            import tempfile
+            writable_temp = tempfile.gettempdir()
+            try:
+                self._fyers = fyersModel.FyersModel(
+                    token=token_to_use,
+                    is_async=False,
+                    client_id=self.settings.fyers_app_id,
+                    log_path=writable_temp
+                )
+                self._last_token = self.settings.fyers_access_token
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to initialize FyersModel: {e}")
+                self._fyers = None
+                return None
         
         return self._fyers
     

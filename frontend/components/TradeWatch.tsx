@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { api } from '../lib/api';
 import AuthButton from './AuthButton';
 import SystemStatus from './SystemStatus';
+import { getMarketHoursInfo, NON_MARKET_REFRESH_MS } from '../lib/market-hours';
 
 interface WatchTrade {
     id: string;
@@ -104,7 +105,9 @@ export default function TradeWatch() {
 
     useEffect(() => {
         load();
-        const id = setInterval(load, 2000);
+        const market = getMarketHoursInfo();
+        const interval = market.isOpen ? 4000 : NON_MARKET_REFRESH_MS;
+        const id = setInterval(load, interval);
         return () => clearInterval(id);
     }, [load]);
 
