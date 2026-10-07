@@ -64,42 +64,58 @@ export default function MarketIndices() {
     const dataMode = (data as any)?.data_mode || (isOpen ? 'live' : 'last_close');
 
     return (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 w-full">
-            {INDEX_SYMBOLS.map((symbol) => {
-                const data = indicesData[symbol] || {};
-                const ltp = data.ltp || 0;
-                const ch = data.ch || 0;
-                const chp = data.chp || 0;
-                const isPositive = ch >= 0;
+        <div className="w-full">
+            <div className="flex md:grid md:grid-cols-3 gap-2.5 sm:gap-4 overflow-x-auto no-scrollbar snap-x snap-mandatory touch-scroll pb-1">
+                {INDEX_SYMBOLS.map((symbol) => {
+                    const data = indicesData[symbol] || {};
+                    const ltp = data.ltp || 0;
+                    const ch = data.ch || 0;
+                    const chp = data.chp || 0;
+                    const high = data.high || 0;
+                    const low = data.low || 0;
+                    const isPositive = ch >= 0;
 
-                return (
-                    <div
-                        key={symbol}
-                        className="p-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-sm hover:border-blue-500/30 transition-all"
-                    >
-                        <div className="flex justify-between items-start mb-2">
-                            <span className="text-sm font-semibold text-zinc-500 dark:text-zinc-400">
-                                {INDEX_LABELS[symbol]}
-                            </span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${hasData && ltp > 0 ? (dataMode === 'live' ? "bg-emerald-500/10 text-emerald-500" : "bg-amber-500/10 text-amber-500") : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"}`}>
-                                {isLoading ? "LOADING" : hasData && ltp > 0 ? (dataMode === 'live' ? "LIVE" : "LAST CLOSE") : "NO DATA"}
-                            </span>
+                    return (
+                        <div
+                            key={symbol}
+                            className="min-w-[78vw] sm:min-w-0 flex-1 snap-start p-3.5 sm:p-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-sm hover:border-emerald-500/40 transition-all flex flex-col justify-between"
+                        >
+                            <div className="flex justify-between items-start mb-1.5">
+                                <span className="text-xs sm:text-sm font-bold text-zinc-600 dark:text-zinc-300 tracking-tight">
+                                    {INDEX_LABELS[symbol]}
+                                </span>
+                                <span className={`text-[9px] sm:text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                    hasData && ltp > 0
+                                        ? dataMode === 'live'
+                                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/25"
+                                            : "bg-amber-500/10 text-amber-400 border-amber-500/25"
+                                        : "bg-zinc-800 text-zinc-500 border-zinc-700"
+                                }`}>
+                                    {isLoading ? "SYNC" : hasData && ltp > 0 ? (dataMode === 'live' ? "● LIVE" : "○ CLOSE") : "NO DATA"}
+                                </span>
+                            </div>
+                            <div className="flex items-baseline justify-between gap-2">
+                                <span className="text-xl sm:text-2xl font-black font-mono tracking-tight text-zinc-900 dark:text-white">
+                                    {ltp > 0 ? ltp.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '---'}
+                                </span>
+                                <span className={`text-xs sm:text-sm font-mono font-bold shrink-0 ${isPositive ? 'text-emerald-500 dark:text-emerald-400' : 'text-rose-500 dark:text-rose-400'}`}>
+                                    {ltp > 0 && (
+                                        <>
+                                            {isPositive ? '+' : ''}{ch.toFixed(2)} ({chp.toFixed(2)}%)
+                                        </>
+                                    )}
+                                </span>
+                            </div>
+                            {high > 0 && low > 0 && (
+                                <div className="mt-2 pt-2 border-t border-zinc-100 dark:border-zinc-800/80 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+                                    <span>L: <span className="text-zinc-400">{low.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</span></span>
+                                    <span>H: <span className="text-zinc-400">{high.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</span></span>
+                                </div>
+                            )}
                         </div>
-                        <div className="flex items-baseline gap-2">
-                            <span className="text-2xl font-bold tracking-tight">
-                                {ltp > 0 ? ltp.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '---'}
-                            </span>
-                            <span className={`text-sm font-medium ${isPositive ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                {ltp > 0 && (
-                                    <>
-                                        {isPositive ? '+' : ''}{ch.toFixed(2)} ({chp.toFixed(2)}%)
-                                    </>
-                                )}
-                            </span>
-                        </div>
-                    </div>
-                );
-            })}
+                    );
+                })}
+            </div>
             {error && (
                 <div className="mt-2 text-[10px] text-rose-500">
                     Failed to load indices. Data may be delayed.

@@ -88,6 +88,7 @@ export default function RSIScanner({ onBack }: Props) {
     const [side, setSide] = useState<'both' | 'oversold' | 'overbought'>('both');
     const [source, setSource] = useState<'full' | 'top'>('full');
     const [selected, setSelected] = useState<Row | null>(null);
+    const [mobileTab, setMobileTab] = useState<'signals' | 'ticket'>('signals');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [harvest, setHarvest] = useState<{
@@ -258,8 +259,34 @@ export default function RSIScanner({ onBack }: Props) {
                     </div>
                 )}
 
+                {/* Mobile View Switcher (<lg) */}
+                <div className="lg:hidden flex items-center gap-1.5 p-1 bg-zinc-200/70 dark:bg-zinc-800/90 rounded-xl mb-4">
+                    <button
+                        onClick={() => setMobileTab('signals')}
+                        className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-black transition-all ${
+                            mobileTab === 'signals'
+                                ? 'bg-fuchsia-600 text-white shadow-sm'
+                                : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                        }`}
+                    >
+                        📋 Signals ({rows.length})
+                    </button>
+                    <button
+                        onClick={() => setMobileTab('ticket')}
+                        className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-black transition-all ${
+                            mobileTab === 'ticket'
+                                ? 'bg-fuchsia-600 text-white shadow-sm'
+                                : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                        }`}
+                    >
+                        🎟️ Ticket {selected ? `(${selected.name})` : ''}
+                    </button>
+                </div>
+
                 <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-                    <div className="lg:col-span-3 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden">
+                    <div className={`lg:col-span-3 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden ${
+                        mobileTab === 'ticket' ? 'hidden lg:block' : 'block'
+                    }`}>
                         <div className="px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex flex-wrap gap-2 justify-between items-center">
                             <div className="flex gap-1">
                                 {(
@@ -287,8 +314,13 @@ export default function RSIScanner({ onBack }: Props) {
                                 ))}
                             </div>
                         </div>
-                        <div className="overflow-x-auto max-h-[65vh] overflow-y-auto">
-                            <table className="w-full text-left text-xs">
+                        {/* Mobile Swipe Cue */}
+                        <div className="md:hidden px-3 py-1.5 bg-fuchsia-950/40 border-b border-fuchsia-800/40 flex items-center justify-between text-[10px] text-fuchsia-300 font-mono">
+                            <span>⟵ Swipe signals horizontally ⟶</span>
+                            <span className="text-zinc-400">9 Columns</span>
+                        </div>
+                        <div className="overflow-x-auto touch-scroll max-h-[65vh] overflow-y-auto">
+                            <table className="w-full text-left text-xs min-w-[620px]">
                                 <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-900/95 text-[10px] uppercase text-zinc-500">
                                     <tr>
                                         <th className="px-3 py-2">Stock</th>
@@ -320,7 +352,12 @@ export default function RSIScanner({ onBack }: Props) {
                                     {rows.map((c) => (
                                         <tr
                                             key={c.symbol}
-                                            onClick={() => setSelected(c)}
+                                            onClick={() => {
+                                                setSelected(c);
+                                                if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+                                                    setMobileTab('ticket');
+                                                }
+                                            }}
                                             className={`border-t border-zinc-100 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/40 cursor-pointer ${
                                                 selected?.symbol === c.symbol
                                                     ? 'bg-fuchsia-500/10'
@@ -393,7 +430,9 @@ export default function RSIScanner({ onBack }: Props) {
                         </div>
                     </div>
 
-                    <div className="lg:col-span-2 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4 min-h-[320px]">
+                    <div className={`lg:col-span-2 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-4 min-h-[320px] ${
+                        mobileTab === 'signals' ? 'hidden lg:block' : 'block'
+                    }`}>
                         <div className="text-xs font-black uppercase tracking-wider text-zinc-500">
                             Ticket
                         </div>
@@ -493,6 +532,24 @@ export default function RSIScanner({ onBack }: Props) {
                         )}
                     </div>
                 </div>
+
+                {/* Mobile Floating Quick Jump Pill */}
+                {selected && mobileTab === 'signals' && (
+                    <div className="lg:hidden fixed bottom-16 left-3 right-3 z-30 bg-fuchsia-600/95 backdrop-blur text-white px-3.5 py-2.5 rounded-xl shadow-2xl flex items-center justify-between border border-fuchsia-400/40 animate-fadeIn">
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs font-black">{selected.name}</span>
+                            <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-bold">
+                                {selected.thesis} · RSI {selected.rsi15 ?? '—'}
+                            </span>
+                        </div>
+                        <button
+                            onClick={() => setMobileTab('ticket')}
+                            className="text-xs font-black bg-white text-fuchsia-700 px-3 py-1 rounded-lg shadow-sm"
+                        >
+                            View Ticket →
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );

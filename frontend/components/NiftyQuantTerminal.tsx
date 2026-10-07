@@ -510,28 +510,28 @@ export default function NiftyQuantTerminal({
             </div>
           </div>
 
-          <div className="flex items-center gap-4 bg-[#080b11] px-4 py-2 rounded-lg border border-violet-800/40 self-stretch md:self-auto justify-between">
+          <div className="grid grid-cols-3 sm:flex sm:items-center gap-2 sm:gap-4 bg-[#080b11] p-2.5 sm:px-4 sm:py-2 rounded-lg border border-violet-800/40 self-stretch md:self-auto justify-between">
             <div className="text-center">
               <div className="text-[9px] font-bold text-zinc-500 uppercase">Stop Loss</div>
               <div className="text-xs font-mono font-bold text-rose-400">₹{best_trade.stop_loss}</div>
             </div>
-            <div className="h-6 w-px bg-zinc-800" />
+            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
             <div className="text-center">
               <div className="text-[9px] font-bold text-zinc-500 uppercase">Target 1</div>
               <div className="text-xs font-mono font-bold text-emerald-400">₹{best_trade.target_1}</div>
             </div>
-            <div className="h-6 w-px bg-zinc-800" />
+            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
             <div className="text-center">
               <div className="text-[9px] font-bold text-zinc-500 uppercase">Target 2</div>
               <div className="text-xs font-mono font-bold text-emerald-300">₹{best_trade.target_2}</div>
             </div>
-            <div className="h-6 w-px bg-zinc-800" />
+            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
             <div className="text-center">
               <div className="text-[9px] font-bold text-zinc-500 uppercase">R:R</div>
               <div className="text-xs font-mono font-black text-violet-300">{best_trade.risk_reward}</div>
             </div>
-            <div className="h-6 w-px bg-zinc-800" />
-            <div className="text-center">
+            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
+            <div className="text-center col-span-2 sm:col-span-1">
               <div className="text-[9px] font-bold text-zinc-500 uppercase">Delta (Δ)</div>
               <div className="text-xs font-mono font-bold text-white">{best_trade.greeks.delta}</div>
             </div>
@@ -1053,8 +1053,14 @@ export default function NiftyQuantTerminal({
           </div>
         </div>
 
-        <div className="overflow-x-auto max-h-[540px]">
-          <table className="w-full text-left border-collapse text-[11px] font-mono">
+        {/* Mobile Swipe Cue */}
+        <div className="md:hidden px-3 py-1.5 bg-violet-950/40 border-b border-violet-800/50 flex items-center justify-between text-[10px] text-violet-300 font-mono">
+          <span>⟵ Swipe strike matrix horizontally ⟶</span>
+          <span className="text-zinc-400">13 Columns</span>
+        </div>
+
+        <div className="overflow-x-auto touch-scroll max-h-[540px]">
+          <table className="w-full text-left border-collapse text-[11px] font-mono min-w-[860px]">
             <thead className="sticky top-0 z-20 bg-[#0c1017] shadow-md border-b-2 border-violet-900">
               <tr>
                 <th

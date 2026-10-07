@@ -61,7 +61,7 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
             {/* Backdrop */}
             <div
                 className="absolute inset-0 bg-black/60 backdrop-blur-sm"
@@ -69,9 +69,9 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
             />
 
             {/* Modal */}
-            <div className="relative w-full max-w-lg mx-4 bg-zinc-900 border border-zinc-700/50 rounded-2xl shadow-2xl overflow-hidden">
+            <div className="relative w-full max-w-lg my-auto bg-zinc-900 border border-zinc-700/50 rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
                 {/* Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
+                <div className="shrink-0 flex items-center justify-between px-4 sm:px-6 py-3.5 sm:py-4 border-b border-zinc-800">
                     <div className="flex items-center gap-3">
                         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center text-white text-sm font-bold">
                             🔑
@@ -90,7 +90,7 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                 </div>
 
                 {/* Content */}
-                <div className="px-6 py-5 space-y-5">
+                <div className="px-4 sm:px-6 py-4 sm:py-5 space-y-4 sm:space-y-5 overflow-y-auto touch-scroll">
                     {/* Steps */}
                     <div className="space-y-3">
                         {/* Step 1 */}
@@ -214,7 +214,7 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                 </div>
 
                 {/* Footer */}
-                <div className="px-6 py-3 border-t border-zinc-800 bg-zinc-900/50">
+                <div className="shrink-0 px-4 sm:px-6 py-3 border-t border-zinc-800 bg-zinc-900/50">
                     <p className="text-[10px] text-zinc-600 text-center">
                         Token is saved to your local <span className="font-mono">.env</span> file and never sent to any external server.
                     </p>

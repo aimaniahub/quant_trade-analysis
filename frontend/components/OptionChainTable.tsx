@@ -63,8 +63,14 @@ export default function OptionChainTable({ symbol = 'NSE:NIFTY50-INDEX' }: Optio
                 </div>
             </div>
 
-            <div className="overflow-x-auto">
-                <table className="w-full text-xs text-left border-collapse">
+            {/* Mobile Swipe Cue */}
+            <div className="md:hidden px-3 py-1.5 bg-blue-950/40 border-b border-blue-800/40 flex items-center justify-between text-[10px] text-blue-300 font-mono">
+                <span>⟵ Swipe chain horizontally ⟶</span>
+                <span className="text-zinc-400">9 Columns</span>
+            </div>
+
+            <div className="overflow-x-auto touch-scroll">
+                <table className="w-full text-xs text-left border-collapse min-w-[600px]">
                     <thead>
                         <tr className="bg-zinc-50 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-bold">
                             <th className="py-3 px-2 border-r border-zinc-200 dark:border-zinc-700 text-center" colSpan={4}>CALLS</th>

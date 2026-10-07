@@ -92,6 +92,7 @@ export default function TradeWatch() {
     const [snap, setSnap] = useState<WatchSnap | null>(null);
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState<string | null>(null);
+    const [mobileTab, setMobileTab] = useState<'trades' | 'tape'>('trades');
 
     const load = useCallback(async () => {
         try {
@@ -155,50 +156,71 @@ export default function TradeWatch() {
     const unreal = snap?.unrealized_pnl || 0;
 
     return (
-        <div className="h-screen bg-[#07090d] text-zinc-100 flex flex-col overflow-hidden">
-            <header className="shrink-0 px-4 py-2.5 flex items-center gap-4 border-b-2 border-[#c4b5fd] bg-[#080b10]">
-                <div className="min-w-[150px]">
-                    <div className="text-[15px] font-black italic tracking-tighter uppercase leading-none">
-                        OptionGreek<span className="text-white">.</span>
+        <div className="min-h-screen bg-[#07090d] text-zinc-100 flex flex-col pb-[max(env(safe-area-inset-bottom),16px)]">
+            <header className="shrink-0 px-3 sm:px-4 py-2.5 flex flex-col md:flex-row md:items-center gap-2 md:gap-4 border-b-2 border-[#c4b5fd] bg-[#080b10]">
+                {/* Top Row: Brand & Flow Radar link & Auth */}
+                <div className="flex items-center justify-between gap-2 w-full md:w-auto">
+                    <div className="flex items-center gap-2.5">
+                        <div>
+                            <div className="text-[14px] sm:text-[15px] font-black italic tracking-tighter uppercase leading-none">
+                                OptionGreek<span className="text-white">.</span>
+                            </div>
+                            <div className="text-[8px] sm:text-[9px] font-semibold uppercase tracking-[0.25em] text-zinc-500 mt-0.5">
+                                Trade Watch
+                            </div>
+                        </div>
+                        <Link
+                            href="/"
+                            className="px-2.5 py-1 rounded-full border border-[#c4b5fd] text-[9px] sm:text-[10px] font-bold uppercase tracking-wider hover:bg-violet-600/30"
+                        >
+                            Flow Radar
+                        </Link>
                     </div>
-                    <div className="text-[9px] font-semibold uppercase tracking-[0.28em] text-zinc-500 mt-1">
-                        Trade Watch
+                    <div className="md:hidden flex items-center">
+                        <AuthButton compact />
                     </div>
                 </div>
-                <Link
-                    href="/"
-                    className="px-3 py-1.5 rounded-full border-2 border-[#c4b5fd] text-[10px] font-bold uppercase tracking-wider hover:bg-violet-600/30"
-                >
-                    Flow Radar
-                </Link>
-                <div className="flex-1" />
-                <div className="hidden md:flex items-center gap-3 text-[10px] font-mono text-zinc-400">
+
+                {/* Desktop P&L Readout */}
+                <div className="hidden md:flex flex-1 items-center justify-end gap-3 text-[10px] font-mono text-zinc-400">
                     <span>{phaseLabel(snap?.phase)}</span>
                     <span className={pnlClass(unreal)}>U ₹{inr(unreal, 2)}</span>
                     <span className={pnlClass(realized)}>R ₹{inr(realized, 2)}</span>
                 </div>
-                <button
-                    onClick={() => run(trades.length > 0)}
-                    disabled={busy}
-                    className="px-4 py-1.5 rounded-full bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-[10px] font-bold uppercase tracking-wider"
-                >
-                    {busy ? 'Working…' : 'Take 2 trades'}
-                </button>
-                <button
-                    onClick={mark}
-                    disabled={busy || !(snap?.open_count)}
-                    className="px-3 py-1.5 rounded-full border-2 border-[#c4b5fd] text-[10px] font-bold uppercase tracking-wider disabled:opacity-40"
-                >
-                    Ask exit
-                </button>
-                <button
-                    onClick={flat}
-                    disabled={busy || !(snap?.open_count)}
-                    className="px-3 py-1.5 rounded-full border border-rose-700 text-rose-300 text-[10px] font-bold uppercase tracking-wider disabled:opacity-40"
-                >
-                    Flatten
-                </button>
-                <AuthButton compact />
+
+                {/* Actions row: Desktop inline, Mobile secondary bar */}
+                <div className="flex flex-wrap items-center justify-between md:justify-end gap-1.5 w-full md:w-auto pt-1 md:pt-0 border-t md:border-t-0 border-zinc-800/60">
+                    <div className="md:hidden flex items-center gap-2 text-[10px] font-mono">
+                        <span className={pnlClass(unreal)}>U ₹{inr(unreal, 2)}</span>
+                        <span className={pnlClass(realized)}>R ₹{inr(realized, 2)}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 ml-auto md:ml-0">
+                        <button
+                            onClick={() => run(trades.length > 0)}
+                            disabled={busy}
+                            className="px-3 sm:px-4 py-1.5 rounded-full bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider transition-all"
+                        >
+                            {busy ? 'Working…' : 'Take 2 trades'}
+                        </button>
+                        <button
+                            onClick={mark}
+                            disabled={busy || !(snap?.open_count)}
+                            className="px-2.5 sm:px-3 py-1.5 rounded-full border-2 border-[#c4b5fd] text-[9px] sm:text-[10px] font-bold uppercase tracking-wider disabled:opacity-40 transition-all"
+                        >
+                            Ask exit
+                        </button>
+                        <button
+                            onClick={flat}
+                            disabled={busy || !(snap?.open_count)}
+                            className="px-2.5 sm:px-3 py-1.5 rounded-full border border-rose-700 text-rose-300 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider disabled:opacity-40 transition-all"
+                        >
+                            Flatten
+                        </button>
+                    </div>
+                    <div className="hidden md:block">
+                        <AuthButton compact />
+                    </div>
+                </div>
             </header>
 
             {err && <div className="px-4 py-1 text-[11px] text-rose-400 bg-rose-950/30">{err}</div>}
@@ -207,7 +229,7 @@ export default function TradeWatch() {
                 <div className="px-4 py-1 text-[11px] text-amber-200 bg-amber-950/30">{snap.skip_reason}</div>
             )}
 
-            <div className="shrink-0 px-4 py-2 text-[11px] text-zinc-400 border-b border-[#c4b5fd]/40 flex flex-wrap gap-x-4 gap-y-1">
+            <div className="shrink-0 px-3 sm:px-4 py-2 text-[10px] sm:text-[11px] text-zinc-400 border-b border-[#c4b5fd]/40 flex flex-wrap gap-x-4 gap-y-1">
                 <span>Entry clock <b className="text-zinc-200">09:23 IST</b> · 1 lot · dummy fill at chain premium</span>
                 <span>
                     Dump {meta.ai_picks ?? 0} AI · {meta.bullish ?? 0} bull · {meta.bearish ?? 0} bear · {meta.news_n ?? 0} news · {meta.chains_n ?? 0} chains
@@ -216,8 +238,30 @@ export default function TradeWatch() {
                 {snap?.session_date && <span>Session {snap.session_date}</span>}
             </div>
 
+            {/* Mobile View Switcher (<lg) */}
+            <div className="lg:hidden flex items-center gap-1.5 p-1 mx-3 sm:mx-4 mt-2.5 bg-zinc-900 border border-zinc-800 rounded-xl">
+                <button
+                    onClick={() => setMobileTab('trades')}
+                    className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-black transition-all ${
+                        mobileTab === 'trades' ? 'bg-violet-600 text-white shadow-sm' : 'text-zinc-400 hover:text-white'
+                    }`}
+                >
+                    ⚡ Paper Trades ({trades.length})
+                </button>
+                <button
+                    onClick={() => setMobileTab('tape')}
+                    className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-black transition-all ${
+                        mobileTab === 'tape' ? 'bg-violet-600 text-white shadow-sm' : 'text-zinc-400 hover:text-white'
+                    }`}
+                >
+                    📜 Desk Tape ({events.length})
+                </button>
+            </div>
+
             <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1.2fr_0.8fr]">
-                <section className="min-h-0 overflow-y-auto p-4 grid grid-cols-1 md:grid-cols-2 gap-3 content-start">
+                <section className={`min-h-0 overflow-y-auto touch-scroll p-3 sm:p-4 grid grid-cols-1 md:grid-cols-2 gap-3 content-start ${
+                    mobileTab === 'tape' ? 'hidden lg:grid' : 'grid'
+                }`}>
                     {trades.length === 0 && (
                         <div className="md:col-span-2 h-full min-h-[240px] flex items-center justify-center text-center px-8">
                             <div>
@@ -319,7 +363,9 @@ export default function TradeWatch() {
                     })}
                 </section>
 
-                <aside className="min-h-0 overflow-y-auto border-l-2 border-[#c4b5fd] bg-[#080b10] p-3">
+                <aside className={`min-h-0 overflow-y-auto touch-scroll border-l-2 border-[#c4b5fd] bg-[#080b10] p-3 ${
+                    mobileTab === 'trades' ? 'hidden lg:block' : 'block'
+                }`}>
                     <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Desk tape</div>
                     {events.length === 0 && <div className="text-zinc-600 text-sm">No fills yet.</div>}
                     <ol className="space-y-2">

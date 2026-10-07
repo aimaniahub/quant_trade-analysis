@@ -88,21 +88,21 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-[#07090d] text-zinc-100 font-sans selection:bg-emerald-500/20 selection:text-emerald-300 pb-24 sm:pb-12">
       {/* ── Top Header & Global Bar ───────────────────────────────────────────── */}
-      <header className="sticky top-0 z-40 bg-[#07090d]/90 backdrop-blur-md border-b border-zinc-800/80 px-4 py-2.5 sm:px-6">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
+      <header className="sticky top-0 z-40 bg-[#07090d]/90 backdrop-blur-md border-b border-zinc-800/80 px-2.5 sm:px-6 py-2 sm:py-2.5">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3">
           {/* Logo & Brand */}
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => switchTab('home')}>
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-emerald-600 via-teal-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-              <span className="font-mono font-black text-black text-sm">OG</span>
+          <div className="flex items-center gap-2 sm:gap-3 cursor-pointer shrink-0" onClick={() => switchTab('home')}>
+            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-tr from-emerald-600 via-teal-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-emerald-500/20">
+              <span className="font-mono font-black text-black text-xs sm:text-sm">OG</span>
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-sm tracking-tight text-white">OPTIONGREEK</span>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800/80 text-zinc-400 border border-zinc-700/50 hidden sm:inline-block">
-                  PROD v2.4
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold text-xs sm:text-sm tracking-tight text-white">OPTIONGREEK</span>
+                <span className="text-[9px] sm:text-[10px] font-mono px-1 py-0.2 rounded bg-zinc-800/80 text-zinc-400 border border-zinc-700/50 hidden xs:inline-block">
+                  PRO
                 </span>
               </div>
-              <p className="text-[10px] text-zinc-400 font-mono hidden sm:block">Quant & F&O Execution Terminal</p>
+              <p className="text-[9px] sm:text-[10px] text-zinc-400 font-mono hidden sm:block">Quant & F&O Execution Terminal</p>
             </div>
           </div>
 
@@ -181,10 +181,10 @@ export default function Dashboard() {
           </nav>
 
           {/* Right Header Status: Market Clock, SystemStatus & Auth */}
-          <div className="flex items-center gap-1.5 sm:gap-3">
+          <div className="flex items-center gap-1 sm:gap-2">
             {/* Live IST Market Hours Gate Pill */}
             <div
-              className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-lg text-[10px] sm:text-[11px] font-mono border ${
+              className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-1 rounded-lg text-[10px] sm:text-[11px] font-mono border shrink-0 ${
                 market.isOpen
                   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
                   : 'bg-amber-500/10 text-amber-400 border-amber-500/25'
@@ -195,9 +195,9 @@ export default function Dashboard() {
                   : 'Market Closed (Adaptive 15m Refresh Active - API Rate Shield)'
               }
             >
-              <span className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${market.isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span className="font-semibold hidden sm:inline">{market.statusText}</span>
-              <span className="text-zinc-400">({market.istTimeStr})</span>
+              <span className={`w-1.5 h-1.5 rounded-full ${market.isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span className="font-semibold hidden md:inline">{market.statusText}</span>
+              <span className="text-zinc-400 text-[9px] sm:text-[10px]">{market.istTimeStr}</span>
             </div>
 
             <SystemStatus />
@@ -629,54 +629,65 @@ export default function Dashboard() {
       </main>
 
       {/* ── Mobile Sticky Bottom Navigation Bar ───────────────────────────────── */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#07090d]/95 backdrop-blur-xl border-t border-zinc-800/80 px-2 pt-1.5 pb-[calc(env(safe-area-inset-bottom,0px)+8px)]">
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#07090d]/95 backdrop-blur-xl border-t border-zinc-800/80 px-2 pt-1.5 pb-[max(env(safe-area-inset-bottom,0px),8px)] shadow-2xl">
         <div className="flex items-center justify-around">
           <button
             onClick={() => switchTab('home')}
-            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
-              activeTab === 'home' ? 'text-emerald-400 font-bold bg-emerald-500/10' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'home' ? 'text-emerald-400 font-bold bg-emerald-500/15' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">🏠</span>
             <span>Home</span>
+            {activeTab === 'home' && <span className="w-1 h-1 rounded-full bg-emerald-400 -mt-0.5" />}
           </button>
           <button
             onClick={() => switchTab('radar')}
-            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
-              activeTab === 'radar' ? 'text-emerald-400 font-bold bg-emerald-500/10' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'radar' ? 'text-emerald-400 font-bold bg-emerald-500/15' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">🎯</span>
             <span>Radar</span>
+            {activeTab === 'radar' && <span className="w-1 h-1 rounded-full bg-emerald-400 -mt-0.5" />}
           </button>
           <button
             onClick={() => switchTab('quant')}
-            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
-              activeTab === 'quant' ? 'text-cyan-400 font-bold bg-cyan-500/10' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'quant' ? 'text-cyan-400 font-bold bg-cyan-500/15' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">⚡</span>
             <span>Quant</span>
+            {activeTab === 'quant' && <span className="w-1 h-1 rounded-full bg-cyan-400 -mt-0.5" />}
           </button>
           <button
             onClick={() => switchTab('ma7200')}
-            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
-              activeTab === 'ma7200' ? 'text-amber-400 font-bold bg-amber-500/10' : 'text-zinc-400 hover:text-white'
+            className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl text-[10px] font-medium transition-all ${
+              activeTab === 'ma7200' ? 'text-amber-400 font-bold bg-amber-500/15' : 'text-zinc-400 hover:text-white'
             }`}
           >
             <span className="text-base leading-none">📈</span>
             <span>7/200</span>
+            {activeTab === 'ma7200' && <span className="w-1 h-1 rounded-full bg-amber-400 -mt-0.5" />}
           </button>
           <button
             onClick={() => setMobileMenuOpen(true)}
-            className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-[10px] font-medium transition-all ${
+            className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl text-[10px] font-medium transition-all ${
               ['rsi', 'watch', 'stocks'].includes(activeTab) || mobileMenuOpen
-                ? 'text-violet-400 font-bold bg-violet-500/10'
+                ? 'text-violet-400 font-bold bg-violet-500/15'
                 : 'text-zinc-400 hover:text-white'
             }`}
           >
-            <span className="text-base leading-none">☰</span>
-            <span>Desks</span>
+            <span className="text-base leading-none">
+              {activeTab === 'rsi' ? '📊' : activeTab === 'watch' ? '⏱️' : activeTab === 'stocks' ? '🔬' : '☰'}
+            </span>
+            <span>
+              {activeTab === 'rsi' ? 'RSI' : activeTab === 'watch' ? 'Paper' : activeTab === 'stocks' ? 'Stocks' : 'Desks'}
+            </span>
+            {['rsi', 'watch', 'stocks'].includes(activeTab) && (
+              <span className="w-1 h-1 rounded-full bg-violet-400 -mt-0.5" />
+            )}
           </button>
         </div>
       </nav>

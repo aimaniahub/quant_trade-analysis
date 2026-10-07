@@ -272,6 +272,7 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
     const [filter, setFilter] = useState<FilterType>('all');
     const [scope, setScope] = useState<ScopeType>('full');
     const [selected, setSelected] = useState<string | null>(null);
+    const [mobileTab, setMobileTab] = useState<'bull' | 'bear' | 'neutral' | 'deep'>('bull');
     const [progress, setProgress] = useState(0);
     const [search, setSearch] = useState('');
     const [data, setData] = useState<ScanResponse | null>(null);
@@ -443,6 +444,13 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
         if (jobId) startScan({ retryJobId: jobId });
         else startScan();
     }, [jobId, startScan]);
+
+    const handleSelectStock = useCallback((symbol: string) => {
+        setSelected(symbol);
+        if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+            setMobileTab('deep');
+        }
+    }, []);
 
     const stateColors: Record<string, string> = {
         TREND: 'bg-blue-500',
@@ -768,15 +776,64 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                     ))}
                 </div>
 
-                {/* Two equal columns: Bullish | Bearish */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+                {/* Mobile View Segmented Switcher (<lg) */}
+                <div className="lg:hidden flex items-center gap-1.5 p-1 bg-zinc-200/70 dark:bg-zinc-800/90 rounded-xl mb-4 overflow-x-auto no-scrollbar touch-scroll">
+                    <button
+                        onClick={() => setMobileTab('bull')}
+                        className={`flex-1 min-w-[90px] py-1.5 px-2 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-1 ${
+                            mobileTab === 'bull'
+                                ? 'bg-emerald-600 text-white shadow-sm'
+                                : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                        }`}
+                    >
+                        <span>🟢 Bull</span>
+                        <span className="text-[10px] opacity-80">({bullStocks.length})</span>
+                    </button>
+                    <button
+                        onClick={() => setMobileTab('bear')}
+                        className={`flex-1 min-w-[90px] py-1.5 px-2 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-1 ${
+                            mobileTab === 'bear'
+                                ? 'bg-rose-600 text-white shadow-sm'
+                                : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                        }`}
+                    >
+                        <span>🔴 Bear</span>
+                        <span className="text-[10px] opacity-80">({bearStocks.length})</span>
+                    </button>
+                    {neutralStocks.length > 0 && (
+                        <button
+                            onClick={() => setMobileTab('neutral')}
+                            className={`flex-1 min-w-[80px] py-1.5 px-2 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-1 ${
+                                mobileTab === 'neutral'
+                                    ? 'bg-zinc-700 text-white shadow-sm'
+                                    : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                            }`}
+                        >
+                            <span>⚪ Neutral</span>
+                            <span className="text-[10px] opacity-80">({neutralStocks.length})</span>
+                        </button>
+                    )}
+                    <button
+                        onClick={() => setMobileTab('deep')}
+                        className={`flex-1 min-w-[100px] py-1.5 px-2 rounded-lg text-xs font-black transition-all flex items-center justify-center gap-1 ${
+                            mobileTab === 'deep'
+                                ? 'bg-blue-600 text-white shadow-sm'
+                                : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white'
+                        }`}
+                    >
+                        <span>🔬 {selected ? extractStockName(selected) : 'Deep Panel'}</span>
+                    </button>
+                </div>
+
+                {/* Desktop View: Two equal columns Bullish | Bearish */}
+                <div className="hidden lg:grid lg:grid-cols-2 gap-4 mb-4">
                     <SideColumn
                         title="Bullish Lean"
                         subtitle={`${bullStocks.length} names · flow lean (incl. WATCH) · action may be WAIT`}
                         tone="bull"
                         stocks={bullStocks}
                         selected={selected}
-                        onSelect={setSelected}
+                        onSelect={handleSelectStock}
                         extractStockName={extractStockName}
                         stateColors={stateColors}
                     />
@@ -786,14 +843,81 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                         tone="bear"
                         stocks={bearStocks}
                         selected={selected}
-                        onSelect={setSelected}
+                        onSelect={handleSelectStock}
                         extractStockName={extractStockName}
                         stateColors={stateColors}
                     />
                 </div>
 
+                {/* Mobile View: Render active tab only */}
+                <div className="lg:hidden mb-4">
+                    {mobileTab === 'bull' && (
+                        <SideColumn
+                            title="Bullish Lean"
+                            subtitle={`${bullStocks.length} names · flow lean (incl. WATCH)`}
+                            tone="bull"
+                            stocks={bullStocks}
+                            selected={selected}
+                            onSelect={handleSelectStock}
+                            extractStockName={extractStockName}
+                            stateColors={stateColors}
+                        />
+                    )}
+                    {mobileTab === 'bear' && (
+                        <SideColumn
+                            title="Bearish Lean"
+                            subtitle={`${bearStocks.length} names · flow lean (incl. WATCH)`}
+                            tone="bear"
+                            stocks={bearStocks}
+                            selected={selected}
+                            onSelect={handleSelectStock}
+                            extractStockName={extractStockName}
+                            stateColors={stateColors}
+                        />
+                    )}
+                    {mobileTab === 'neutral' && neutralStocks.length > 0 && (
+                        <div className="p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+                            <div className="text-[10px] font-black uppercase text-zinc-500 mb-2">
+                                Neutral / No majority ({neutralStocks.length})
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {neutralStocks.map(s => (
+                                    <button
+                                        key={s.symbol}
+                                        onClick={() => handleSelectStock(s.symbol)}
+                                        className={`text-[10px] px-2.5 py-1.5 rounded-lg font-bold border ${
+                                            selected === s.symbol
+                                                ? 'border-blue-500 bg-blue-500/10'
+                                                : 'border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800'
+                                        }`}
+                                    >
+                                        {extractStockName(s.symbol)}{' '}
+                                        <span className="text-zinc-400">
+                                            Q{s.quant_score?.toFixed?.(0) ?? '—'}
+                                        </span>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    {mobileTab === 'deep' && (
+                        <div>
+                            {selectedStock ? (
+                                <DeepPanel stock={selectedStock} biasColor={biasColor} />
+                            ) : (
+                                <div className="p-6 text-center rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-500 text-xs">
+                                    <div className="text-2xl mb-2">🔬</div>
+                                    <div className="font-bold">No stock selected yet</div>
+                                    <div className="text-[11px] text-zinc-400 mt-1">Tap any stock in Bullish or Bearish tabs to see full deep quant analytics.</div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+
+                {/* Desktop Neutral Row */}
                 {neutralStocks.length > 0 && (
-                    <div className="mb-4 p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+                    <div className="hidden lg:block mb-4 p-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
                         <div className="text-[10px] font-black uppercase text-zinc-500 mb-2">
                             Neutral / No majority ({neutralStocks.length}) — not forced into either side
                         </div>
@@ -801,7 +925,7 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                             {neutralStocks.map(s => (
                                 <button
                                     key={s.symbol}
-                                    onClick={() => setSelected(s.symbol)}
+                                    onClick={() => handleSelectStock(s.symbol)}
                                     className={`text-[10px] px-2 py-1 rounded-lg font-bold border ${
                                         selected === s.symbol
                                             ? 'border-blue-500 bg-blue-500/10'
@@ -818,8 +942,8 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                     </div>
                 )}
 
-                {/* Deep panel */}
-                <div>
+                {/* Desktop Deep Panel */}
+                <div className="hidden lg:block">
                     {selectedStock ? (
                         <DeepPanel stock={selectedStock} biasColor={biasColor} />
                     ) : (
@@ -828,6 +952,24 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
                         </div>
                     )}
                 </div>
+
+                {/* Mobile Floating Quick Jump Pill */}
+                {selectedStock && mobileTab !== 'deep' && (
+                    <div className="lg:hidden fixed bottom-16 left-3 right-3 z-30 bg-blue-600/95 backdrop-blur text-white px-3.5 py-2.5 rounded-xl shadow-2xl flex items-center justify-between border border-blue-400/40 animate-fadeIn">
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs font-black">{extractStockName(selectedStock.symbol)}</span>
+                            <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-bold">
+                                Q {selectedStock.quant_score?.toFixed?.(0) ?? '—'}
+                            </span>
+                        </div>
+                        <button
+                            onClick={() => setMobileTab('deep')}
+                            className="text-xs font-black bg-white text-blue-700 px-3 py-1 rounded-lg shadow-sm"
+                        >
+                            View Deep Panel →
+                        </button>
+                    </div>
+                )}
 
                 <footer className="mt-10 pt-6 border-t border-zinc-200 dark:border-zinc-800 flex justify-between text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
                     <span>
@@ -879,7 +1021,7 @@ function SideColumn({
                 <div className="text-sm font-black uppercase tracking-wider">{title}</div>
                 <div className="text-[10px] font-bold opacity-80">{subtitle}</div>
             </div>
-            <div className="p-2 space-y-2 max-h-[42vh] overflow-y-auto">
+            <div className="p-2 space-y-2 max-h-[60vh] lg:max-h-[42vh] overflow-y-auto touch-scroll">
                 {stocks.length === 0 ? (
                     <div className="text-center text-zinc-500 text-xs py-8">
                         No {tone === 'bull' ? 'bullish' : 'bearish'} majority setups in this filter.
@@ -1402,8 +1544,8 @@ function DeepPanel({
                     <div className="text-[10px] font-bold uppercase text-zinc-500 mb-2">
                         ATM ±3 Buildup Map
                     </div>
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-[10px]">
+                    <div className="overflow-x-auto touch-scroll">
+                        <table className="w-full text-[10px] min-w-[320px]">
                             <thead>
                                 <tr className="text-zinc-500 uppercase text-left">
                                     <th className="py-1 pr-2">Strike</th>

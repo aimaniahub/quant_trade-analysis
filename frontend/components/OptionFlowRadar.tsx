@@ -434,6 +434,7 @@ export default function OptionFlowRadar() {
     const [aiError, setAiError] = useState<string | null>(null);
     const [aiLoading, setAiLoading] = useState(false);
     const [showNiftyModal, setShowNiftyModal] = useState(false);
+    const [mobileTab, setMobileTab] = useState<'screen' | 'bull' | 'bear' | 'chain'>('screen');
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const aiPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const scanRun = useRef(0);
@@ -748,86 +749,139 @@ export default function OptionFlowRadar() {
     const volume = report?.volume || (detail as any)?.volume || {};
     const chain = detail?.chain || [];
     const selFlags = report?.flags || (detail as any)?.flags || {};
+    const handleSelectStock = (sym: string) => {
+        setSelected(sym);
+        if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+            setMobileTab('chain');
+        }
+    };
 
     return (
-        <div className="h-screen bg-[#07090d] text-zinc-100 flex flex-col overflow-hidden">
-            <header className="shrink-0 px-4 py-2.5 flex items-center gap-4 border-b-2 border-[#c4b5fd] bg-[#080b10]">
-                <div className="min-w-[150px]">
-                    <div className="text-[15px] font-black italic tracking-tighter uppercase leading-none">
-                        OptionGreek<span className="text-white">.</span>
+        <div className="w-full min-h-[calc(100vh-140px)] lg:h-[calc(100vh-120px)] bg-[#07090d] text-zinc-100 flex flex-col">
+            {/* ── Responsive Header ─────────────────────────────────────── */}
+            <header className="shrink-0 px-3 sm:px-4 py-2 sm:py-2.5 border-b-2 border-[#c4b5fd] bg-[#080b10] space-y-2">
+                {/* Top Row: Brand & Actions */}
+                <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                        <div className="text-[13px] sm:text-[15px] font-black italic tracking-tighter uppercase leading-none">
+                            OptionGreek<span className="text-white">.</span>
+                        </div>
+                        <span className="text-[8px] sm:text-[9px] font-semibold uppercase tracking-[0.2em] text-violet-400 px-1.5 py-0.5 rounded bg-violet-500/10 border border-violet-500/20">
+                            Flow Radar
+                        </span>
                     </div>
-                    <div className="text-[9px] font-semibold uppercase tracking-[0.28em] text-zinc-500 mt-1">
-                        Flow Radar
+
+                    {/* Action buttons with clean touch targets */}
+                    <div className="flex items-center gap-1.5 sm:gap-2">
+                        <button
+                            onClick={() => setShowNiftyModal(true)}
+                            className="px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border-2 border-[#c4b5fd] bg-violet-600/30 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-violet-200 hover:bg-violet-500 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer shrink-0"
+                            title="Open Nifty 50 Quant Analytics, Greeks & Breakout Simulator"
+                        >
+                            <span>⚡</span>
+                            <span>QUANT</span>
+                        </button>
+                        <button
+                            onClick={runScan}
+                            disabled={running}
+                            className="px-2.5 sm:px-4 py-1 sm:py-1.5 rounded-full bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0"
+                        >
+                            {running ? 'Scanning…' : 'Scan'}
+                        </button>
+                        <button
+                            onClick={runAiChain}
+                            disabled={aiLoading}
+                            className="px-2 sm:px-3.5 py-1 sm:py-1.5 rounded-full border border-[#c4b5fd] bg-[#12101c] hover:bg-violet-600/30 disabled:opacity-40 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0"
+                        >
+                            {aiLoading ? (aiPhase ? `${aiPhase}…` : 'AI…') : 'AI+Chain'}
+                        </button>
+                        <AuthButton compact />
                     </div>
                 </div>
-                <a
-                    href="/watch"
-                    className="px-3 py-1.5 rounded-full border-2 border-[#c4b5fd] text-[10px] font-bold uppercase tracking-wider hover:bg-violet-600/30"
-                >
-                    Watch
-                </a>
 
+                {/* Second Row: Tape Chips (swipeable) + Live Stats */}
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-zinc-800/60 overflow-x-auto no-scrollbar touch-scroll">
+                    <div className="flex items-stretch rounded-md border border-[#c4b5fd] overflow-hidden shrink-0">
+                        <TapeChip
+                            label="NIFTY"
+                            row={tapeMap.nifty}
+                            lastClose={dataMode === 'last_close'}
+                            onClick={() => setShowNiftyModal(true)}
+                        />
+                        <TapeChip label="BANK" row={tapeMap.bank} lastClose={dataMode === 'last_close'} />
+                        <TapeChip label="VIX" row={tapeMap.vix} lastClose={dataMode === 'last_close'} />
+                    </div>
+
+                    <div className="flex items-center gap-2 sm:gap-3 text-[10px] font-mono text-zinc-400 shrink-0">
+                        <span className={running ? 'text-violet-300' : ''}>
+                            {attempted}/{total || '—'} {fmt(pct, 0)}%
+                        </span>
+                        <span className="text-emerald-400">B {bullish.length}</span>
+                        <span className="text-rose-400">S {bearish.length}</span>
+                        <label className="flex items-center gap-1 uppercase tracking-wider text-zinc-300 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={onlyTradeable}
+                                onChange={(e) => setOnlyTradeable(e.target.checked)}
+                                className="accent-violet-500 w-3 h-3"
+                            />
+                            <span className="text-[9px]">Tradeable</span>
+                        </label>
+                    </div>
+                </div>
+            </header>
+
+            {/* ── Mobile View Segmented Switcher (Visible on < 1024px) ─────────── */}
+            <div className="lg:hidden flex items-center bg-[#0c1017] p-1.5 border-b border-zinc-800 overflow-x-auto no-scrollbar gap-1 text-xs shrink-0">
                 <button
-                    onClick={() => setShowNiftyModal(true)}
-                    className="px-3 py-1.5 rounded-full border-2 border-[#c4b5fd] bg-violet-600/30 text-[10px] font-black uppercase tracking-wider text-violet-200 hover:bg-violet-500 hover:text-white transition-all shadow flex items-center gap-1.5 cursor-pointer"
-                    title="Open Nifty 50 Quant Analytics, Greeks & Breakout Simulator"
+                    onClick={() => setMobileTab('screen')}
+                    className={`flex-1 min-w-[85px] py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all ${
+                        mobileTab === 'screen'
+                            ? 'bg-violet-600 text-white shadow'
+                            : 'bg-zinc-900/80 text-zinc-400 hover:text-white border border-zinc-800'
+                    }`}
                 >
-                    <span>⚡</span>
-                    <span>NIFTY 50 QUANT</span>
+                    <span>🎯 Screened</span>
+                    <span className="text-[9px] px-1 rounded bg-black/40 font-mono">{screened.length}</span>
                 </button>
-
-                <div className="flex items-stretch rounded-md border-2 border-[#c4b5fd] overflow-hidden">
-                    <TapeChip
-                        label="NIFTY"
-                        row={tapeMap.nifty}
-                        lastClose={dataMode === 'last_close'}
-                        onClick={() => setShowNiftyModal(true)}
-                    />
-                    <TapeChip label="BANK" row={tapeMap.bank} lastClose={dataMode === 'last_close'} />
-                    <TapeChip label="VIX" row={tapeMap.vix} lastClose={dataMode === 'last_close'} />
-                </div>
-
-                <div className="flex-1" />
-
-                <div className="hidden lg:flex items-center gap-3 text-[10px] font-mono text-zinc-400">
-                    <span className={running ? 'text-violet-300' : ''}>
-                        BOOK {attempted}/{total || '—'} {fmt(pct, 0)}%
-                    </span>
-                    {dataMode === 'last_close' && (
-                        <span className="text-amber-300">
-                            AS OF {board?.session_date || 'last session'}
+                <button
+                    onClick={() => setMobileTab('bull')}
+                    className={`flex-1 min-w-[85px] py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all ${
+                        mobileTab === 'bull'
+                            ? 'bg-emerald-600 text-white shadow'
+                            : 'bg-zinc-900/80 text-zinc-400 hover:text-emerald-300 border border-zinc-800'
+                    }`}
+                >
+                    <span>🟢 Bull</span>
+                    <span className="text-[9px] px-1 rounded bg-black/40 font-mono">{bullish.length}</span>
+                </button>
+                <button
+                    onClick={() => setMobileTab('bear')}
+                    className={`flex-1 min-w-[85px] py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all ${
+                        mobileTab === 'bear'
+                            ? 'bg-rose-600 text-white shadow'
+                            : 'bg-zinc-900/80 text-zinc-400 hover:text-rose-300 border border-zinc-800'
+                    }`}
+                >
+                    <span>🔴 Bear</span>
+                    <span className="text-[9px] px-1 rounded bg-black/40 font-mono">{bearish.length}</span>
+                </button>
+                <button
+                    onClick={() => setMobileTab('chain')}
+                    className={`flex-1 min-w-[95px] py-1.5 px-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all ${
+                        mobileTab === 'chain'
+                            ? 'bg-indigo-600 text-white shadow'
+                            : 'bg-zinc-900/80 text-zinc-400 hover:text-indigo-300 border border-zinc-800'
+                    }`}
+                >
+                    <span>📊 Chain</span>
+                    {selected && (
+                        <span className="text-[9px] px-1 rounded bg-black/40 font-mono truncate max-w-[55px]">
+                            {selected.split(':').pop()?.replace('-EQ', '')}
                         </span>
                     )}
-                    <span>T {tradeable.length}</span>
-                    <span className="text-emerald-400">B {bullish.length}</span>
-                    <span className="text-rose-400">S {bearish.length}</span>
-                </div>
-
-                <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-zinc-400">
-                    <input
-                        type="checkbox"
-                        checked={onlyTradeable}
-                        onChange={(e) => setOnlyTradeable(e.target.checked)}
-                        className="accent-violet-500"
-                    />
-                    Tradeable
-                </label>
-                <button
-                    onClick={runScan}
-                    disabled={running}
-                    className="px-4 py-1.5 rounded-full bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-[10px] font-bold uppercase tracking-wider"
-                >
-                    {running ? 'Harvesting' : 'Scan'}
                 </button>
-                <button
-                    onClick={runAiChain}
-                    disabled={aiLoading}
-                    className="px-4 py-1.5 rounded-full border-2 border-[#c4b5fd] bg-[#12101c] hover:bg-violet-600/30 disabled:opacity-40 text-[10px] font-bold uppercase tracking-wider"
-                >
-                    {aiLoading ? aiPhase || 'AI…' : 'AI + Chain'}
-                </button>
-                <AuthButton compact />
-            </header>
+            </div>
 
             {running && (
                 <div className="h-0.5 bg-zinc-900">
@@ -916,21 +970,23 @@ export default function OptionFlowRadar() {
                 </div>
             )}
 
-            {/* 3-column body */}
-            <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(260px,1fr)_minmax(340px,1.15fr)_minmax(260px,1fr)]">
-                <SetupTable
-                    title="Bullish setups"
-                    tone="bull"
-                    count={bullish.length}
-                    rows={bullish}
-                    selected={selected}
-                    onSelect={setSelected}
-                    hotSet={hotSet}
-                    dataMode={dataMode}
-                />
+            {/* 3-column body: on desktop, 3 columns side by side; on mobile, controlled by mobileTab */}
+            <div className={`flex-1 min-h-0 ${mobileTab === 'chain' ? 'hidden lg:grid' : 'grid'} grid-cols-1 lg:grid-cols-[minmax(260px,1fr)_minmax(340px,1.15fr)_minmax(260px,1fr)]`}>
+                <div className={`${mobileTab === 'bull' ? 'flex flex-col' : 'hidden lg:flex lg:flex-col'} min-h-0`}>
+                    <SetupTable
+                        title="Bullish setups"
+                        tone="bull"
+                        count={bullish.length}
+                        rows={bullish}
+                        selected={selected}
+                        onSelect={handleSelectStock}
+                        hotSet={hotSet}
+                        dataMode={dataMode}
+                    />
+                </div>
 
-                <section className="min-h-0 flex flex-col border-x-2 border-[#c4b5fd] bg-[#080b10]">
-                    <div className="shrink-0 py-2 px-3 flex items-center gap-1.5 border-b-2 border-[#c4b5fd] overflow-x-auto whitespace-nowrap bg-[#0b0e14]">
+                <section className={`${mobileTab === 'screen' ? 'flex flex-col' : 'hidden lg:flex lg:flex-col'} min-h-0 border-x-0 lg:border-x-2 border-[#c4b5fd] bg-[#080b10]`}>
+                    <div className="shrink-0 py-2 px-3 flex items-center gap-1.5 border-b-2 border-[#c4b5fd] overflow-x-auto whitespace-nowrap bg-[#0b0e14] no-scrollbar touch-scroll">
                         {SCREEN_FILTERS.map((f) => {
                             const on = scanTypes.includes(f.id);
                             return (
@@ -968,7 +1024,7 @@ export default function OptionFlowRadar() {
                     </div>
                     <div className="flex-1 min-h-0 overflow-y-auto">
                         {screened.length === 0 ? (
-                            <div className="h-full flex items-center justify-center text-zinc-500 text-sm px-4 text-center leading-relaxed">
+                            <div className="h-full flex items-center justify-center text-zinc-500 text-sm px-4 py-8 text-center leading-relaxed">
                                 <div>
                                     <div className="font-semibold text-zinc-300">
                                         {hasAnyBoardData
@@ -992,8 +1048,8 @@ export default function OptionFlowRadar() {
                                 return (
                                     <button
                                         key={row.symbol}
-                                        onClick={() => setSelected(row.symbol)}
-                                        className={`w-full grid grid-cols-[40px_1fr_72px_56px] items-center px-3 py-1.5 text-left border-b border-[#c4b5fd]/40 ${
+                                        onClick={() => handleSelectStock(row.symbol)}
+                                        className={`w-full grid grid-cols-[40px_1fr_72px_56px] items-center px-3 py-2 text-left border-b border-[#c4b5fd]/40 transition-colors ${
                                             selected === row.symbol ? 'bg-violet-500/20' : 'hover:bg-white/[0.03]'
                                         }`}
                                     >
@@ -1003,7 +1059,7 @@ export default function OptionFlowRadar() {
                                         {(() => {
                                             const vorVal = row.vor ?? row.flags?.vor ?? row.top_anomaly?.vor;
                                             return (
-                                                <span className="min-w-0">
+                                                <span className="min-w-0 pr-1">
                                                     <span className="flex items-center gap-1 text-[12px] font-semibold truncate">
                                                         <span className="truncate">{row.name}</span>
                                                         {freshnessBadge(row.ts, dataMode)}
@@ -1025,21 +1081,23 @@ export default function OptionFlowRadar() {
                     </div>
                 </section>
 
-                <SetupTable
-                    title="Bearish setups"
-                    tone="bear"
-                    count={bearish.length}
-                    rows={bearish}
-                    selected={selected}
-                    onSelect={setSelected}
-                    hotSet={hotSet}
-                    dataMode={dataMode}
-                />
+                <div className={`${mobileTab === 'bear' ? 'flex flex-col' : 'hidden lg:flex lg:flex-col'} min-h-0`}>
+                    <SetupTable
+                        title="Bearish setups"
+                        tone="bear"
+                        count={bearish.length}
+                        rows={bearish}
+                        selected={selected}
+                        onSelect={handleSelectStock}
+                        hotSet={hotSet}
+                        dataMode={dataMode}
+                    />
+                </div>
             </div>
 
             {/* Bottom: selected + chain */}
-            <div className="shrink-0 border-t-2 border-[#c4b5fd] grid grid-cols-1 lg:grid-cols-[minmax(260px,0.85fr)_minmax(560px,1.5fr)] h-[32vh] min-h-[200px]">
-                <div className="p-2.5 overflow-hidden border-r-2 border-[#c4b5fd]">
+            <div className={`shrink-0 border-t-2 border-[#c4b5fd] ${mobileTab === 'chain' ? 'grid' : 'hidden lg:grid'} grid-cols-1 lg:grid-cols-[minmax(280px,0.85fr)_minmax(560px,1.5fr)] lg:h-[32vh] lg:min-h-[200px] h-auto`}>
+                <div className="p-3 overflow-hidden border-b-2 lg:border-b-0 lg:border-r-2 border-[#c4b5fd]">
                     {selected ? (
                         <>
                             <div className="flex items-center gap-2 mb-2">
@@ -1055,7 +1113,7 @@ export default function OptionFlowRadar() {
                                 </Tag>
                                 <Tag>{structure.regime || '—'}</Tag>
                             </div>
-                            <div className="grid grid-cols-5 gap-2 mb-2">
+                            <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-1.5 mb-2">
                                 <Mini k="PCR" v={fmt(structure.oi_pcr, 2)} />
                                 <Mini k="Put wall" v={fmt(structure.put_wall, 0)} />
                                 <Mini k="Call wall" v={fmt(structure.call_wall, 0)} />
@@ -1069,7 +1127,7 @@ export default function OptionFlowRadar() {
                                 <Mini k="ORH" v={fmt((report?.session || (detail as any)?.session || {}).orh, 1)} />
                                 <Mini k="ORL" v={fmt((report?.session || (detail as any)?.session || {}).orl, 1)} />
                             </div>
-                            <div className="flex gap-1.5 mb-2 text-[9px] font-bold uppercase tracking-wider overflow-x-auto">
+                            <div className="flex gap-1.5 mb-2 text-[9px] font-bold uppercase tracking-wider overflow-x-auto no-scrollbar">
                                 {SCREEN_FILTERS.map((f) => {
                                     const on = flagValue(flagsOf({ symbol: selected || '', flags: selFlags }), f.id);
                                     return (
@@ -1086,7 +1144,7 @@ export default function OptionFlowRadar() {
                                     </span>
                                     );
                                 })}
-                                <span className="ml-auto font-mono text-zinc-400">
+                                <span className="ml-auto font-mono text-zinc-400 shrink-0">
                                     Vol {fmtVol(volume.total_volume || selFlags.opt_volume)}
                                 </span>
                             </div>
@@ -1105,36 +1163,41 @@ export default function OptionFlowRadar() {
                     )}
                 </div>
 
-                <div className="overflow-auto min-h-0">
-                    <table className="w-full text-[11px] font-mono">
-                        <thead className="sticky top-0 z-10">
-                            <tr>
-                                <th colSpan={6} className="bg-emerald-950/50 text-emerald-300 text-[10px] tracking-[0.18em] uppercase py-1.5 font-bold">
-                                    Calls
-                                </th>
-                                <th className="bg-[#12141c] text-zinc-300 text-[10px] tracking-[0.18em] uppercase py-1.5 font-bold">
-                                    Strike
-                                </th>
-                                <th colSpan={6} className="bg-rose-950/50 text-rose-300 text-[10px] tracking-[0.18em] uppercase py-1.5 font-bold">
-                                    Puts
-                                </th>
-                            </tr>
-                            <tr className="text-zinc-500 bg-[#0c1016] border-b-2 border-[#c4b5fd]">
-                                <th className="px-1.5 py-1 text-left font-medium">Signal</th>
-                                <th className="px-1.5 py-1 text-right font-medium">CE OI</th>
-                                <th className="px-1.5 py-1 text-right font-medium">Δ</th>
-                                <th className="px-1.5 py-1 text-right font-medium">Vol</th>
-                                <th className="px-1.5 py-1 text-right font-medium">IV</th>
-                                <th className="px-1.5 py-1 text-right font-medium">LTP</th>
-                                <th className="px-1.5 py-1 text-center font-medium"> </th>
-                                <th className="px-1.5 py-1 text-left font-medium">Signal</th>
-                                <th className="px-1.5 py-1 text-right font-medium">PE OI</th>
-                                <th className="px-1.5 py-1 text-right font-medium">Δ</th>
-                                <th className="px-1.5 py-1 text-right font-medium">Vol</th>
-                                <th className="px-1.5 py-1 text-right font-medium">IV</th>
-                                <th className="px-1.5 py-1 text-right font-medium">LTP</th>
-                            </tr>
-                        </thead>
+                <div className="overflow-x-auto overflow-y-auto min-h-[220px] lg:min-h-0 touch-scroll">
+                    <div className="lg:hidden px-3 py-1 bg-violet-950/60 text-[9px] font-mono text-violet-300 flex items-center justify-between border-b border-violet-800/40">
+                        <span>⟵ Swipe for Calls / Puts Greeks ⟶</span>
+                        <span>ATM: {report?.atm || '—'}</span>
+                    </div>
+                    <div className="min-w-[760px]">
+                        <table className="w-full text-[11px] font-mono">
+                            <thead className="sticky top-0 z-10">
+                                <tr>
+                                    <th colSpan={6} className="bg-emerald-950/50 text-emerald-300 text-[10px] tracking-[0.18em] uppercase py-1.5 font-bold">
+                                        Calls
+                                    </th>
+                                    <th className="bg-[#12141c] text-zinc-300 text-[10px] tracking-[0.18em] uppercase py-1.5 font-bold">
+                                        Strike
+                                    </th>
+                                    <th colSpan={6} className="bg-rose-950/50 text-rose-300 text-[10px] tracking-[0.18em] uppercase py-1.5 font-bold">
+                                        Puts
+                                    </th>
+                                </tr>
+                                <tr className="text-zinc-500 bg-[#0c1016] border-b-2 border-[#c4b5fd]">
+                                    <th className="px-1.5 py-1 text-left font-medium">Signal</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">CE OI</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">Δ</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">Vol</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">IV</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">LTP</th>
+                                    <th className="px-1.5 py-1 text-center font-medium"> </th>
+                                    <th className="px-1.5 py-1 text-left font-medium">Signal</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">PE OI</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">Δ</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">Vol</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">IV</th>
+                                    <th className="px-1.5 py-1 text-right font-medium">LTP</th>
+                                </tr>
+                            </thead>
                         <tbody>
                             {chain.map((r) => {
                                 const k = r.strike_price;
@@ -1196,6 +1259,26 @@ export default function OptionFlowRadar() {
                     </table>
                 </div>
             </div>
+        </div>
+
+            {/* Mobile floating quick jump to Chain */}
+            {selected && mobileTab !== 'chain' && (
+                <div className="lg:hidden sticky bottom-2 left-2 right-2 mx-2 my-1 p-2.5 rounded-xl bg-violet-950/95 border border-violet-500/60 shadow-2xl flex items-center justify-between text-xs z-30 backdrop-blur-md animate-fadeIn">
+                    <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        <span className="font-bold text-white">
+                            {selected.split(':').pop()?.replace('-EQ', '')}
+                        </span>
+                        <span className="text-[10px] text-violet-300 font-mono">Selected</span>
+                    </div>
+                    <button
+                        onClick={() => setMobileTab('chain')}
+                        className="px-3 py-1 bg-violet-600 hover:bg-violet-500 text-white font-black text-[10px] uppercase rounded-lg shadow"
+                    >
+                        View Chain & Details →
+                    </button>
+                </div>
+            )}
 
             <footer className="shrink-0 border-t-2 border-[#c4b5fd] px-3 py-1 flex justify-between text-zinc-500">
                 <span className="text-[9px] uppercase tracking-widest">
