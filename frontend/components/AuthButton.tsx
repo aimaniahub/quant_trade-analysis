@@ -63,18 +63,15 @@ export default function AuthButton({ compact = false }: { compact?: boolean }) {
     }
 
     return (
-        <div className="flex flex-col gap-1 items-end">
+        <div className="relative inline-flex items-center">
             <button
                 onClick={() => setShowModal(true)}
-                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded text-[10px] font-bold uppercase tracking-wider"
+                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 bg-gradient-to-r from-sky-600 to-blue-600 hover:from-sky-500 hover:to-blue-500 text-white rounded-lg text-[10px] sm:text-[11px] font-bold uppercase tracking-wider shadow-sm shadow-blue-500/20 transition-all select-none shrink-0"
+                title={error || "Authenticate with Fyers API"}
             >
-                Login
+                <span className="text-xs">🔑</span>
+                <span>Login</span>
             </button>
-            {error && (
-                <span className="text-xs text-red-500 max-w-[200px] leading-tight text-right">
-                    {error}
-                </span>
-            )}
 
             <AuthTokenModal
                 isOpen={showModal}

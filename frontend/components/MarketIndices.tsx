@@ -78,10 +78,10 @@ export default function MarketIndices() {
                     return (
                         <div
                             key={symbol}
-                            className="min-w-[78vw] sm:min-w-0 flex-1 snap-start p-3.5 sm:p-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl shadow-sm hover:border-emerald-500/40 transition-all flex flex-col justify-between"
+                            className="min-w-[78vw] sm:min-w-[260px] md:min-w-0 flex-1 snap-start p-4 bg-zinc-900/80 border border-zinc-800 rounded-2xl shadow-lg hover:border-emerald-500/40 transition-all flex flex-col justify-between"
                         >
-                            <div className="flex justify-between items-start mb-1.5">
-                                <span className="text-xs sm:text-sm font-bold text-zinc-600 dark:text-zinc-300 tracking-tight">
+                            <div className="flex justify-between items-start mb-2">
+                                <span className="text-xs sm:text-sm font-bold text-zinc-300 tracking-tight">
                                     {INDEX_LABELS[symbol]}
                                 </span>
                                 <span className={`text-[9px] sm:text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
@@ -89,16 +89,16 @@ export default function MarketIndices() {
                                         ? dataMode === 'live'
                                             ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/25"
                                             : "bg-amber-500/10 text-amber-400 border-amber-500/25"
-                                        : "bg-zinc-800 text-zinc-500 border-zinc-700"
+                                        : "bg-zinc-800/80 text-zinc-500 border-zinc-700/60"
                                 }`}>
                                     {isLoading ? "SYNC" : hasData && ltp > 0 ? (dataMode === 'live' ? "● LIVE" : "○ CLOSE") : "NO DATA"}
                                 </span>
                             </div>
                             <div className="flex items-baseline justify-between gap-2">
-                                <span className="text-xl sm:text-2xl font-black font-mono tracking-tight text-zinc-900 dark:text-white">
+                                <span className="text-xl sm:text-2xl font-black font-mono tracking-tight text-white">
                                     {ltp > 0 ? ltp.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '---'}
                                 </span>
-                                <span className={`text-xs sm:text-sm font-mono font-bold shrink-0 ${isPositive ? 'text-emerald-500 dark:text-emerald-400' : 'text-rose-500 dark:text-rose-400'}`}>
+                                <span className={`text-xs sm:text-sm font-mono font-bold shrink-0 ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
                                     {ltp > 0 && (
                                         <>
                                             {isPositive ? '+' : ''}{ch.toFixed(2)} ({chp.toFixed(2)}%)
@@ -107,7 +107,7 @@ export default function MarketIndices() {
                                 </span>
                             </div>
                             {high > 0 && low > 0 && (
-                                <div className="mt-2 pt-2 border-t border-zinc-100 dark:border-zinc-800/80 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+                                <div className="mt-2.5 pt-2 border-t border-zinc-800/80 flex items-center justify-between text-[10px] font-mono text-zinc-500">
                                     <span>L: <span className="text-zinc-400">{low.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</span></span>
                                     <span>H: <span className="text-zinc-400">{high.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</span></span>
                                 </div>
