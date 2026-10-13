@@ -9,13 +9,25 @@ auth_service = get_auth_service()
 
 
 @router.get("/login")
-async def login():
+async def login(redirect: bool = Query(False)):
     """
     Get Fyers login URL.
-    Redirects user to Fyers OAuth page.
+    Redirects user to Fyers OAuth page if redirect=True.
     """
     login_url = auth_service.get_login_url()
+    if redirect:
+        return RedirectResponse(url=login_url, status_code=307)
     return {"login_url": login_url}
+
+
+@router.get("/login/redirect")
+async def login_redirect():
+    """
+    Directly redirect the browser to Fyers OAuth page.
+    Ideal for direct HTML links to avoid popup blockers.
+    """
+    login_url = auth_service.get_login_url()
+    return RedirectResponse(url=login_url, status_code=307)
 
 
 @router.get("/callback")

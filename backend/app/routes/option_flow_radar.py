@@ -4,8 +4,9 @@ Option Flow Radar – FastAPI Routes
 Exposes the OptionFlowRadar engine via REST endpoints consumed by the frontend.
 """
 
+from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 
 from app.services.option_flow_radar import get_radar_service

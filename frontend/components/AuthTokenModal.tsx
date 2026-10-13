@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { api } from '../lib/api';
 
 interface AuthTokenModalProps {
     isOpen: boolean;
@@ -10,6 +11,9 @@ interface AuthTokenModalProps {
     onSubmitCode: (code: string) => Promise<any>;
 }
 
+const DEFAULT_LOGIN_URL =
+    'https://api-t1.fyers.in/api/v3/generate-authcode?client_id=WG88Q43SI6-100&redirect_uri=https%3A%2F%2Fgoogle.com&response_type=code&state=optiongreek';
+
 export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode }: AuthTokenModalProps) {
     const [rawInput, setRawInput] = useState('');
     const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -17,18 +21,72 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
     const [success, setSuccess] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [mounted, setMounted] = useState(false);
+    const [loginUrl, setLoginUrl] = useState<string>(DEFAULT_LOGIN_URL);
+    const [loadingUrl, setLoadingUrl] = useState(false);
+    const [copied, setCopied] = useState(false);
 
     useEffect(() => {
         setMounted(true);
     }, []);
 
-    const extractedCode = extractAuthCode(rawInput.trim());
+    // Fetch dynamic login URL from backend on modal open
+    useEffect(() => {
+        if (!isOpen) return;
+
+        let isCancelled = false;
+        setLoadingUrl(true);
+
+        api.auth
+            .getLoginUrl()
+            .then((res) => {
+                if (!isCancelled && res?.login_url) {
+                    setLoginUrl(res.login_url);
+                }
+            })
+            .catch((err) => {
+                console.warn('Could not fetch dynamic login URL from backend, using fallback:', err);
+            })
+            .finally(() => {
+                if (!isCancelled) setLoadingUrl(false);
+            });
+
+        return () => {
+            isCancelled = true;
+        };
+    }, [isOpen]);
+
     const isUrl = rawInput.trim().startsWith('http');
 
     const handleOpenLogin = useCallback(() => {
-        onLogin();
+        try {
+            onLogin();
+        } catch {
+            // onLogin might fail if window.open was blocked; native anchor handles primary navigation
+        }
         setStep(2);
     }, [onLogin]);
+
+    const handleCopyUrl = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(loginUrl);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch {
+            // clipboard write failed
+        }
+    }, [loginUrl]);
+
+    const handlePasteClipboard = useCallback(async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (text && text.trim()) {
+                setRawInput(text.trim());
+                setError(null);
+            }
+        } catch {
+            // permission denied or not supported
+        }
+    }, []);
 
     const handleSubmit = useCallback(async () => {
         if (!rawInput.trim()) return;
@@ -40,10 +98,8 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
             await onSubmitCode(rawInput.trim());
             setSuccess(true);
             setStep(3);
-            // Auto-close after 2 seconds
             setTimeout(() => {
                 onClose();
-                // Reset state
                 setRawInput('');
                 setStep(1);
                 setSuccess(false);
@@ -129,35 +185,77 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                 {/* Content */}
                 <div className="px-4 sm:px-6 py-4 sm:py-5 space-y-4 sm:space-y-5 overflow-y-auto touch-scroll">
                     {/* Steps */}
-                    <div className="space-y-3.5">
+                    <div className="space-y-4">
                         {/* Step 1 */}
                         <div className={`flex gap-3 ${step >= 1 ? 'opacity-100' : 'opacity-40'}`}>
-                            <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${step > 1 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
-                                }`}>
+                            <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
+                                step > 1
+                                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                    : 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
+                            }`}>
                                 {step > 1 ? '✓' : '1'}
                             </div>
                             <div className="flex-1 pt-0.5">
-                                <p className="text-white text-sm font-semibold">Open Fyers Login</p>
+                                <div className="flex items-center justify-between">
+                                    <p className="text-white text-sm font-semibold">Open Fyers Login</p>
+                                    {step > 1 && (
+                                        <button
+                                            onClick={() => setStep(1)}
+                                            className="text-[11px] text-zinc-400 hover:text-white underline font-mono"
+                                        >
+                                            Step 1
+                                        </button>
+                                    )}
+                                </div>
                                 <p className="text-zinc-400 text-xs mt-0.5 leading-relaxed">
-                                    Click below to open the Fyers OAuth page in a new tab.
-                                    Log in with your credentials.
+                                    Click below to open the Fyers OAuth authentication page in a new tab.
+                                    Log in with your Fyers credentials.
                                 </p>
-                                {step === 1 && (
-                                    <button
+
+                                {/* Step 1 Actions */}
+                                <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                                    <a
+                                        href={loginUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
                                         onClick={handleOpenLogin}
-                                        className="mt-2.5 px-4 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg shadow-blue-500/20 hover:shadow-cyan-500/30 flex items-center gap-1.5"
+                                        className="px-4 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white text-xs font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg shadow-blue-500/20 hover:shadow-cyan-500/30 flex items-center gap-1.5 cursor-pointer select-none"
                                     >
-                                        <span>Open Fyers Login</span>
-                                        <span>→</span>
+                                        <span>{step === 1 ? 'Open Fyers Login' : 'Re-open Fyers Login'}</span>
+                                        <span>↗</span>
+                                    </a>
+
+                                    <button
+                                        type="button"
+                                        onClick={handleCopyUrl}
+                                        className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-medium rounded-lg border border-zinc-700 transition-colors flex items-center gap-1.5"
+                                        title="Copy Fyers OAuth URL to paste into any browser"
+                                    >
+                                        <span>{copied ? '✓ Copied' : '📋 Copy URL'}</span>
                                     </button>
-                                )}
+
+                                    {step === 1 && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setStep(2)}
+                                            className="px-3 py-2 text-zinc-400 hover:text-zinc-200 text-xs font-semibold underline transition-colors"
+                                        >
+                                            Already logged in? Go to Step 2 →
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                         </div>
 
                         {/* Step 2 */}
-                        <div className={`flex gap-3 ${step >= 2 ? 'opacity-100' : 'opacity-40'}`}>
-                            <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${step > 2 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : step === 2 ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40' : 'bg-zinc-800 text-zinc-500 border border-zinc-700'
-                                }`}>
+                        <div className={`flex gap-3 ${step >= 2 ? 'opacity-100' : 'opacity-50'}`}>
+                            <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
+                                step > 2
+                                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                    : step === 2
+                                    ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
+                                    : 'bg-zinc-800 text-zinc-500 border border-zinc-700'
+                            }`}>
                                 {step > 2 ? '✓' : '2'}
                             </div>
                             <div className="flex-1 pt-0.5">
@@ -166,14 +264,41 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                                     After login, Fyers redirects to a URL. Copy the <span className="text-zinc-200 font-mono bg-zinc-800 px-1 py-0.5 rounded">auth_code</span> value from the URL
                                     — or paste the <span className="text-zinc-200 font-medium">entire redirect URL</span>.
                                 </p>
-                                {step === 2 && (
+
+                                {step >= 2 && (
                                     <div className="mt-3 space-y-3">
+                                        {/* Quick launcher in Step 2 so user is never stuck */}
+                                        <div className="flex items-center justify-between bg-zinc-900/90 rounded-lg px-3 py-2 border border-zinc-800 text-xs">
+                                            <span className="text-zinc-400 text-[11px]">Didn't get redirected yet?</span>
+                                            <a
+                                                href={loginUrl}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-cyan-400 hover:text-cyan-300 font-semibold flex items-center gap-1 text-[11px] underline"
+                                            >
+                                                Launch Fyers Login Page ↗
+                                            </a>
+                                        </div>
+
                                         {/* Example */}
-                                        <div className="bg-zinc-850/80 rounded-lg p-3 border border-zinc-750/50 bg-zinc-900/70">
+                                        <div className="bg-zinc-900/70 rounded-lg p-3 border border-zinc-800">
                                             <p className="text-[10px] text-zinc-400 uppercase tracking-wider font-bold mb-1.5">Example redirect URL</p>
                                             <p className="text-[11px] text-zinc-400 font-mono break-all leading-relaxed">
                                                 https://google.com/?s=ok&code=200&<span className="text-amber-400 font-bold">auth_code=eyJhbG...</span>&state=optiongreek
                                             </p>
+                                        </div>
+
+                                        {/* Input Header & Paste Button */}
+                                        <div className="flex items-center justify-between text-xs">
+                                            <label className="text-zinc-300 font-semibold text-[11px]">Redirect URL or auth_code:</label>
+                                            <button
+                                                type="button"
+                                                onClick={handlePasteClipboard}
+                                                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-cyan-400 hover:text-cyan-300 text-[11px] font-mono flex items-center gap-1 border border-zinc-700 transition-colors"
+                                                title="Paste directly from clipboard"
+                                            >
+                                                📋 Paste
+                                            </button>
                                         </div>
 
                                         {/* Input */}
@@ -182,7 +307,7 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                                             onChange={(e) => { setRawInput(e.target.value); setError(null); }}
                                             placeholder="Paste auth_code or full redirect URL here..."
                                             rows={3}
-                                            className="w-full bg-zinc-950/80 border border-zinc-700/80 rounded-lg px-3.5 py-2.5 text-xs sm:text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-cyan-500/60 focus:ring-1 focus:ring-cyan-500/30 font-mono resize-none transition-colors"
+                                            className="w-full bg-zinc-950/90 border border-zinc-700/80 rounded-lg px-3.5 py-2.5 text-xs sm:text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-cyan-500/60 focus:ring-1 focus:ring-cyan-500/30 font-mono resize-none transition-colors"
                                             autoFocus
                                         />
 
@@ -206,7 +331,10 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                                         {/* Error */}
                                         {error && (
                                             <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3.5 py-2.5 text-red-400 text-xs">
-                                                <span className="font-bold">Error:</span> {error}
+                                                <p><span className="font-bold">Error:</span> {error}</p>
+                                                <p className="mt-1 text-[11px] text-zinc-400">
+                                                    Note: Fyers auth codes expire after 3–5 minutes. If it expired, click <a href={loginUrl} target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">Open Fyers Login ↗</a> to get a fresh code.
+                                                </p>
                                             </div>
                                         )}
 
@@ -214,7 +342,7 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                                         <button
                                             onClick={handleSubmit}
                                             disabled={!rawInput.trim() || submitting}
-                                            className="w-full px-4 py-2.5 sm:py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed text-white text-xs sm:text-sm font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
+                                            className="w-full px-4 py-2.5 sm:py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed text-white text-xs sm:text-sm font-bold uppercase tracking-wider rounded-lg transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer"
                                         >
                                             {submitting ? (
                                                 <>
@@ -252,31 +380,18 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
                 </div>
 
                 {/* Footer */}
-                <div className="shrink-0 px-4 sm:px-6 py-3 border-t border-zinc-800 bg-zinc-950/60">
-                    <p className="text-[10px] text-zinc-500 text-center font-mono">
-                        Token is saved securely in your backend environment and never exposed externally.
-                    </p>
+                <div className="shrink-0 px-4 sm:px-6 py-3 border-t border-zinc-800 bg-zinc-950/60 flex items-center justify-between text-[10px] text-zinc-500 font-mono">
+                    <span>Token is stored securely in your backend session</span>
+                    <button
+                        onClick={handleClose}
+                        className="text-zinc-400 hover:text-white underline cursor-pointer"
+                    >
+                        Dismiss
+                    </button>
                 </div>
             </div>
         </div>
     );
 
     return createPortal(modalContent, document.body);
-}
-
-
-/**
- * Extract auth_code from raw input (URL or plain code).
- * This is for the visual indicator only — the backend does the actual extraction.
- */
-function extractAuthCode(input: string): string {
-    if (input.startsWith('http://') || input.startsWith('https://')) {
-        try {
-            const url = new URL(input);
-            return url.searchParams.get('auth_code') || url.searchParams.get('code') || input;
-        } catch {
-            return input;
-        }
-    }
-    return input;
 }

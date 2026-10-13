@@ -39,9 +39,15 @@ export function useAuth() {
 
     const login = useCallback(async () => {
         try {
-            const { login_url } = await api.auth.getLoginUrl();
+            const data = await api.auth.getLoginUrl();
+            const login_url = data?.login_url;
             if (login_url) {
-                window.open(login_url, '_blank');
+                const win = window.open(login_url, '_blank', 'noopener,noreferrer');
+                if (!win || win.closed || typeof win.closed === 'undefined') {
+                    // Browser popup blocker intercepted window.open, navigate directly
+                    window.location.href = login_url;
+                }
+                return login_url;
             }
         } catch (err: any) {
             setError(err.message || 'Failed to get login URL');
