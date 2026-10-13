@@ -151,6 +151,46 @@ class ScanJobManager:
         self._redis_writes = 0
         self._redis_reads = 0
         self._redis_errors = 0
+        self._last_disk_persist = 0.0
+        self._load_from_disk_cache()
+
+    # ── Disk persistence ─────────────────────────────────────────
+
+    def _save_to_disk_cache(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._last_disk_persist) < 2.0:
+            return
+        from app.utils.disk_cache import save_json_file
+        with self._lock:
+            recent = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)[:25]
+            data = {j.id: j.to_dict() for j in recent}
+        save_json_file("scan_jobs_cache.json", data)
+        self._last_disk_persist = now
+
+    def _load_from_disk_cache(self) -> None:
+        from app.utils.disk_cache import load_json_file
+        data = load_json_file("scan_jobs_cache.json")
+        if isinstance(data, dict):
+            with self._lock:
+                for jid, raw in data.items():
+                    if jid not in self._jobs and isinstance(raw, dict):
+                        try:
+                            self._jobs[jid] = ScanJob.from_dict(raw)
+                        except Exception:
+                            pass
+
+    def _load_from_disk(self, job_id: str) -> Optional[ScanJob]:
+        from app.utils.disk_cache import load_json_file
+        data = load_json_file("scan_jobs_cache.json")
+        if isinstance(data, dict) and job_id in data:
+            try:
+                job = ScanJob.from_dict(data[job_id])
+                with self._lock:
+                    self._jobs[job_id] = job
+                return job
+            except Exception:
+                return None
+        return None
 
     # ── Redis keys ───────────────────────────────────────────────
 
@@ -175,7 +215,8 @@ class ScanJobManager:
             return 1.5
 
     def _persist(self, job: ScanJob, force: bool = False) -> None:
-        """Write job to Redis (throttled unless force)."""
+        """Write job to Redis and disk cache (throttled unless force)."""
+        self._save_to_disk_cache(force=force)
         from app.services import redis_client as rc
 
         if not rc.is_available():
@@ -275,7 +316,7 @@ class ScanJobManager:
             job = self._jobs.get(job_id)
             if job:
                 return job
-            loaded = self._load_from_redis(job_id)
+            loaded = self._load_from_redis(job_id) or self._load_from_disk(job_id)
             if loaded:
                 self._jobs[job_id] = loaded
             return loaded
@@ -284,14 +325,14 @@ class ScanJobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if not job:
-                job = self._load_from_redis(job_id)
+                job = self._load_from_redis(job_id) or self._load_from_disk(job_id)
                 if job:
                     self._jobs[job_id] = job
             if not job:
                 return None
             pub = job.to_public(include_results=include_results)
             from app.services import redis_client as rc
-            pub["storage"] = "redis+memory" if rc.is_available() else "memory"
+            pub["storage"] = "redis+memory" if rc.is_available() else "disk+memory"
             return pub
 
     def update(self, job_id: str, **fields: Any) -> Optional[ScanJob]:

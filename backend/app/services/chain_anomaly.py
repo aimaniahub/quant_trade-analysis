@@ -1927,6 +1927,12 @@ def analyze_chain(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 if k not in body:
                     body[k] = v
         body["max_oi_added"] = _max_session_delta_oi(chain)
+        body["net_delta_oi"] = 0.0
+        body["ce_delta_oi"] = 0.0
+        body["pe_delta_oi"] = 0.0
+        body["trap_risk"] = False
+        body["trap_type"] = None
+        body["trap_reason"] = None
         body["setup_score"] = 0
         body["flags"] = screen_flags(body)
         return body
@@ -2125,9 +2131,92 @@ def analyze_chain(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "engine": "v6-anomaly",
     }
     body["max_oi_added"] = _max_session_delta_oi(chain)
+    net_oi, ce_oi, pe_oi = compute_chain_net_delta_oi(chain)
+    body["net_delta_oi"] = net_oi
+    body["ce_delta_oi"] = ce_oi
+    body["pe_delta_oi"] = pe_oi
+
+    # Technical Reality & Trap Detection (Resistance slamming / Counter-VWAP trades)
+    has_trap, trap_type, trap_reason = detect_trap_risk(
+        spot=spot,
+        chain_bias=chain_bias,
+        structure=structure,
+        session=body.get("session") or {},
+    )
+    body["trap_risk"] = has_trap
+    body["trap_type"] = trap_type
+    body["trap_reason"] = trap_reason
+    if has_trap:
+        if grade == GRADE_TRADEABLE:
+            grade = GRADE_WATCH
+            body["grade"] = GRADE_WATCH
+        trap_note = f"Trap warning: {trap_reason}"
+        body["why_not"] = f"{trap_note} · {body['why_not']}" if body.get("why_not") else trap_note
+
     body["setup_score"] = setup_score(body)
     body["flags"] = screen_flags(body)
     return body
+
+
+def compute_chain_net_delta_oi(chain: Sequence[Dict[str, Any]]) -> Tuple[float, float, float]:
+    """Calculate directional net delta OI across the entire chain.
+    Returns:
+        (net_delta_oi, total_ce_chg, total_pe_chg)
+        net_delta_oi: positive indicates net bullish accumulation (Put writing / Call unwinding),
+                      negative indicates net bearish accumulation (Call writing / Put unwinding).
+    """
+    total_ce_chg = 0.0
+    total_pe_chg = 0.0
+    for row in chain or []:
+        call = row.get("call") or {}
+        put = row.get("put") or {}
+        total_ce_chg += _oi_added(call, None)
+        total_pe_chg += _oi_added(put, None)
+    # Net directional flow: Put OI additions support bulls, Call OI additions support bears
+    net_delta_oi = total_pe_chg - total_ce_chg
+    return net_delta_oi, total_ce_chg, total_pe_chg
+
+
+def detect_trap_risk(
+    spot: float,
+    chain_bias: str,
+    structure: Dict[str, Any],
+    session: Dict[str, Any],
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Detect Technical Reality traps:
+    - Bull Trap: Spot is right at Call Wall (resistance ceiling) or trading below VWAP
+    - Bear Trap: Spot is right at Put Wall (support floor) or trading above VWAP
+    """
+    if spot <= 0 or chain_bias not in (BIAS_BULL, BIAS_BEAR):
+        return False, None, None
+
+    call_wall = _f(structure.get("call_wall"))
+    put_wall = _f(structure.get("put_wall"))
+    vwap = _f(session.get("vwap"))
+
+    if chain_bias == BIAS_BULL:
+        # Bull Trap 1: Slamming into Call Wall Resistance
+        if call_wall > 0:
+            dist_to_call = (call_wall - spot) / spot * 100.0
+            if dist_to_call <= 0.8:
+                return True, "BULL_TRAP_WALL", f"Spot {spot:.1f} near Call Wall {call_wall:.1f} (buffer only {dist_to_call:.2f}%)"
+        # Bull Trap 2: Trading below intraday VWAP
+        if vwap > 0 and spot < vwap * 0.997:
+            dev = (spot - vwap) / vwap * 100.0
+            return True, "BULL_TRAP_VWAP", f"Spot {spot:.1f} below VWAP {vwap:.1f} ({dev:.2f}%)"
+
+    elif chain_bias == BIAS_BEAR:
+        # Bear Trap 1: Sitting on Put Wall Support
+        if put_wall > 0:
+            dist_to_put = (spot - put_wall) / spot * 100.0
+            if dist_to_put <= 0.8:
+                return True, "BEAR_TRAP_WALL", f"Spot {spot:.1f} near Put Wall {put_wall:.1f} (buffer only {dist_to_put:.2f}%)"
+        # Bear Trap 2: Trading above intraday VWAP
+        if vwap > 0 and spot > vwap * 1.003:
+            dev = (spot - vwap) / vwap * 100.0
+            return True, "BEAR_TRAP_VWAP", f"Spot {spot:.1f} above VWAP {vwap:.1f} (+{dev:.2f}%)"
+
+    return False, None, None
 
 
 def setup_score(report: Dict[str, Any]) -> int:
@@ -2183,6 +2272,20 @@ def setup_score(report: Dict[str, Any]) -> int:
     rr = _f((report.get("trade") or {}).get("rr"))
     if rr >= 1.2:
         score += 4.0
+
+    # Reality Confluence & Trap Penalties
+    if report.get("trap_risk"):
+        score -= 25.0
+
+    net_oi = _f(report.get("net_delta_oi"))
+    bias = report.get("chain_bias")
+    if bias == BIAS_BULL and net_oi > 0:
+        score += 5.0
+    elif bias == BIAS_BEAR and net_oi < 0:
+        score += 5.0
+    elif (bias == BIAS_BULL and net_oi < 0) or (bias == BIAS_BEAR and net_oi > 0):
+        score -= 10.0
+
     return int(max(0, min(100, round(score))))
 
 
@@ -2369,8 +2472,10 @@ def screen_flags(report: Dict[str, Any]) -> Dict[str, Any]:
         tags.append("CLEAN_ROOM")
     if htf_aligned and "HTF_ALIGNED" not in tags:
         tags.append("HTF_ALIGNED")
-    if not tags:
-        tags.append("TRADEABLE" if report.get("grade") == GRADE_TRADEABLE else "WATCH" if report.get("grade") == GRADE_WATCH else "QUIET")
+    if report.get("trap_risk"):
+        trap_tag = report.get("trap_type") or "TRAP_RISK"
+        if trap_tag not in tags:
+            tags.append(trap_tag)
 
     return {
         "high_oi": bool(high_oi),
@@ -2391,8 +2496,14 @@ def screen_flags(report: Dict[str, Any]) -> Dict[str, Any]:
         "oi_spike": bool(oi_spike),
         "skew_pop": bool(skew_pop),
         "squeeze_active": bool(squeeze_active),
+        "trap_risk": bool(report.get("trap_risk")),
+        "trap_type": report.get("trap_type"),
+        "trap_reason": report.get("trap_reason"),
         "tags": tags,
         "oi_added": round(max_oi, 0),
+        "net_delta_oi": round(_f(report.get("net_delta_oi")), 0),
+        "ce_delta_oi": round(_f(report.get("ce_delta_oi")), 0),
+        "pe_delta_oi": round(_f(report.get("pe_delta_oi")), 0),
         "opt_volume": round(tot, 0),
         "vol_x": vol_x,
         "vor": hottest_vor,

@@ -236,12 +236,31 @@ async def get_radar_scan_job(job_id: str):
     mgr = get_scan_job_manager()
     snap = mgr.snapshot(job_id, include_results=True)
     if not snap:
-        raise HTTPException(status_code=404, detail="Job not found")
+        active_radar = mgr.find_running("radar")
+        if active_radar:
+            snap = mgr.snapshot(active_radar.id, include_results=True)
+    last = get_radar_service().get_last_scan() or {}
+    if not snap:
+        if last and (last.get("flagged") or last.get("tradeable") or last.get("ok_chain")):
+            snap = {
+                "id": job_id,
+                "kind": "radar",
+                "status": "completed" if not last.get("scan_running") else "running",
+                "total": last.get("universe_requested") or last.get("total") or 187,
+                "completed": last.get("attempted") or last.get("scanned") or len(last.get("flagged") or []),
+                "failed": 0,
+                "rate_limited_skips": last.get("rate_limited_skips", 0),
+                "current_symbol": None,
+                "completion_pct": last.get("completion_pct") or 100.0,
+                "meta": {"summary": last},
+                "errors": [],
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Job not found")
 
     meta = snap.get("meta") or {}
     summary = meta.get("summary") or {}
-    done = snap["status"] in ("completed", "failed", "cancelled", "interrupted")
-    last = get_radar_service().get_last_scan() or {}
+    done = snap.get("status") in ("completed", "failed", "cancelled", "interrupted")
 
     def _pick(key, default=None):
         if done and summary.get(key) is not None:
@@ -421,4 +440,28 @@ async def backtest_signal(body: BacktestRequest):
     )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "Backtest failed"))
+    return result
+
+
+class AiBestPicksRequest(BaseModel):
+    force: bool = False
+    candidates: Optional[List[Dict[str, Any]]] = None
+
+
+@router.post("/radar/ai-best-picks")
+async def get_ai_best_picks_route(body: Optional[AiBestPicksRequest] = None):
+    """
+    Select exactly 2 best trades using OpenRouter (with quantitative multi-factor fallback).
+    Any combination (2 Bull, 2 Bear, or 1 Bull + 1 Bear), accounting for technical reality & traps.
+    """
+    import asyncio
+    from app.services.ai_best_picker import get_ai_best_picks
+
+    force = bool(body.force) if body else False
+    cand_list = body.candidates if body else None
+
+    def _run():
+        return get_ai_best_picks(force=force, candidate_list=cand_list)
+
+    result = await asyncio.to_thread(_run)
     return result

@@ -71,6 +71,12 @@ interface ScreenFlags {
     unique_score?: number;
     tags?: string[];
     oi_added?: number;
+    net_delta_oi?: number;
+    ce_delta_oi?: number;
+    pe_delta_oi?: number;
+    trap_risk?: boolean;
+    trap_type?: string;
+    trap_reason?: string;
     opt_volume?: number;
     vol_x?: number;
     vor?: number;
@@ -101,6 +107,10 @@ interface BoardRow {
     vol_x?: number;
     vol_x_avg?: number;
     chain_volume?: number;
+    net_delta_oi?: number;
+    trap_risk?: boolean;
+    trap_type?: string;
+    trap_reason?: string;
     vor?: number;
     oi_velocity?: number;
     ts?: string;
@@ -279,8 +289,27 @@ function fmtVol(n?: number | null) {
 }
 
 function oiOf(row: BoardRow): number | null {
-    const v = flagsOf(row).oi_added ?? row.top_anomaly?.oi_added;
+    const f = flagsOf(row);
+    const v = f.net_delta_oi ?? row.net_delta_oi ?? f.oi_added ?? row.top_anomaly?.oi_added;
     return v != null ? Number(v) : null;
+}
+
+function fmtNetOi(n?: number | null): { text: string; color: string } {
+    if (n == null || Number.isNaN(Number(n))) return { text: '—', color: 'text-zinc-500' };
+    const v = Number(n);
+    if (v === 0) return { text: '0', color: 'text-zinc-400' };
+    const sign = v > 0 ? '+' : '';
+    const abs = Math.abs(v);
+    let formatted = '';
+    if (abs >= 100000) {
+        formatted = `${sign}${(v / 100000).toFixed(abs >= 1000000 ? 2 : 1)}L`;
+    } else if (abs >= 1000) {
+        formatted = `${sign}${(v / 1000).toFixed(abs >= 10000 ? 0 : 1)}k`;
+    } else {
+        formatted = `${sign}${Math.round(v)}`;
+    }
+    const color = v > 0 ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold';
+    return { text: formatted, color };
 }
 
 function flagsOf(row: BoardRow): ScreenFlags {
@@ -288,6 +317,10 @@ function flagsOf(row: BoardRow): ScreenFlags {
     const tags = Array.isArray(stored.tags) ? stored.tags : [];
     const has = (t: string) => tags.includes(t);
     const oiAdd = stored.oi_added ?? row.top_anomaly?.oi_added;
+    const netDeltaOi = stored.net_delta_oi ?? row.net_delta_oi;
+    const trapRisk = stored.trap_risk === true || row.trap_risk === true || has('TRAP_RISK') || has('BULL_TRAP_WALL') || has('BEAR_TRAP_WALL') || has('BULL_TRAP_VWAP') || has('BEAR_TRAP_VWAP');
+    const trapType = stored.trap_type ?? row.trap_type;
+    const trapReason = stored.trap_reason ?? row.trap_reason;
     const optVol = stored.opt_volume ?? row.chain_volume ?? row.volume?.total_volume;
     const volX = stored.vol_x ?? row.vol_x ?? 0;
     const vor = stored.vor ?? row.vor ?? row.top_anomaly?.vor ?? 0;
@@ -315,6 +348,10 @@ function flagsOf(row: BoardRow): ScreenFlags {
         unique_score: stored.unique_score,
         tags,
         oi_added: oiAdd,
+        net_delta_oi: netDeltaOi,
+        trap_risk: trapRisk,
+        trap_type: trapType,
+        trap_reason: trapReason,
         opt_volume: optVol,
         vol_x: volX,
         vor,
@@ -351,6 +388,9 @@ function getTopTwoTags(row: BoardRow, hotSet?: Set<string>): string[] {
     const f = flagsOf(row);
     const candidateTags: { tag: string; priority: number }[] = [];
 
+    if (f.trap_risk) {
+        candidateTags.push({ tag: '⚠️ TRAP RISK', priority: 0.5 });
+    }
     if (hotSet?.has(row.symbol)) {
         candidateTags.push({ tag: '📰 AI HOT', priority: 1 });
     }
@@ -420,7 +460,17 @@ function rankRows(rows: BoardRow[]) {
 }
 
 export default function OptionFlowRadar() {
-    const [board, setBoard] = useState<any>(null);
+    const [board, setBoard] = useState<any>(() => {
+        if (typeof window !== 'undefined') {
+            try {
+                const saved = localStorage.getItem('optionflow_radar_last_board');
+                if (saved) return JSON.parse(saved);
+            } catch {
+                /* ignore */
+            }
+        }
+        return null;
+    });
     const [scanLoading, setScanLoading] = useState(false);
     const [scanError, setScanError] = useState<string | null>(null);
     const [selected, setSelected] = useState<string | null>(null);
@@ -434,22 +484,66 @@ export default function OptionFlowRadar() {
     const [aiError, setAiError] = useState<string | null>(null);
     const [aiLoading, setAiLoading] = useState(false);
     const [showNiftyModal, setShowNiftyModal] = useState(false);
+    const [showAiPickerModal, setShowAiPickerModal] = useState(false);
+    const [aiPickerLoading, setAiPickerLoading] = useState(false);
+    const [aiPickerResult, setAiPickerResult] = useState<any>(null);
+    const [aiPickerError, setAiPickerError] = useState<string | null>(null);
     const [mobileTab, setMobileTab] = useState<'screen' | 'bull' | 'bear' | 'chain'>('screen');
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const aiPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const scanRun = useRef(0);
     const aiRun = useRef(0);
 
+    const runAiBestPicker = async () => {
+        setAiPickerLoading(true);
+        setAiPickerError(null);
+        setShowAiPickerModal(true);
+        try {
+            const pool = [
+                ...(Array.isArray(board?.bullish) ? board.bullish : []),
+                ...(Array.isArray(board?.bearish) ? board.bearish : []),
+                ...(Array.isArray(board?.tradeable) ? board.tradeable : []),
+                ...(Array.isArray(board?.watch) ? board.watch : []),
+            ];
+            const res: any = await api.radar.getAiBestPicks({ force: true, candidates: pool.slice(0, 16) });
+            if (res && res.success) {
+                setAiPickerResult(res);
+            } else {
+                setAiPickerError(res?.error || 'Could not complete AI Best Picker evaluation');
+            }
+        } catch (err: any) {
+            setAiPickerError(err?.message || 'Failed to connect to AI Best Picker service');
+        } finally {
+            setAiPickerLoading(false);
+        }
+    };
+
     const commit = useCallback((snap: any) => {
         if (!snap) return;
         setBoard((prev: any) => {
             const next = { ...prev, ...snap };
-            next.tradeable = snap.tradeable || snap.flagged || prev?.tradeable || [];
-            next.watch = snap.watch || prev?.watch || [];
-            next.flow = snap.flow || snap.all_hits || prev?.flow;
-            if (snap.screen) next.screen = snap.screen;
-            if (snap.bullish) next.bullish = snap.bullish;
-            if (snap.bearish) next.bearish = snap.bearish;
+            const snapTradeable = Array.isArray(snap.tradeable) && snap.tradeable.length > 0 ? snap.tradeable : null;
+            const snapFlagged = Array.isArray(snap.flagged) && snap.flagged.length > 0 ? snap.flagged : null;
+            const snapWatch = Array.isArray(snap.watch) && snap.watch.length > 0 ? snap.watch : null;
+            const snapFlow = Array.isArray(snap.flow) && snap.flow.length > 0 ? snap.flow : (Array.isArray(snap.all_hits) && snap.all_hits.length > 0 ? snap.all_hits : null);
+
+            next.tradeable = snapTradeable || snapFlagged || prev?.tradeable || prev?.flagged || [];
+            next.watch = snapWatch || prev?.watch || [];
+            next.flow = snapFlow || prev?.flow || prev?.all_hits;
+            if (Array.isArray(snap.screen) && snap.screen.length > 0) next.screen = snap.screen;
+            else if (prev?.screen) next.screen = prev.screen;
+            if (Array.isArray(snap.bullish) && snap.bullish.length > 0) next.bullish = snap.bullish;
+            else if (prev?.bullish) next.bullish = prev.bullish;
+            if (Array.isArray(snap.bearish) && snap.bearish.length > 0) next.bearish = snap.bearish;
+            else if (prev?.bearish) next.bearish = prev.bearish;
+
+            if (typeof window !== 'undefined' && ((next.tradeable && next.tradeable.length > 0) || (next.watch && next.watch.length > 0))) {
+                try {
+                    localStorage.setItem('optionflow_radar_last_board', JSON.stringify(next));
+                } catch {
+                    /* quota */
+                }
+            }
             return next;
         });
     }, []);
@@ -457,9 +551,17 @@ export default function OptionFlowRadar() {
     const loadLast = useCallback(async () => {
         try {
             const last: any = await api.radar.getLastScan();
-            commit(last);
+            if (last && (last.has_data !== false || (last.tradeable && last.tradeable.length > 0) || (last.flagged && last.flagged.length > 0))) {
+                commit(last);
+                setScanError(null);
+            } else if (last) {
+                setBoard((prev: any) => (prev ? { ...prev, market_hours: last.market_hours, data_mode: last.data_mode, next_open: last.next_open } : last));
+            }
         } catch (e: any) {
-            setScanError(e?.message || 'Board load failed');
+            setBoard((prev: any) => {
+                if (!prev) setScanError(e?.message || 'Board load failed');
+                return prev;
+            });
         }
     }, [commit]);
 
@@ -564,12 +666,21 @@ export default function OptionFlowRadar() {
                 setScanLoading(false);
                 return;
             }
+            if (typeof window !== 'undefined') {
+                try {
+                    sessionStorage.setItem('optionflow_radar_active_job', jid);
+                } catch {
+                    /* ignore */
+                }
+            }
             stopPoll();
+            let consecutiveFailures = 0;
             const tick = async () => {
                 if (runId !== scanRun.current) return;
                 try {
                     const snap: any = await api.radar.getScanJob(jid);
                     if (runId !== scanRun.current) return;
+                    consecutiveFailures = 0;
                     commit(snap);
                     const done =
                         ['completed', 'failed', 'cancelled', 'interrupted'].includes(snap.status) ||
@@ -577,12 +688,38 @@ export default function OptionFlowRadar() {
                     if (done) {
                         stopPoll();
                         setScanLoading(false);
+                        if (typeof window !== 'undefined') {
+                            sessionStorage.removeItem('optionflow_radar_active_job');
+                        }
                         if (snap.status === 'failed') setScanError(snap.error_message || 'Harvest failed');
                     }
                 } catch (e: any) {
-                    stopPoll();
-                    setScanLoading(false);
-                    setScanError(e?.message || 'Job poll failed');
+                    consecutiveFailures += 1;
+                    // Attempt fallback to last scan before terminating poll
+                    try {
+                        const fallbackLast: any = await api.radar.getLastScan();
+                        if (fallbackLast && (fallbackLast.tradeable?.length || fallbackLast.flagged?.length)) {
+                            commit(fallbackLast);
+                            if (fallbackLast.scan_running === false) {
+                                stopPoll();
+                                setScanLoading(false);
+                                if (typeof window !== 'undefined') {
+                                    sessionStorage.removeItem('optionflow_radar_active_job');
+                                }
+                                return;
+                            }
+                        }
+                    } catch {
+                        /* ignore */
+                    }
+                    if (consecutiveFailures >= 4) {
+                        stopPoll();
+                        setScanLoading(false);
+                        if (typeof window !== 'undefined') {
+                            sessionStorage.removeItem('optionflow_radar_active_job');
+                        }
+                        setScanError(e?.message || 'Job poll failed');
+                    }
                 }
             };
             await tick();
@@ -596,6 +733,43 @@ export default function OptionFlowRadar() {
     useEffect(() => {
         loadLast();
         loadTape();
+
+        // Resume active background scan if user refreshed page while scanning
+        if (typeof window !== 'undefined') {
+            const pendingJid = sessionStorage.getItem('optionflow_radar_active_job');
+            if (pendingJid) {
+                setScanLoading(true);
+                const runId = ++scanRun.current;
+                let fails = 0;
+                const resumeTick = async () => {
+                    if (runId !== scanRun.current) return;
+                    try {
+                        const snap: any = await api.radar.getScanJob(pendingJid);
+                        if (runId !== scanRun.current) return;
+                        fails = 0;
+                        commit(snap);
+                        const done =
+                            ['completed', 'failed', 'cancelled', 'interrupted'].includes(snap?.status) ||
+                            snap?.scan_running === false;
+                        if (done) {
+                            stopPoll();
+                            setScanLoading(false);
+                            sessionStorage.removeItem('optionflow_radar_active_job');
+                        }
+                    } catch {
+                        fails += 1;
+                        if (fails >= 3) {
+                            stopPoll();
+                            setScanLoading(false);
+                            sessionStorage.removeItem('optionflow_radar_active_job');
+                        }
+                    }
+                };
+                resumeTick();
+                pollRef.current = setInterval(resumeTick, 1500);
+            }
+        }
+
         api.radar
             .getAiChainLast()
             .then((d: any) => {
@@ -773,6 +947,15 @@ export default function OptionFlowRadar() {
 
                     {/* Action buttons with clean touch targets */}
                     <div className="flex items-center gap-1.5 sm:gap-2">
+                        <button
+                            onClick={runAiBestPicker}
+                            disabled={aiPickerLoading}
+                            className="px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full border border-amber-400/80 bg-gradient-to-r from-amber-500/20 via-violet-600/30 to-indigo-600/30 hover:from-amber-500/30 hover:to-violet-600/40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-amber-200 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer shrink-0"
+                            title="Select exactly 2 best trades using OpenRouter AI / Quant confluence with trap avoidance"
+                        >
+                            <span>⚡</span>
+                            <span>{aiPickerLoading ? 'Evaluating…' : 'AI BEST PICKER'}</span>
+                        </button>
                         <button
                             onClick={() => setShowNiftyModal(true)}
                             className="px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border-2 border-[#c4b5fd] bg-violet-600/30 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-violet-200 hover:bg-violet-500 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer shrink-0"
@@ -1019,8 +1202,8 @@ export default function OptionFlowRadar() {
                     <div className="grid grid-cols-[40px_1fr_72px_56px] px-3 py-1 text-[9px] uppercase tracking-wider text-zinc-400 border-b-2 border-[#c4b5fd]">
                         <span>Scr</span>
                         <span>Name</span>
-                        <span className="text-right">ΔOI</span>
-                        <span className="text-right">Vol</span>
+                        <span className="text-right" title="Signed Net ΔOI (+ Put support / - Call resistance)">Net ΔOI</span>
+                        <span className="text-right" title="Total option contracts volume">Opt Vol</span>
                     </div>
                     <div className="flex-1 min-h-0 overflow-y-auto">
                         {screened.length === 0 ? (
@@ -1070,7 +1253,14 @@ export default function OptionFlowRadar() {
                                                 </span>
                                             );
                                         })()}
-                                        <span className="text-right font-mono text-[11px]">{fmt(oiOf(row), 0)}</span>
+                                        {(() => {
+                                            const oiInfo = fmtNetOi(oiOf(row));
+                                            return (
+                                                <span className={`text-right font-mono text-[11px] ${oiInfo.color}`}>
+                                                    {oiInfo.text}
+                                                </span>
+                                            );
+                                        })()}
                                         <span className="text-right font-mono text-[11px] text-zinc-400">
                                             {fmtVol(volOf(row))}
                                         </span>
@@ -1295,6 +1485,17 @@ export default function OptionFlowRadar() {
                     </div>
                 </div>
             )}
+
+            {/* AI Best Picker 2-Trade Modal */}
+            <AiBestPickerModal
+                isOpen={showAiPickerModal}
+                onClose={() => setShowAiPickerModal(false)}
+                loading={aiPickerLoading}
+                result={aiPickerResult}
+                error={aiPickerError}
+                onRetry={runAiBestPicker}
+                onSelectSymbol={handleSelectStock}
+            />
         </div>
     );
 }
@@ -1428,17 +1629,17 @@ function SetupTable({
                     type="button"
                     onClick={() => toggleSort('oi')}
                     className={`text-right hover:text-zinc-200 ${sortKey === 'oi' ? 'text-violet-200' : ''}`}
-                    title="Sort by ΔOI"
+                    title="Sort by signed Net ΔOI (+ Put support / - Call resistance)"
                 >
-                    ΔOI {sortArrow(sortKey === 'oi', sortDir)}
+                    Net ΔOI {sortArrow(sortKey === 'oi', sortDir)}
                 </button>
                 <button
                     type="button"
                     onClick={() => toggleSort('vol')}
                     className={`text-right hover:text-zinc-200 ${sortKey === 'vol' ? 'text-violet-200' : ''}`}
-                    title="Sort by volume"
+                    title="Sort by option chain volume"
                 >
-                    Vol {sortArrow(sortKey === 'vol', sortDir)}
+                    Opt Vol {sortArrow(sortKey === 'vol', sortDir)}
                 </button>
             </div>
             <div className="flex-1 overflow-y-auto">
@@ -1468,7 +1669,14 @@ function SetupTable({
                                 </span>
                             );
                         })()}
-                        <span className="text-right font-mono text-[11px]">{fmt(oiOf(row), 0)}</span>
+                        {(() => {
+                            const oiInfo = fmtNetOi(oiOf(row));
+                            return (
+                                <span className={`text-right font-mono text-[11px] ${oiInfo.color}`}>
+                                    {oiInfo.text}
+                                </span>
+                            );
+                        })()}
                         <span className="text-right font-mono text-[11px] text-zinc-400">
                             {fmtVol(volOf(row))}
                         </span>
@@ -1507,4 +1715,204 @@ function Tag({
             ? 'border-zinc-500 text-zinc-200'
             : 'border-zinc-800 text-zinc-500';
     return <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold uppercase tracking-wider ${cls}`}>{children}</span>;
+}
+
+function AiBestPickerModal({
+    isOpen,
+    onClose,
+    loading,
+    result,
+    error,
+    onRetry,
+    onSelectSymbol,
+}: {
+    isOpen: boolean;
+    onClose: () => void;
+    loading: boolean;
+    result: any;
+    error: string | null;
+    onRetry: () => void;
+    onSelectSymbol: (sym: string) => void;
+}) {
+    if (!isOpen) return null;
+
+    const picks = Array.isArray(result?.picks) ? result.picks : [];
+    const stance = result?.portfolio_stance || 'SELECTIVE';
+    const engine = result?.engine === 'openrouter' ? `OpenRouter AI (${result?.model || 'Gemma'})` : 'Quant Confluence Engine';
+
+    return (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md p-4 overflow-y-auto flex items-center justify-center animate-in fade-in duration-200">
+            <div className="w-full max-w-4xl bg-[#0c0f17] border-2 border-[#c4b5fd] rounded-2xl shadow-2xl overflow-hidden flex flex-col my-6 max-h-[90vh]">
+                {/* Header */}
+                <div className="px-5 py-4 border-b-2 border-[#c4b5fd] bg-[#101422] flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-3">
+                        <span className="p-2 bg-amber-500/20 text-amber-300 rounded-xl border border-amber-500/40 text-lg">
+                            ⚡
+                        </span>
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <h2 className="text-base font-black uppercase tracking-wider text-white">
+                                    AI Best Picker · Top 2 High-Conviction Trades
+                                </h2>
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-violet-600/30 text-violet-200 border border-violet-500/40">
+                                    {stance.replace(/_/g, ' ')}
+                                </span>
+                            </div>
+                            <p className="text-xs text-zinc-400 mt-0.5">
+                                Evaluated across support/resistance walls, VWAP alignment & trap avoidance · {engine}
+                            </p>
+                        </div>
+                    </div>
+                    <button
+                        onClick={onClose}
+                        className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                        ✕
+                    </button>
+                </div>
+
+                {/* Body */}
+                <div className="p-5 flex-1 overflow-y-auto space-y-4">
+                    {loading ? (
+                        <div className="py-16 flex flex-col items-center justify-center text-center space-y-4">
+                            <div className="w-12 h-12 border-4 border-violet-500/30 border-t-amber-400 rounded-full animate-spin" />
+                            <div>
+                                <div className="text-sm font-bold text-zinc-200">Evaluating Candidate Pool…</div>
+                                <div className="text-xs text-zinc-500 mt-1 max-w-md">
+                                    Cross-referencing Call/Put walls, VWAP distance, directional Net ΔOI, and filtering out trap risks with {engine}.
+                                </div>
+                            </div>
+                        </div>
+                    ) : error ? (
+                        <div className="p-6 bg-rose-950/30 border border-rose-500/40 rounded-xl text-center space-y-3">
+                            <div className="text-rose-300 font-bold text-sm">Evaluation Notice</div>
+                            <div className="text-xs text-rose-200/80">{error}</div>
+                            <button
+                                onClick={onRetry}
+                                className="px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold uppercase tracking-wider cursor-pointer"
+                            >
+                                Try Again
+                            </button>
+                        </div>
+                    ) : picks.length === 0 ? (
+                        <div className="py-12 text-center text-zinc-500 text-sm">
+                            No high-conviction trades passed the technical filters. Run a fresh scan or wait for market volume expansion.
+                        </div>
+                    ) : (
+                        <>
+                            {result?.market_thesis && (
+                                <div className="p-3 bg-violet-950/25 border border-violet-800/40 rounded-xl text-xs text-violet-200 leading-relaxed font-mono">
+                                    💡 <strong className="text-violet-100">Market Synthesis:</strong> {result.market_thesis}
+                                </div>
+                            )}
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {picks.map((pick: any, idx: number) => {
+                                    const isBull = pick.action?.includes('CE') || pick.action?.includes('BUY_CE') || pick.action?.includes('BULL');
+                                    const cardBorder = isBull ? 'border-emerald-500/50 hover:border-emerald-400' : 'border-rose-500/50 hover:border-rose-400';
+                                    const badgeBg = isBull ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-rose-500/20 text-rose-300 border-rose-500/40';
+
+                                    return (
+                                        <div
+                                            key={pick.symbol || idx}
+                                            className={`bg-[#0e121b] border-2 ${cardBorder} rounded-xl p-4 flex flex-col justify-between space-y-3 transition-all shadow-lg`}
+                                        >
+                                            <div>
+                                                {/* Card Header */}
+                                                <div className="flex items-start justify-between">
+                                                    <div>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-lg font-black tracking-tight text-white">
+                                                                {pick.name || pick.symbol?.split(':').pop()?.replace('-EQ', '')}
+                                                            </span>
+                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider border ${badgeBg}`}>
+                                                                {isBull ? '▲ BUY CE' : '▼ BUY PE'}
+                                                            </span>
+                                                        </div>
+                                                        <span className="text-[11px] font-mono text-zinc-400 block mt-0.5">
+                                                            Spot: ₹{pick.spot ?? '—'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="text-right">
+                                                        <div className="text-[10px] uppercase tracking-wider text-zinc-500">Rec Strike</div>
+                                                        <div className="text-base font-black font-mono text-amber-300">
+                                                            {pick.strike} {isBull ? 'CE' : 'PE'}
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Trade Parameters Matrix */}
+                                                <div className="grid grid-cols-4 gap-2 my-3 p-2.5 bg-black/40 rounded-lg border border-zinc-800 text-center font-mono">
+                                                    <div>
+                                                        <div className="text-[8px] uppercase tracking-wider text-zinc-500">Entry</div>
+                                                        <div className="text-[11px] font-bold text-zinc-200">{pick.entry || pick.spot}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-[8px] uppercase tracking-wider text-zinc-500">Stop Loss</div>
+                                                        <div className="text-[11px] font-bold text-rose-400">₹{pick.stop_loss}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-[8px] uppercase tracking-wider text-zinc-500">Target 1</div>
+                                                        <div className="text-[11px] font-bold text-emerald-400">₹{pick.target_1}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-[8px] uppercase tracking-wider text-zinc-500">R:R</div>
+                                                        <div className="text-[11px] font-bold text-amber-300">{pick.risk_reward || '1:2.0'}</div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Trap Risk Clearance Badge */}
+                                                <div className="p-2 rounded bg-zinc-900/80 border border-zinc-800 text-[11px] text-zinc-300 flex items-center gap-1.5">
+                                                    <span>🛡️</span>
+                                                    <span className="font-semibold text-emerald-300">Trap Clearance:</span>
+                                                    <span className="text-zinc-300 truncate">{pick.trap_risk_status || 'Clean clearance to walls'}</span>
+                                                </div>
+
+                                                {/* Thesis */}
+                                                <div className="mt-2.5 text-xs text-zinc-300 leading-snug">
+                                                    <span className="text-violet-300 font-bold">Thesis: </span>
+                                                    {pick.catalyst_and_thesis}
+                                                </div>
+                                                {pick.invalidation && (
+                                                    <div className="mt-1 text-[11px] text-zinc-400 leading-snug">
+                                                        <span className="text-rose-400 font-semibold">Invalidation: </span>
+                                                        {pick.invalidation}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <button
+                                                onClick={() => {
+                                                    if (pick.symbol) {
+                                                        onSelectSymbol(pick.symbol);
+                                                        onClose();
+                                                    }
+                                                }}
+                                                className="w-full mt-2 py-1.5 bg-violet-600/30 hover:bg-violet-600 border border-violet-500/50 hover:border-violet-400 text-white rounded-lg text-xs font-bold uppercase tracking-wider transition cursor-pointer"
+                                            >
+                                                Inspect Chain & Details →
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </>
+                    )}
+                </div>
+
+                {/* Footer */}
+                <div className="px-5 py-3 border-t border-zinc-800 bg-[#0a0d13] flex items-center justify-between text-xs text-zinc-500 shrink-0">
+                    <span>
+                        2 Trades Chosen · Independent & Unmixed · Risk-First
+                    </span>
+                    <button
+                        onClick={onClose}
+                        className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs cursor-pointer"
+                    >
+                        Done
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
 }

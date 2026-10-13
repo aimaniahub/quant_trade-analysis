@@ -24,7 +24,7 @@ IDLE_MIN_INTERVAL = 0.4
 
 
 class AsyncRateLimiter:
-    def __init__(self, min_interval: float = 0.35, cooldown_on_limit: float = 45.0):
+    def __init__(self, min_interval: float = 0.35, cooldown_on_limit: float = 6.0):
         """
         Args:
             min_interval: minimum seconds between granted tokens (≈3 RPS default)
@@ -107,7 +107,7 @@ class AsyncRateLimiter:
         with self._sync:
             self._limit_hits += 1
             self._trip_count += 1
-            extra = min(self.cooldown_on_limit * (1 + self._limit_hits // 3), 180.0)
+            extra = min(self.cooldown_on_limit * (1 + self._limit_hits // 3), 20.0)
             self._cooldown_until = time.monotonic() + extra
             hits = self._limit_hits
         logger.warning(
@@ -116,21 +116,16 @@ class AsyncRateLimiter:
         )
 
     def clear_soft(self) -> None:
-        """Clear the hit counter after a successful call once cooldown has ended.
-
-        A 1-per-success decrement left 75 leftover hits, so the next 429
-        immediately re-armed a 180s cooldown. One clean grant after cooldown
-        means the window is open again.
-        """
+        """Clear the hit counter after a successful call once cooldown has ended."""
         with self._sync:
             if time.monotonic() >= self._cooldown_until:
                 self._limit_hits = 0
 
     def try_acquire_sync(self) -> Optional[float]:
-        """Grant a Fyers token, or None if cooldown is active.
+        """Grant a Fyers token, or None if cooldown is long.
 
-        Does **not** sleep out a 429 cooldown. Harvest workers must skip
-        the remaining universe instead of blocking 180s × N.
+        If remaining cooldown is brief (<= 3s), wait it out so harvest doesn't
+        drop the rest of the universe unnecessarily.
         Still waits the min_interval between grants.
         """
         waited = 0.0
@@ -139,15 +134,20 @@ class AsyncRateLimiter:
             with self._sync:
                 now = time.monotonic()
                 if now < self._cooldown_until:
-                    self._wait_tls.last_wait = waited
-                    return None
-                elapsed = now - self._last_grant
-                if elapsed < self.min_interval:
-                    wait = self.min_interval - elapsed
+                    rem = self._cooldown_until - now
+                    if rem <= 3.0:
+                        wait = rem
+                    else:
+                        self._wait_tls.last_wait = waited
+                        return None
                 else:
-                    self._note_grant_unlocked(now)
-                    self._wait_tls.last_wait = waited
-                    return waited
+                    elapsed = now - self._last_grant
+                    if elapsed < self.min_interval:
+                        wait = self.min_interval - elapsed
+                    else:
+                        self._note_grant_unlocked(now)
+                        self._wait_tls.last_wait = waited
+                        return waited
             if wait > 0:
                 time.sleep(wait)
                 waited += wait

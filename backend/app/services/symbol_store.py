@@ -887,6 +887,11 @@ def set_board(board: Dict[str, Any]) -> Dict[str, Any]:
             rc.set_json(_board_key(), slim, ttl=ttl)
         except Exception:
             pass
+    try:
+        from app.utils.disk_cache import save_json_file
+        save_json_file("symbol_store_board.json", slim)
+    except Exception:
+        pass
     with _store_lock:
         _mem_board = slim
     return slim
@@ -902,7 +907,18 @@ def get_board() -> Optional[Dict[str, Any]]:
         except Exception:
             pass
     with _store_lock:
-        return dict(_mem_board) if _mem_board else None
+        if _mem_board:
+            return dict(_mem_board)
+    try:
+        from app.utils.disk_cache import load_json_file
+        loaded = load_json_file("symbol_store_board.json")
+        if isinstance(loaded, dict) and loaded:
+            with _store_lock:
+                _mem_board = loaded
+            return dict(loaded)
+    except Exception:
+        pass
+    return None
 
 
 def set_session_board(board: Dict[str, Any]) -> Dict[str, Any]:
@@ -916,6 +932,11 @@ def set_session_board(board: Dict[str, Any]) -> Dict[str, Any]:
             rc.set_json(_session_board_key(), slim, ttl=session_snapshot_ttl())
         except Exception:
             pass
+    try:
+        from app.utils.disk_cache import save_json_file
+        save_json_file("symbol_store_session_board.json", slim)
+    except Exception:
+        pass
     with _store_lock:
         _mem_session_board = slim
     return slim
@@ -931,7 +952,18 @@ def get_session_board() -> Optional[Dict[str, Any]]:
         except Exception:
             pass
     with _store_lock:
-        return dict(_mem_session_board) if _mem_session_board else None
+        if _mem_session_board:
+            return dict(_mem_session_board)
+    try:
+        from app.utils.disk_cache import load_json_file
+        loaded = load_json_file("symbol_store_session_board.json")
+        if isinstance(loaded, dict) and loaded:
+            with _store_lock:
+                _mem_session_board = loaded
+            return dict(loaded)
+    except Exception:
+        pass
+    return None
 
 
 def classify_freshness(symbol: str, field: str, ttl: Optional[float] = None) -> str:

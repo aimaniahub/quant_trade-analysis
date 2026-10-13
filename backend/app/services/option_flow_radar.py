@@ -172,7 +172,7 @@ class OptionFlowRadarService:
         return bool(self.auth_service.get_fyers_model())
 
     def _persist_last_scan(self) -> None:
-        """Redis + memory durability for last radar board (restart-safe)."""
+        """Redis + memory + disk durability for last radar board (restart-safe)."""
         if not self._last_scan or not self._last_scan_at:
             return
         slim = dict(self._last_scan)
@@ -180,6 +180,17 @@ class OptionFlowRadarService:
         try:
             from app.services import symbol_store as store
             store.set_board(slim)
+        except Exception:
+            pass
+        try:
+            from app.utils.disk_cache import save_json_file
+            save_json_file(
+                "radar_last_scan.json",
+                {
+                    "scan": slim,
+                    "at": self._last_scan_at.isoformat(),
+                },
+            )
         except Exception:
             pass
         try:
@@ -216,6 +227,15 @@ class OptionFlowRadarService:
                     if isinstance(raw, dict):
                         scan = raw.get("scan")
                         at = raw.get("at")
+            except Exception:
+                scan = None
+        if not scan:
+            try:
+                from app.utils.disk_cache import load_json_file
+                raw = load_json_file("radar_last_scan.json")
+                if isinstance(raw, dict):
+                    scan = raw.get("scan")
+                    at = raw.get("at")
             except Exception:
                 scan = None
         if not scan:
@@ -1677,7 +1697,15 @@ class OptionFlowRadarService:
             stored = _st.get_chain(sym, strike_count) or {}
             have_store = bool(stored.get("success") and len(stored.get("chain") or []) >= 2)
             t_http = time.perf_counter()
-            if get_fyers_limiter().in_cooldown:
+            if not force_chain and have_store and _st.is_fresh(sym, "chain", 120):
+                chain_resp = stored
+                try:
+                    _tl.http_ms = 0
+                    _tl.limiter_wait = 0.0
+                    _tl.cache_hit = True
+                except Exception:
+                    pass
+            elif get_fyers_limiter().in_cooldown:
                 if have_store and not force_chain:
                     chain_resp = stored
                     try:

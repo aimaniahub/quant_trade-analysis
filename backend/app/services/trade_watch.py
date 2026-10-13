@@ -39,18 +39,20 @@ You receive a DUMP: AI-chain news picks, bullish board, bearish board, headlines
 and live option-chain legs (ltp/oi/vol/iv) for those names.
 
 Task: choose up to TWO high-conviction directional option BUY trades for TODAY.
-Entry is 1 lot at the current premium on the chain (09:23 print). Dummy fill.
+Entry is 1 lot at the current premium on the chain. Dummy fill.
 
 HARD RULES:
 1. Return JSON only. No markdown, no prose.
-2. trades length is 0, 1, or 2. Prefer 2 only if BOTH are high conviction.
-3. symbol MUST be copied from DUMP (full NSE:… form). Never invent a ticker.
-4. strike MUST exist on that symbol's CHAINS legs. side is CE or PE.
-5. BUY only (we do not short options). Bullish process → CE. Bearish → PE.
-6. Prefer liquid legs: high volume + OI, near ATM (±2 strikes), premium not a ₹1 lottery.
-7. sl_premium and tp_premium are option LTP levels, not spot. SL < entry for a long; TP > entry.
-8. thesis ≤ 40 words: why THIS strike from the chain + news/flow. invalidation ≤ 20 words.
-9. If the book is mixed/quiet, return trades: [] and say why in skip_reason.
+2. ANY COMBINATION IS ALLOWED: 2 Bullish (2 × CE buys), 2 Bearish (2 × PE buys), or 1 Bullish CE + 1 Bearish PE.
+3. NEVER MIXED SIGNALS: Choose only clean, high-conviction setups. Skip names with conflicting signals or trap risks.
+4. Avoid traps: Do NOT buy CE into heavy Call Wall resistance or below VWAP. Do NOT buy PE into Put Wall support or above VWAP.
+5. symbol MUST be copied from DUMP (full NSE:… form). Never invent a ticker.
+6. strike MUST exist on that symbol's CHAINS legs. side is CE or PE.
+7. BUY only (we do not short options). Bullish process → CE. Bearish → PE.
+8. Prefer liquid legs: high volume + OI, near ATM (±2 strikes), premium not a ₹1 lottery.
+9. sl_premium and tp_premium are option LTP levels, not spot. SL < entry for a long; TP > entry.
+10. thesis ≤ 40 words: why THIS strike from the chain + technical reality. invalidation ≤ 20 words.
+11. If the book is mixed/quiet, return trades: [] and say why in skip_reason.
 
 JSON shape:
 {"trades":[{"symbol":"NSE:SBIN-EQ","side":"CE","strike":800,"thesis":"...","invalidation":"...","sl_premium":12.4,"tp_premium":21.0}],"skip_reason":""}
@@ -237,6 +239,18 @@ def _slim_chain(symbol: str) -> Optional[Dict[str, Any]]:
     raw = store.get_chain(symbol, CHAIN_BAND) or {}
     rows = list(raw.get("chain") or [])
     if len(rows) < 3:
+        # On-demand live fetch if chain not yet stored in memory/Redis
+        try:
+            from app.services.fyers_market import get_market_service
+            with store.harvest_writer():
+                res = get_market_service().get_option_chain(symbol, CHAIN_BAND)
+                if res and res.get("success") and len(res.get("chain") or []) >= 3:
+                    raw = res
+                    rows = list(raw.get("chain") or [])
+                    store.put_chain(symbol, res)
+        except Exception as exc:
+            logger.debug("trade_watch on-demand chain %s: %s", symbol, exc)
+    if len(rows) < 3:
         return None
     legs = []
     for r in rows:
@@ -296,6 +310,22 @@ def build_dump() -> Dict[str, Any]:
         s = p.get("symbol")
         if s and s not in symbols:
             symbols.append(s)
+
+    # Fallback to stored boards or liquid benchmark universe if radar has not populated yet
+    if not symbols:
+        from app.services import symbol_store as store
+        board_data = store.get_board() or store.get_session_board() or {}
+        b_rows = list(board_data.get("rows") or board_data.get("bullish") or []) + list(board_data.get("bearish") or [])
+        for r in b_rows:
+            sym = r.get("symbol")
+            if sym and sym not in symbols:
+                symbols.append(sym)
+    if not symbols:
+        symbols = [
+            "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX",
+            "NSE:RELIANCE-EQ", "NSE:HDFCBANK-EQ", "NSE:ICICIBANK-EQ",
+            "NSE:INFY-EQ", "NSE:SBIN-EQ", "NSE:TCS-EQ"
+        ]
     symbols = symbols[:16]
 
     chains = {}
@@ -350,15 +380,119 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _chat(system: str, user: str, max_tokens: int = 900) -> Tuple[Dict[str, Any], str]:
+def _algorithmic_pick(dump: Dict[str, Any]) -> Dict[str, Any]:
+    """Algorithmic quantitative fallback evaluator for live market execution."""
+    chains = dump.get("chains") or {}
+    if not chains:
+        return {"trades": [], "skip_reason": "No chains available"}
+
+    candidates = []
+    bull = dump.get("bullish") or []
+    bear = dump.get("bearish") or []
+    for r in bull:
+        candidates.append({"row": r, "bias": "BULLISH"})
+    for r in bear:
+        candidates.append({"row": r, "bias": "BEARISH"})
+
+    # Sort by setup score descending
+    candidates.sort(key=lambda c: float((c["row"] or {}).get("score") or 0), reverse=True)
+
+    trades = []
+    for c in candidates:
+        if len(trades) >= MAX_TRADES:
+            break
+        r = c["row"] or {}
+        sym = r.get("symbol")
+        if not sym or sym not in chains:
+            continue
+        bias = c["bias"]
+        ch = chains[sym]
+        spot = float(ch.get("spot") or 0)
+        atm = float(ch.get("atm") or spot)
+        side = "CE" if bias == "BULLISH" else "PE"
+
+        # Pick strike near ATM
+        legs = ch.get("legs") or []
+        best_leg = None
+        best_diff = 1e9
+        for leg in legs:
+            k = float(leg.get("k") or 0)
+            if bias == "BULLISH" and k >= atm:
+                d = abs(k - atm)
+                if d < best_diff:
+                    best_diff = d
+                    best_leg = leg
+            elif bias == "BEARISH" and k <= atm:
+                d = abs(atm - k)
+                if d < best_diff:
+                    best_diff = d
+                    best_leg = leg
+        if not best_leg:
+            continue
+
+        strike = float(best_leg.get("k") or 0)
+        opt_data = best_leg.get("ce" if side == "CE" else "pe") or {}
+        ltp = float(opt_data.get("ltp") or 0)
+        if ltp <= 1.0:
+            continue
+
+        sl = round(ltp * 0.70, 2)
+        tp = round(ltp * 1.45, 2)
+        score_val = r.get("score") or 75
+        thesis = f"Quant confluence {bias}: Score {score_val} with active option flow near ATM {strike}"
+        inv = f"Stop loss at {sl} or directional flow reversal"
+        trades.append({
+            "symbol": sym,
+            "side": side,
+            "strike": strike,
+            "thesis": thesis,
+            "invalidation": inv,
+            "sl_premium": sl,
+            "tp_premium": tp,
+        })
+
+    return {"trades": trades, "skip_reason": "" if trades else "No valid liquid candidate passed quantitative filters"}
+
+
+def _chat(system: str, user: str, max_tokens: int = 900, dump_fallback: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], str]:
     settings = get_settings()
-    grok_key = (settings.grok_api_key or os.environ.get("XAI_API_KEY") or "").strip()
     or_key = (settings.openrouter_api_key or "").strip()
+    grok_key = (settings.grok_api_key or os.environ.get("XAI_API_KEY") or "").strip()
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
     last_err: Optional[Exception] = None
+
+    # 1. Primary evaluation: OpenRouter per user configuration
+    if or_key:
+        base = (settings.openrouter_base_url or "https://openrouter.ai/api/v1").rstrip("/")
+        model = (settings.openrouter_model or "google/gemma-4-31b-it:free").strip()
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                r = client.post(
+                    f"{base}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {or_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://optiongreek.local",
+                        "X-Title": "OptionGreek TradeWatch",
+                    },
+                    json={"model": model, "messages": messages, "temperature": 0.15, "max_tokens": max_tokens},
+                )
+            if r.status_code < 400:
+                raw = r.json()
+                content = (((raw.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+                parsed = _extract_json(str(content)) or {}
+                if parsed:
+                    return parsed, str(raw.get("model") or model)
+            else:
+                last_err = RuntimeError(f"OpenRouter HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as exc:
+            last_err = exc
+            logger.warning("trade_watch OpenRouter error: %s, falling back...", exc)
+
+    # 2. Secondary evaluation: Grok
     if grok_key:
         base = (settings.grok_api_url or "https://api.x.ai/v1").rstrip("/")
         models = [m for m in ((settings.grok_model or "").strip(), "grok-4.5", "grok-3-mini") if m]
@@ -368,7 +502,7 @@ def _chat(system: str, user: str, max_tokens: int = 900) -> Tuple[Dict[str, Any]
                 continue
             seen.add(model)
             try:
-                with httpx.Client(timeout=90.0) as client:
+                with httpx.Client(timeout=60.0) as client:
                     r = client.post(
                         f"{base}/chat/completions",
                         headers={"Authorization": f"Bearer {grok_key}", "Content-Type": "application/json"},
@@ -380,34 +514,18 @@ def _chat(system: str, user: str, max_tokens: int = 900) -> Tuple[Dict[str, Any]
                 raw = r.json()
                 content = (((raw.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
                 parsed = _extract_json(str(content)) or {}
-                return parsed, str(raw.get("model") or model)
+                if parsed:
+                    return parsed, str(raw.get("model") or model)
             except Exception as exc:
                 last_err = exc
                 continue
-    if or_key:
-        base = (settings.openrouter_base_url or "https://openrouter.ai/api/v1").rstrip("/")
-        model = (settings.openrouter_model or "google/gemma-4-31b-it:free").strip()
-        try:
-            with httpx.Client(timeout=90.0) as client:
-                r = client.post(
-                    f"{base}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {or_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://optiongreek.local",
-                        "X-Title": "OptionGreek TradeWatch",
-                    },
-                    json={"model": model, "messages": messages, "temperature": 0.15, "max_tokens": max_tokens},
-                )
-            if r.status_code >= 400:
-                raise RuntimeError(f"OpenRouter HTTP {r.status_code}: {r.text[:200]}")
-            raw = r.json()
-            content = (((raw.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
-            parsed = _extract_json(str(content)) or {}
-            return parsed, str(raw.get("model") or model)
-        except Exception as exc:
-            last_err = exc
-    raise RuntimeError(str(last_err) if last_err else "No LLM key (GROK_API_KEY / XAI_API_KEY / OPENROUTER_API_KEY)")
+
+    # 3. Fallback: Quantitative Algorithmic Evaluator (never crash live desk)
+    if dump_fallback:
+        logger.info("trade_watch using quantitative fallback evaluation (reason: %s)", last_err or "No LLM key configured")
+        return _algorithmic_pick(dump_fallback), "quant_confluence_eval"
+
+    raise RuntimeError(str(last_err) if last_err else "No LLM key (OPENROUTER_API_KEY / GROK_API_KEY)")
 
 
 def _leg(chain: Dict[str, Any], strike: float, side: str) -> Optional[Dict[str, Any]]:
@@ -568,8 +686,7 @@ def run_pick(force: bool = False) -> Dict[str, Any]:
             with _lock:
                 book = _load()
                 book["phase"] = "blocked"
-                book["session_date"] = dump.get("session_date") or last_session_date().isoformat()
-                book["skip_reason"] = "No option chains in the store yet — run a harvest first."
+                book["skip_reason"] = "Option chains warming up... Desk will auto-enter as soon as live quotes arrive."
                 _event(book, "block", book["skip_reason"])
                 _save(book)
             return snapshot()
@@ -579,7 +696,7 @@ def run_pick(force: bool = False) -> Dict[str, Any]:
             "DUMP:\n"
             + json.dumps(dump, default=str)[:24000]
         )
-        parsed, model = _chat(PICK_PROMPT, user)
+        parsed, model = _chat(PICK_PROMPT, user, dump_fallback=dump)
         raw_trades = parsed.get("trades") if isinstance(parsed, dict) else []
         if not isinstance(raw_trades, list):
             raw_trades = []
@@ -779,7 +896,9 @@ def tick() -> None:
     book = snapshot()
     today = last_session_date().isoformat()
     if session_is_open() and now.time() >= ENTRY_TIME:
-        if book.get("session_date") != today and book.get("phase") not in ("picking",):
+        # Re-attempt if new session or if previously blocked waiting for chains/harvest to warm up
+        needs_entry = (book.get("session_date") != today or book.get("phase") in ("blocked", "idle", "waiting_923"))
+        if needs_entry and book.get("phase") not in ("picking", "open", "closed"):
             run_pick(force=False)
             return
     open_n = int(book.get("open_count") or 0)
