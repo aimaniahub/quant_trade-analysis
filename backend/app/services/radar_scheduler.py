@@ -12,7 +12,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from app.services.fno_stocks import filter_valid_symbols
+from app.services.fno_stocks import FNO_INDICES, TOP_FNO_STOCKS, filter_valid_symbols
 from app.services.option_flow_radar import ALL_FNO_WATCHLIST, get_radar_service
 from app.services.signal_bus import get_signal_bus
 from app.services.rate_limiter import get_fyers_limiter
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Full F&O book — this actor is the only universe Fyers writer
 SCHEDULE_SYMBOLS = filter_valid_symbols(list(ALL_FNO_WATCHLIST))
+TOP_SYMBOLS = filter_valid_symbols(list(dict.fromkeys([*FNO_INDICES, *TOP_FNO_STOCKS])))
 INTERVAL_OPEN_SECS = 180
 INTERVAL_CLOSED_SECS = 180
 MIN_LIS_PUBLISH = 65
@@ -195,11 +196,13 @@ class RadarScheduler:
         self,
         *,
         source: str = "scheduler",
+        scope: str = "top",
+        symbols: Optional[List[str]] = None,
         min_lis: float = 0,
         option_type: Optional[str] = None,
         strike_count: int = 14,
     ) -> Dict[str, Any]:
-        """Start one full-book harvest if idle. If running, reuse that job."""
+        """Start one harvest pass if idle (default: fast top 35 liquid). If running, reuse that job."""
         from app.services.scan_jobs import get_scan_job_manager
 
         mgr = get_scan_job_manager()
@@ -231,11 +234,19 @@ class RadarScheduler:
             if not self.radar._is_authenticated():
                 return {"success": False, "error": "Not authenticated", "status": "blocked"}
 
+            if symbols:
+                target_symbols = filter_valid_symbols(symbols)
+            elif scope == "top":
+                target_symbols = TOP_SYMBOLS
+            else:
+                target_symbols = SCHEDULE_SYMBOLS
+
             job = mgr.create(
                 kind="radar",
-                total=len(SCHEDULE_SYMBOLS),
-                label=f"option flow radar ({source})",
+                total=len(target_symbols),
+                label=f"option flow radar ({scope} - {source})",
                 meta={
+                    "scope": scope,
                     "min_lis": min_lis,
                     "option_type": option_type,
                     "strike_count": strike_count,
@@ -243,7 +254,7 @@ class RadarScheduler:
                     "heartbeat_at": time.time(),
                     "phase": "quotes",
                 },
-                pending_symbols=list(SCHEDULE_SYMBOLS),
+                pending_symbols=list(target_symbols),
             )
             mgr.mark_running(job.id)
             on_progress = self._make_progress(job.id)
@@ -252,7 +263,7 @@ class RadarScheduler:
                 try:
                     result = await asyncio.to_thread(
                         self.radar.scan_all,
-                        None,
+                        target_symbols,
                         min_lis,
                         option_type,
                         strike_count,
@@ -271,16 +282,45 @@ class RadarScheduler:
             task = asyncio.create_task(_worker())
             mgr.register_task(job.id, task)
             self._active_task = task
-            logger.info("[RadarScheduler] harvest started job=%s source=%s n=%s", job.id, source, len(SCHEDULE_SYMBOLS))
+            logger.info("[RadarScheduler] harvest started job=%s source=%s scope=%s n=%s", job.id, source, scope, len(target_symbols))
             return {
                 "success": True,
                 "job_id": job.id,
                 "status": "running",
-                "total": len(SCHEDULE_SYMBOLS),
+                "total": len(target_symbols),
+                "scope": scope,
                 "reused": False,
                 "source": source,
                 "poll_url": f"/api/v1/radar/scan/jobs/{job.id}",
             }
+
+    async def cancel_pass(self) -> Dict[str, Any]:
+        """Cancel the active harvest pass and mark the job cancelled."""
+        from app.services.scan_jobs import get_scan_job_manager
+
+        mgr = get_scan_job_manager()
+        job = mgr.find_running("radar")
+        if job:
+            mgr.cancel(job.id)
+        if self._active_task and not self._active_task.done():
+            self._active_task.cancel()
+        if hasattr(self.radar, "cancel_scan"):
+            self.radar.cancel_scan()
+        return {"success": True, "message": "Scan pass cancelled"}
+
+    async def reset_pass(self) -> Dict[str, Any]:
+        """Hard-reset radar scanning locks, stale jobs, and harvest status."""
+        from app.services.scan_jobs import get_scan_job_manager
+
+        mgr = get_scan_job_manager()
+        job = mgr.find_running("radar")
+        if job:
+            mgr.finish(job.id, status="interrupted", error_message="Reset by user")
+        if self._active_task and not self._active_task.done():
+            self._active_task.cancel()
+        if hasattr(self.radar, "reset_scan"):
+            self.radar.reset_scan()
+        return {"success": True, "message": "Scan lock and state reset successfully"}
 
     async def run_once(self) -> dict:
         """Scheduled full-book harvest — waits until the pass finishes."""

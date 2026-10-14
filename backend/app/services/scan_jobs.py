@@ -497,9 +497,9 @@ class ScanJobManager:
                 if j.kind != kind or j.status != "running":
                     continue
                 hb = float((j.meta or {}).get("heartbeat_at") or 0)
-                if hb and now - hb > 180:
+                if hb and now - hb > 35.0:
                     j.status = "interrupted"
-                    j.error_message = "No heartbeat — scan stalled"
+                    j.error_message = "No heartbeat — scan stalled or interrupted"
                     j.finished_at = _now_iso()
                     self._persist(j, force=True)
                     continue

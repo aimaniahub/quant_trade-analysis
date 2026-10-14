@@ -473,6 +473,24 @@ export default function OptionFlowRadar() {
     });
     const [scanLoading, setScanLoading] = useState(false);
     const [scanError, setScanError] = useState<string | null>(null);
+    const [scanScope, setScanScope] = useState<'top' | 'full'>('top');
+    const [activeScanJob, setActiveScanJob] = useState<{
+        id: string | null;
+        status: string;
+        completed: number;
+        total: number;
+        pct: number;
+        currentSymbol?: string | null;
+        phase?: string | null;
+        lastStatus?: string | null;
+        lastMs?: number;
+        startedAt?: number;
+        elapsedSec?: number;
+        speedSymPerSec?: number;
+        etaSeconds?: number;
+        tradeableCount?: number;
+        watchCount?: number;
+    } | null>(null);
     const [selected, setSelected] = useState<string | null>(null);
     const [detail, setDetail] = useState<SymbolDetail | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
@@ -654,16 +672,60 @@ export default function OptionFlowRadar() {
         }
     }, []);
 
-    const runScan = useCallback(async () => {
+    const handleCancelScan = useCallback(async () => {
+        try {
+            await api.radar.cancelScan();
+        } catch {
+            /* ignore */
+        }
+        stopPoll();
+        setScanLoading(false);
+        setActiveScanJob(null);
+        if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('optionflow_radar_active_job');
+        }
+        await loadLast();
+    }, [loadLast]);
+
+    const handleResetScan = useCallback(async () => {
+        try {
+            await api.radar.resetScan();
+        } catch {
+            /* ignore */
+        }
+        stopPoll();
+        setScanLoading(false);
+        setActiveScanJob(null);
+        setScanError(null);
+        if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('optionflow_radar_active_job');
+        }
+        await loadLast();
+    }, [loadLast]);
+
+    const runScan = useCallback(async (scopeOverride?: 'top' | 'full') => {
+        const targetScope = scopeOverride || scanScope;
         const runId = ++scanRun.current;
+        const t0 = Date.now();
         setScanLoading(true);
         setScanError(null);
+        setActiveScanJob({
+            id: null,
+            status: 'starting',
+            completed: 0,
+            total: targetScope === 'top' ? 35 : 187,
+            pct: 0,
+            phase: 'quotes',
+            startedAt: t0,
+            elapsedSec: 0,
+        });
         try {
-            const started: any = await api.radar.startScan(0, undefined, 14);
+            const started: any = await api.radar.startScan(0, undefined, 14, targetScope);
             const jid = started?.job_id;
             if (!jid) {
                 await loadLast();
                 setScanLoading(false);
+                setActiveScanJob(null);
                 return;
             }
             if (typeof window !== 'undefined') {
@@ -682,20 +744,46 @@ export default function OptionFlowRadar() {
                     if (runId !== scanRun.current) return;
                     consecutiveFailures = 0;
                     commit(snap);
+
+                    const comp = snap.completed || 0;
+                    const tot = snap.total || (targetScope === 'top' ? 35 : 187);
+                    const elapsedSec = Math.max(1, Math.round((Date.now() - t0) / 1000));
+                    const speed = comp > 0 ? comp / elapsedSec : 0;
+                    const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
+
+                    setActiveScanJob({
+                        id: jid,
+                        status: snap.status,
+                        completed: comp,
+                        total: tot,
+                        pct: snap.completion_pct ?? Math.round((comp / Math.max(tot, 1)) * 100),
+                        currentSymbol: snap.current_symbol || (snap.meta?.log?.length ? snap.meta.log[snap.meta.log.length - 1]?.sym : null),
+                        phase: snap.meta?.phase || 'scanning',
+                        lastStatus: snap.meta?.last_status,
+                        lastMs: snap.meta?.last_ms,
+                        startedAt: t0,
+                        elapsedSec,
+                        speedSymPerSec: Math.round(speed * 10) / 10,
+                        etaSeconds: eta,
+                        tradeableCount: Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'TRADEABLE').length : 0,
+                        watchCount: Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'WATCH').length : 0,
+                    });
+
                     const done =
                         ['completed', 'failed', 'cancelled', 'interrupted'].includes(snap.status) ||
                         snap.scan_running === false;
                     if (done) {
                         stopPoll();
                         setScanLoading(false);
+                        setTimeout(() => setActiveScanJob(null), 2500);
                         if (typeof window !== 'undefined') {
                             sessionStorage.removeItem('optionflow_radar_active_job');
                         }
                         if (snap.status === 'failed') setScanError(snap.error_message || 'Harvest failed');
+                        await loadLast();
                     }
                 } catch (e: any) {
                     consecutiveFailures += 1;
-                    // Attempt fallback to last scan before terminating poll
                     try {
                         const fallbackLast: any = await api.radar.getLastScan();
                         if (fallbackLast && (fallbackLast.tradeable?.length || fallbackLast.flagged?.length)) {
@@ -703,6 +791,7 @@ export default function OptionFlowRadar() {
                             if (fallbackLast.scan_running === false) {
                                 stopPoll();
                                 setScanLoading(false);
+                                setActiveScanJob(null);
                                 if (typeof window !== 'undefined') {
                                     sessionStorage.removeItem('optionflow_radar_active_job');
                                 }
@@ -715,6 +804,7 @@ export default function OptionFlowRadar() {
                     if (consecutiveFailures >= 4) {
                         stopPoll();
                         setScanLoading(false);
+                        setActiveScanJob(null);
                         if (typeof window !== 'undefined') {
                             sessionStorage.removeItem('optionflow_radar_active_job');
                         }
@@ -723,12 +813,13 @@ export default function OptionFlowRadar() {
                 }
             };
             await tick();
-            pollRef.current = setInterval(tick, 1500);
+            pollRef.current = setInterval(tick, 1200);
         } catch (e: any) {
             setScanLoading(false);
+            setActiveScanJob(null);
             setScanError(e?.message || 'Could not start harvest');
         }
-    }, [commit, loadLast]);
+    }, [commit, loadLast, scanScope]);
 
     useEffect(() => {
         loadLast();
@@ -740,6 +831,7 @@ export default function OptionFlowRadar() {
             if (pendingJid) {
                 setScanLoading(true);
                 const runId = ++scanRun.current;
+                const resumeT0 = Date.now();
                 let fails = 0;
                 const resumeTick = async () => {
                     if (runId !== scanRun.current) return;
@@ -748,12 +840,35 @@ export default function OptionFlowRadar() {
                         if (runId !== scanRun.current) return;
                         fails = 0;
                         commit(snap);
+                        const comp = snap.completed || 0;
+                        const tot = snap.total || 35;
+                        const elapsedSec = Math.max(1, Math.round((Date.now() - resumeT0) / 1000));
+                        const speed = comp > 0 ? comp / elapsedSec : 0;
+                        const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
+
+                        setActiveScanJob({
+                            id: pendingJid,
+                            status: snap.status,
+                            completed: comp,
+                            total: tot,
+                            pct: snap.completion_pct ?? Math.round((comp / Math.max(tot, 1)) * 100),
+                            currentSymbol: snap.current_symbol,
+                            phase: snap.meta?.phase || 'scanning',
+                            lastStatus: snap.meta?.last_status,
+                            lastMs: snap.meta?.last_ms,
+                            startedAt: resumeT0,
+                            elapsedSec,
+                            speedSymPerSec: Math.round(speed * 10) / 10,
+                            etaSeconds: eta,
+                        });
+
                         const done =
                             ['completed', 'failed', 'cancelled', 'interrupted'].includes(snap?.status) ||
                             snap?.scan_running === false;
                         if (done) {
                             stopPoll();
                             setScanLoading(false);
+                            setTimeout(() => setActiveScanJob(null), 2500);
                             sessionStorage.removeItem('optionflow_radar_active_job');
                         }
                     } catch {
@@ -761,12 +876,13 @@ export default function OptionFlowRadar() {
                         if (fails >= 3) {
                             stopPoll();
                             setScanLoading(false);
+                            setActiveScanJob(null);
                             sessionStorage.removeItem('optionflow_radar_active_job');
                         }
                     }
                 };
                 resumeTick();
-                pollRef.current = setInterval(resumeTick, 1500);
+                pollRef.current = setInterval(resumeTick, 1200);
             }
         }
 
@@ -964,13 +1080,60 @@ export default function OptionFlowRadar() {
                             <span>⚡</span>
                             <span>QUANT</span>
                         </button>
+                        {/* Scope Toggle + Scan Button */}
+                        <div className="flex items-center rounded-full bg-zinc-900 border border-zinc-700/60 p-0.5 shrink-0">
+                            <button
+                                onClick={() => setScanScope('top')}
+                                disabled={running}
+                                className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
+                                    scanScope === 'top'
+                                        ? 'bg-violet-600 text-white shadow'
+                                        : 'text-zinc-400 hover:text-zinc-200'
+                                }`}
+                                title="Fast Scan: Top 35 high-liquidity F&O stocks & indices (~10-12s)"
+                            >
+                                ⚡ 35 Top
+                            </button>
+                            <button
+                                onClick={() => setScanScope('full')}
+                                disabled={running}
+                                className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
+                                    scanScope === 'full'
+                                        ? 'bg-violet-600 text-white shadow'
+                                        : 'text-zinc-400 hover:text-zinc-200'
+                                }`}
+                                title="Full Universe Scan: All 187 F&O stocks (~1-2m)"
+                            >
+                                🌐 187 All
+                            </button>
+                        </div>
                         <button
-                            onClick={runScan}
+                            onClick={() => runScan()}
                             disabled={running}
-                            className="px-2.5 sm:px-4 py-1 sm:py-1.5 rounded-full bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0"
+                            className="px-2.5 sm:px-4 py-1 sm:py-1.5 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(124,58,237,0.3)] shrink-0 flex items-center gap-1.5 cursor-pointer"
                         >
-                            {running ? 'Scanning…' : 'Scan'}
+                            {running ? (
+                                <>
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                                    <span>Scanning…</span>
+                                </>
+                            ) : (
+                                <>
+                                    <span>⚡</span>
+                                    <span>Scan {scanScope === 'top' ? 'Top 35' : 'All 187'}</span>
+                                </>
+                            )}
                         </button>
+                        {running && (
+                            <button
+                                onClick={handleCancelScan}
+                                className="px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border border-rose-500/60 bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 hover:text-white text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0 transition-all cursor-pointer flex items-center gap-1"
+                                title="Stop scan immediately"
+                            >
+                                <span>✕</span>
+                                <span>Stop</span>
+                            </button>
+                        )}
                         <button
                             onClick={runAiChain}
                             disabled={aiLoading}
@@ -1066,19 +1229,130 @@ export default function OptionFlowRadar() {
                 </button>
             </div>
 
+            {/* ── Live Scanning Radar HUD ── */}
             {running && (
-                <div className="h-0.5 bg-zinc-900">
-                    <div className="h-0.5 bg-violet-500" style={{ width: `${Math.min(pct, 100)}%` }} />
+                <div className="shrink-0 mx-2 sm:mx-4 my-2.5 rounded-xl border border-violet-500/40 bg-gradient-to-r from-[#0d101a] via-[#120f24] to-[#0c121d] p-3 sm:p-4 shadow-[0_0_25px_rgba(139,92,246,0.18)] relative overflow-hidden backdrop-blur-md">
+                    {/* Background animated radar ping sweep */}
+                    <div className="absolute -top-12 -right-12 w-36 h-36 rounded-full bg-violet-600/15 blur-2xl pointer-events-none animate-pulse" />
+
+                    {/* HUD Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                        <div className="flex items-center gap-2">
+                            <span className="relative flex h-2.5 w-2.5">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                            </span>
+                            <span className="text-[11px] sm:text-xs font-black tracking-wider uppercase text-white flex items-center gap-1.5">
+                                <span>Radar Flow Scanner</span>
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono">
+                                    {scanScope === 'top' ? '⚡ Top 35 Liquid' : '🌐 Full 187 Universe'}
+                                </span>
+                            </span>
+                            {activeScanJob?.phase && (
+                                <span className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                                    Phase: {activeScanJob.phase}
+                                </span>
+                            )}
+                        </div>
+
+                        {/* Controls */}
+                        <div className="flex items-center gap-1.5">
+                            <button
+                                onClick={handleCancelScan}
+                                className="px-2.5 py-1 rounded-lg border border-rose-500/50 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 hover:text-white text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 transition-all cursor-pointer shadow-sm"
+                                title="Stop scanning and preserve already scanned hits"
+                            >
+                                <span>✕</span>
+                                <span>Stop Scan</span>
+                            </button>
+                            <button
+                                onClick={handleResetScan}
+                                className="px-2 py-1 rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 transition-all cursor-pointer"
+                                title="Force reset scan lock if stuck"
+                            >
+                                <span>⟲</span>
+                                <span>Reset State</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Progress Bar with Glowing Shimmer */}
+                    <div className="space-y-1 mb-2.5">
+                        <div className="flex items-center justify-between text-[10px] font-mono">
+                            <span className="text-zinc-300 font-semibold flex items-center gap-1.5">
+                                <span>Evaluating:</span>
+                                {activeScanJob?.currentSymbol ? (
+                                    <span className="px-1.5 py-0.5 rounded bg-violet-600/30 text-violet-200 font-bold border border-violet-400/40 animate-pulse">
+                                        {activeScanJob.currentSymbol.replace('NSE:', '').replace('-EQ', '')}
+                                    </span>
+                                ) : (
+                                    <span className="text-zinc-500 italic">Streaming chains…</span>
+                                )}
+                            </span>
+                            <div className="flex items-center gap-2">
+                                <span className="text-violet-300 font-bold">
+                                    {attempted} / {total || (scanScope === 'top' ? 35 : 187)}
+                                </span>
+                                <span className="text-white font-extrabold text-[11px]">
+                                    {fmt(pct, 1)}%
+                                </span>
+                            </div>
+                        </div>
+
+                        <div className="w-full bg-zinc-900 rounded-full h-2.5 overflow-hidden p-0.5 border border-zinc-800">
+                            <div
+                                className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-violet-500 to-indigo-500 transition-all duration-300 shadow-[0_0_12px_rgba(168,85,247,0.7)]"
+                                style={{ width: `${Math.min(Math.max(pct, 3), 100)}%` }}
+                            />
+                        </div>
+                    </div>
+
+                    {/* Telemetry Chips Strip */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-zinc-400 pt-1.5 border-t border-zinc-800/50">
+                        <div className="flex items-center gap-3">
+                            {activeScanJob?.speedSymPerSec ? (
+                                <span className="flex items-center gap-1 text-emerald-400 font-semibold">
+                                    <span>⚡</span>
+                                    <span>{activeScanJob.speedSymPerSec} stocks/s</span>
+                                </span>
+                            ) : null}
+                            {activeScanJob?.elapsedSec ? (
+                                <span>Elapsed: <strong className="text-zinc-200">{activeScanJob.elapsedSec}s</strong></span>
+                            ) : null}
+                            {activeScanJob?.etaSeconds !== undefined && activeScanJob.etaSeconds > 0 ? (
+                                <span>ETA: <strong className="text-violet-300">~{activeScanJob.etaSeconds}s</strong></span>
+                            ) : null}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <span className="text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                                🎯 {tradeable.length} Tradeable
+                            </span>
+                            <span className="text-violet-300 font-bold bg-violet-500/10 px-1.5 py-0.5 rounded border border-violet-500/20">
+                                👀 {watch.length} Watch
+                            </span>
+                            <span className="text-emerald-400">🟢 {bullish.length} Bull</span>
+                            <span className="text-rose-400">🔴 {bearish.length} Bear</span>
+                        </div>
+                    </div>
                 </div>
             )}
-            {dataMode === 'last_close' && hasAnyBoardData && (
+            {dataMode === 'last_close' && hasAnyBoardData && !running && (
                 <div className="shrink-0 px-4 py-1 text-[11px] text-amber-200 bg-amber-950/40 border-b border-amber-900/50">
                     Showing last session{board?.session_date ? ` · ${board.session_date}` : ''}
                     {board?.next_open ? ` · ${board.next_open}` : ''}
                 </div>
             )}
             {scanError && (
-                <div className="px-4 py-1 text-[11px] text-rose-400 bg-rose-950/30">{scanError}</div>
+                <div className="mx-2 sm:mx-4 my-2 px-3 py-2 text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/50 rounded-lg flex items-center justify-between gap-2">
+                    <span>⚠️ {scanError}</span>
+                    <button
+                        onClick={handleResetScan}
+                        className="px-2 py-0.5 rounded bg-rose-900/60 hover:bg-rose-800 text-white font-bold text-[10px] uppercase cursor-pointer"
+                    >
+                        Reset State
+                    </button>
+                </div>
             )}
             {aiError && (
                 <div className="px-4 py-1 text-[11px] text-rose-400 bg-rose-950/30">{aiError}</div>

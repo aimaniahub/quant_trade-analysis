@@ -214,12 +214,14 @@ async def start_radar_scan_job(
     min_lis: float = Query(0),
     option_type: Optional[str] = Query(None),
     strike_count: int = Query(14, ge=4, le=20),
+    scope: str = Query("top", description="'top' (fast ~35 liquid) or 'full' (187 symbols)"),
 ):
     """Nudge the single harvest actor. Poll GET /radar/scan/jobs/{job_id}."""
     from app.services.radar_scheduler import get_radar_scheduler
 
     started = await get_radar_scheduler().ensure_pass(
         source="ui",
+        scope=scope,
         min_lis=min_lis,
         option_type=option_type,
         strike_count=strike_count,
@@ -227,6 +229,24 @@ async def start_radar_scan_job(
     if not started.get("success"):
         raise HTTPException(status_code=400, detail=started.get("error", "Scan failed"))
     return started
+
+
+@router.post("/radar/scan/cancel")
+async def cancel_radar_scan_job():
+    """Cancel currently running radar harvest pass."""
+    from app.services.radar_scheduler import get_radar_scheduler
+
+    res = await get_radar_scheduler().cancel_pass()
+    return res
+
+
+@router.post("/radar/scan/reset")
+async def reset_radar_scan_job():
+    """Hard-reset radar scanning locks and state."""
+    from app.services.radar_scheduler import get_radar_scheduler
+
+    res = await get_radar_scheduler().reset_pass()
+    return res
 
 
 @router.get("/radar/scan/jobs/{job_id}")

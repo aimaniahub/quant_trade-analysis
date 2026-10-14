@@ -372,16 +372,27 @@ export const api = {
             params.set('strike_count', String(strikeCount));
             return api.fetch(`/radar/scan?${params.toString()}`);
         },
-        startScan: (minLis = 0, optionType?: string, strikeCount = 14) => {
+        startScan: (minLis = 0, optionType?: string, strikeCount = 14, scope: 'top' | 'full' = 'top') => {
             const params = new URLSearchParams();
             params.set('min_lis', String(minLis));
             if (optionType) params.set('option_type', optionType);
             params.set('strike_count', String(strikeCount));
+            params.set('scope', scope);
             return api.fetch(`/radar/scan/start?${params.toString()}`, {
                 method: 'POST',
                 body: JSON.stringify({}),
             });
         },
+        cancelScan: () =>
+            api.fetch('/radar/scan/cancel', {
+                method: 'POST',
+                body: JSON.stringify({}),
+            }),
+        resetScan: () =>
+            api.fetch('/radar/scan/reset', {
+                method: 'POST',
+                body: JSON.stringify({}),
+            }),
         getScanJob: (jobId: string) =>
             api.fetch(`/radar/scan/jobs/${encodeURIComponent(jobId)}`),
         scanCustom: (symbols: string[], minLis = 0, optionType?: string) =>
