@@ -163,8 +163,22 @@ class OptionFlowRadarService:
         self._cancel_requested = False
 
     def cancel_scan(self) -> bool:
-        """Signal running scan worker threads to stop promptly."""
+        """Signal running scan worker threads to stop promptly and reset running flags."""
         self._cancel_requested = True
+        self._scan_running = False
+        try:
+            if self._scan_lock.locked():
+                self._scan_lock.release()
+        except RuntimeError:
+            pass
+        if self._last_scan:
+            self._last_scan["scan_running"] = False
+            self._persist_last_scan()
+        from app.services import symbol_store as store
+        try:
+            store.set_harvest_meta({"running": False, "phase": "idle", "current": None})
+        except Exception:
+            pass
         return True
 
     def reset_scan(self) -> bool:
@@ -176,6 +190,9 @@ class OptionFlowRadarService:
                 self._scan_lock.release()
         except RuntimeError:
             pass
+        if self._last_scan:
+            self._last_scan["scan_running"] = False
+            self._persist_last_scan()
         from app.services import symbol_store as store
         try:
             store.set_harvest_meta({"running": False, "phase": "idle", "current": None})
@@ -452,11 +469,17 @@ class OptionFlowRadarService:
             pass
 
     def _is_hard_fail(self, err: Optional[str]) -> bool:
-        """Return True only when Fyers confirms that the symbol is invalid."""
+        """Return True when Fyers confirms the symbol is invalid or has no option chain contracts."""
         if not err:
             return False
         e = str(err).lower()
-        return "invalid symbol" in e or ("invalid" in e and "symbol" in e)
+        if "invalid symbol" in e or ("invalid" in e and "symbol" in e):
+            return True
+        if "no_chain" in e or "empty" in e or "not found" in e or "no contracts" in e:
+            return True
+        if "fyers_code=-99" in e or "fyers_code=-1" in e or "fyers_code=404" in e:
+            return True
+        return False
 
     def _fetch_status_for(self, hit: Optional[Dict[str, Any]], err: Optional[str]) -> Tuple[str, Optional[str]]:
         """Return (fetch_status, grade). Grade is independent of fetch outcome."""

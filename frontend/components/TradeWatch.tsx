@@ -212,9 +212,29 @@ export default function TradeWatch() {
                         <button
                             onClick={flat}
                             disabled={busy || !(snap?.open_count)}
-                            className="px-2.5 sm:px-3 py-1.5 rounded-full border border-rose-700 text-rose-300 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider disabled:opacity-40 transition-all"
+                            className="px-2.5 sm:px-3 py-1.5 rounded-full border border-rose-700 text-rose-300 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider disabled:opacity-40 transition-all cursor-pointer"
                         >
                             Flatten
+                        </button>
+                        <button
+                            onClick={async () => {
+                                setBusy(true);
+                                setErr(null);
+                                try {
+                                    const d: any = await api.radar.resetTradeWatch();
+                                    setSnap(d);
+                                } catch (e: any) {
+                                    setErr(e?.message || 'Reset failed');
+                                } finally {
+                                    setBusy(false);
+                                }
+                            }}
+                            disabled={busy}
+                            className="px-2 py-1.5 rounded-full bg-zinc-900 border border-zinc-700/80 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 text-[9px] sm:text-[10px] font-mono flex items-center gap-1 transition-all cursor-pointer"
+                            title="Reset desk error and re-evaluate"
+                        >
+                            <span>⟲</span>
+                            <span>Reset</span>
                         </button>
                     </div>
                     <div className="hidden md:block">

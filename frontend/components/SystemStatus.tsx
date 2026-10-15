@@ -145,7 +145,7 @@ export default function SystemStatus() {
       </div>
 
       {/* Extra Telemetry: Inline only on ultra-wide screens */}
-      <span className="hidden 2xl:flex items-center gap-1 text-zinc-500 font-mono text-[9px]">
+      <span className="hidden min-[1680px]:flex items-center gap-1 text-zinc-500 font-mono text-[9px]">
         {rpm}/{rpmLimit} RPM
       </span>
     </div>

@@ -435,6 +435,7 @@ export const api = {
             }),
         markTradeWatch: () => api.fetch('/trade-watch/mark', { method: 'POST' }),
         flattenTradeWatch: () => api.fetch('/trade-watch/flatten', { method: 'POST' }),
+        resetTradeWatch: () => api.fetch('/trade-watch/reset', { method: 'POST' }),
         getAiBestPicks: (body?: { force?: boolean; candidates?: any[] }) =>
             api.fetch('/radar/ai-best-picks', {
                 method: 'POST',

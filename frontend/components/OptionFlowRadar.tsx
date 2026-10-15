@@ -460,17 +460,7 @@ function rankRows(rows: BoardRow[]) {
 }
 
 export default function OptionFlowRadar() {
-    const [board, setBoard] = useState<any>(() => {
-        if (typeof window !== 'undefined') {
-            try {
-                const saved = localStorage.getItem('optionflow_radar_last_board');
-                if (saved) return JSON.parse(saved);
-            } catch {
-                /* ignore */
-            }
-        }
-        return null;
-    });
+    const [board, setBoard] = useState<any>(null);
     const [scanLoading, setScanLoading] = useState(false);
     const [scanError, setScanError] = useState<string | null>(null);
     const [scanScope, setScanScope] = useState<'top' | 'full'>('top');
@@ -555,13 +545,6 @@ export default function OptionFlowRadar() {
             if (Array.isArray(snap.bearish) && snap.bearish.length > 0) next.bearish = snap.bearish;
             else if (prev?.bearish) next.bearish = prev.bearish;
 
-            if (typeof window !== 'undefined' && ((next.tradeable && next.tradeable.length > 0) || (next.watch && next.watch.length > 0))) {
-                try {
-                    localStorage.setItem('optionflow_radar_last_board', JSON.stringify(next));
-                } catch {
-                    /* quota */
-                }
-            }
             return next;
         });
     }, []);
@@ -572,14 +555,23 @@ export default function OptionFlowRadar() {
             if (last && (last.has_data !== false || (last.tradeable && last.tradeable.length > 0) || (last.flagged && last.flagged.length > 0))) {
                 commit(last);
                 setScanError(null);
+                if (!last.scan_running && !last.active_job_id) {
+                    setScanLoading(false);
+                    setActiveScanJob(null);
+                }
             } else if (last) {
-                setBoard((prev: any) => (prev ? { ...prev, market_hours: last.market_hours, data_mode: last.data_mode, next_open: last.next_open } : last));
+                setBoard((prev: any) => (prev ? { ...prev, market_hours: last.market_hours, data_mode: last.data_mode, next_open: last.next_open, scan_running: Boolean(last.scan_running) } : last));
+                if (!last.scan_running && !last.active_job_id) {
+                    setScanLoading(false);
+                    setActiveScanJob(null);
+                }
             }
         } catch (e: any) {
             setBoard((prev: any) => {
                 if (!prev) setScanError(e?.message || 'Board load failed');
-                return prev;
+                return prev ? { ...prev, scan_running: false } : prev;
             });
+            setScanLoading(false);
         }
     }, [commit]);
 
@@ -673,32 +665,35 @@ export default function OptionFlowRadar() {
     }, []);
 
     const handleCancelScan = useCallback(async () => {
+        stopPoll();
+        setScanLoading(false);
+        setActiveScanJob(null);
+        setScanError(null);
+        setBoard((prev: any) => (prev ? { ...prev, scan_running: false } : prev));
+        if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('optionflow_radar_active_job');
+        }
         try {
             await api.radar.cancelScan();
         } catch {
             /* ignore */
         }
-        stopPoll();
-        setScanLoading(false);
-        setActiveScanJob(null);
-        if (typeof window !== 'undefined') {
-            sessionStorage.removeItem('optionflow_radar_active_job');
-        }
         await loadLast();
     }, [loadLast]);
 
     const handleResetScan = useCallback(async () => {
-        try {
-            await api.radar.resetScan();
-        } catch {
-            /* ignore */
-        }
         stopPoll();
         setScanLoading(false);
         setActiveScanJob(null);
         setScanError(null);
+        setBoard((prev: any) => (prev ? { ...prev, scan_running: false } : prev));
         if (typeof window !== 'undefined') {
             sessionStorage.removeItem('optionflow_radar_active_job');
+        }
+        try {
+            await api.radar.resetScan();
+        } catch {
+            /* ignore */
         }
         await loadLast();
     }, [loadLast]);
@@ -723,9 +718,12 @@ export default function OptionFlowRadar() {
             const started: any = await api.radar.startScan(0, undefined, 14, targetScope);
             const jid = started?.job_id;
             if (!jid) {
-                await loadLast();
+                if (started?.error) {
+                    setScanError(started.error === 'Not authenticated' ? 'Fyers authentication required to scan live chains. Click 🔑 Login above.' : started.error);
+                }
                 setScanLoading(false);
                 setActiveScanJob(null);
+                await loadLast();
                 return;
             }
             if (typeof window !== 'undefined') {
@@ -990,7 +988,10 @@ export default function OptionFlowRadar() {
     const attempted = board?.attempted || board?.scanned || harvest.scanned || 0;
     const total = board?.universe_requested || board?.total || harvest.total || 0;
     const pct = board?.completion_pct ?? (total ? Math.round((attempted / total) * 1000) / 10 : 0);
-    const running = Boolean(board?.scan_running || scanLoading);
+    const running = Boolean(
+        scanLoading ||
+        (board?.scan_running && activeScanJob && activeScanJob.status === 'running')
+    );
     const marketHours = Boolean(board?.market_hours);
     const dataMode: string = board?.data_mode || (marketHours ? 'live' : 'last_close');
     const hasAnyBoardData = Boolean(
@@ -1050,7 +1051,7 @@ export default function OptionFlowRadar() {
         <div className="w-full min-h-[calc(100vh-140px)] lg:h-[calc(100vh-120px)] bg-[#07090d] text-zinc-100 flex flex-col">
             {/* ── Responsive Header ─────────────────────────────────────── */}
             <header className="shrink-0 px-3 sm:px-4 py-2 sm:py-2.5 border-b-2 border-[#c4b5fd] bg-[#080b10] space-y-2">
-                {/* Top Row: Brand & Actions */}
+                {/* Row 1: Brand & Top Utilities (Reset & Auth) */}
                 <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                         <div className="text-[13px] sm:text-[15px] font-black italic tracking-tighter uppercase leading-none">
@@ -1061,86 +1062,103 @@ export default function OptionFlowRadar() {
                         </span>
                     </div>
 
-                    {/* Action buttons with clean touch targets */}
                     <div className="flex items-center gap-1.5 sm:gap-2">
+                        {/* Quick hard-reset button to immediately unblock UI if stuck */}
                         <button
-                            onClick={runAiBestPicker}
-                            disabled={aiPickerLoading}
-                            className="px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full border border-amber-400/80 bg-gradient-to-r from-amber-500/20 via-violet-600/30 to-indigo-600/30 hover:from-amber-500/30 hover:to-violet-600/40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-amber-200 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer shrink-0"
-                            title="Select exactly 2 best trades using OpenRouter AI / Quant confluence with trap avoidance"
+                            onClick={handleResetScan}
+                            className="px-2 py-0.5 rounded bg-zinc-900/90 border border-zinc-700/80 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 text-[10px] font-mono flex items-center gap-1 transition-colors cursor-pointer select-none"
+                            title="Force reset scan lock if stuck"
                         >
-                            <span>⚡</span>
-                            <span>{aiPickerLoading ? 'Evaluating…' : 'AI BEST PICKER'}</span>
+                            <span>⟲</span>
+                            <span>Reset</span>
                         </button>
-                        <button
-                            onClick={() => setShowNiftyModal(true)}
-                            className="px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border-2 border-[#c4b5fd] bg-violet-600/30 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-violet-200 hover:bg-violet-500 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer shrink-0"
-                            title="Open Nifty 50 Quant Analytics, Greeks & Breakout Simulator"
-                        >
-                            <span>⚡</span>
-                            <span>QUANT</span>
-                        </button>
-                        {/* Scope Toggle + Scan Button */}
-                        <div className="flex items-center rounded-full bg-zinc-900 border border-zinc-700/60 p-0.5 shrink-0">
-                            <button
-                                onClick={() => setScanScope('top')}
-                                disabled={running}
-                                className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
-                                    scanScope === 'top'
-                                        ? 'bg-violet-600 text-white shadow'
-                                        : 'text-zinc-400 hover:text-zinc-200'
-                                }`}
-                                title="Fast Scan: Top 35 high-liquidity F&O stocks & indices (~10-12s)"
-                            >
-                                ⚡ 35 Top
-                            </button>
-                            <button
-                                onClick={() => setScanScope('full')}
-                                disabled={running}
-                                className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
-                                    scanScope === 'full'
-                                        ? 'bg-violet-600 text-white shadow'
-                                        : 'text-zinc-400 hover:text-zinc-200'
-                                }`}
-                                title="Full Universe Scan: All 187 F&O stocks (~1-2m)"
-                            >
-                                🌐 187 All
-                            </button>
+                        <div className="sm:hidden">
+                            <AuthButton compact />
                         </div>
+                    </div>
+                </div>
+
+                {/* Row 2: Action Controls - Horizontally scrollable with smooth touch scrolling on mobile */}
+                <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar touch-scroll py-0.5 w-full">
+                    <button
+                        onClick={runAiBestPicker}
+                        disabled={aiPickerLoading}
+                        className="px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full border border-amber-400/80 bg-gradient-to-r from-amber-500/20 via-violet-600/30 to-indigo-600/30 hover:from-amber-500/30 hover:to-violet-600/40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-amber-200 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer shrink-0"
+                        title="Select exactly 2 best trades using OpenRouter AI / Quant confluence with trap avoidance"
+                    >
+                        <span>⚡</span>
+                        <span>{aiPickerLoading ? 'Evaluating…' : 'AI BEST PICKER'}</span>
+                    </button>
+                    <button
+                        onClick={() => setShowNiftyModal(true)}
+                        className="px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border-2 border-[#c4b5fd] bg-violet-600/30 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-violet-200 hover:bg-violet-500 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer shrink-0"
+                        title="Open Nifty 50 Quant Analytics, Greeks & Breakout Simulator"
+                    >
+                        <span>⚡</span>
+                        <span>QUANT</span>
+                    </button>
+                    {/* Scope Toggle + Scan Button */}
+                    <div className="flex items-center rounded-full bg-zinc-900 border border-zinc-700/60 p-0.5 shrink-0">
                         <button
-                            onClick={() => runScan()}
+                            onClick={() => setScanScope('top')}
                             disabled={running}
-                            className="px-2.5 sm:px-4 py-1 sm:py-1.5 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(124,58,237,0.3)] shrink-0 flex items-center gap-1.5 cursor-pointer"
+                            className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
+                                scanScope === 'top'
+                                    ? 'bg-violet-600 text-white shadow'
+                                    : 'text-zinc-400 hover:text-zinc-200'
+                            }`}
+                            title="Fast Scan: Top 35 high-liquidity F&O stocks & indices (~10-12s)"
                         >
-                            {running ? (
-                                <>
-                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
-                                    <span>Scanning…</span>
-                                </>
-                            ) : (
-                                <>
-                                    <span>⚡</span>
-                                    <span>Scan {scanScope === 'top' ? 'Top 35' : 'All 187'}</span>
-                                </>
-                            )}
+                            ⚡ 35 Top
                         </button>
-                        {running && (
-                            <button
-                                onClick={handleCancelScan}
-                                className="px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border border-rose-500/60 bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 hover:text-white text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0 transition-all cursor-pointer flex items-center gap-1"
-                                title="Stop scan immediately"
-                            >
-                                <span>✕</span>
-                                <span>Stop</span>
-                            </button>
-                        )}
                         <button
-                            onClick={runAiChain}
-                            disabled={aiLoading}
-                            className="px-2 sm:px-3.5 py-1 sm:py-1.5 rounded-full border border-[#c4b5fd] bg-[#12101c] hover:bg-violet-600/30 disabled:opacity-40 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0"
+                            onClick={() => setScanScope('full')}
+                            disabled={running}
+                            className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
+                                scanScope === 'full'
+                                    ? 'bg-violet-600 text-white shadow'
+                                    : 'text-zinc-400 hover:text-zinc-200'
+                            }`}
+                            title="Full Universe Scan: All 187 F&O stocks (~1-2m)"
                         >
-                            {aiLoading ? (aiPhase ? `${aiPhase}…` : 'AI…') : 'AI+Chain'}
+                            🌐 187 All
                         </button>
+                    </div>
+                    <button
+                        onClick={() => runScan()}
+                        disabled={running}
+                        className="px-2.5 sm:px-4 py-1 sm:py-1.5 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(124,58,237,0.3)] shrink-0 flex items-center gap-1.5 cursor-pointer"
+                    >
+                        {running ? (
+                            <>
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                                <span>Scanning…</span>
+                            </>
+                        ) : (
+                            <>
+                                <span>⚡</span>
+                                <span>Scan {scanScope === 'top' ? 'Top 35' : 'All 187'}</span>
+                            </>
+                        )}
+                    </button>
+                    {running && (
+                        <button
+                            onClick={handleCancelScan}
+                            className="px-3 py-1 sm:py-1.5 rounded-full border border-rose-500 bg-rose-600/30 hover:bg-rose-600/50 text-white text-[9px] sm:text-[10px] font-black uppercase tracking-wider shrink-0 transition-all cursor-pointer flex items-center gap-1 animate-pulse shadow-[0_0_12px_rgba(244,63,94,0.4)]"
+                            title="Stop scan immediately"
+                        >
+                            <span>✕</span>
+                            <span>Stop</span>
+                        </button>
+                    )}
+                    <button
+                        onClick={runAiChain}
+                        disabled={aiLoading}
+                        className="px-2 sm:px-3.5 py-1 sm:py-1.5 rounded-full border border-[#c4b5fd] bg-[#12101c] hover:bg-violet-600/30 disabled:opacity-40 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider shrink-0"
+                    >
+                        {aiLoading ? (aiPhase ? `${aiPhase}…` : 'AI…') : 'AI+Chain'}
+                    </button>
+                    <div className="hidden sm:block shrink-0">
                         <AuthButton compact />
                     </div>
                 </div>
@@ -1479,7 +1497,8 @@ export default function OptionFlowRadar() {
                         <span className="text-right" title="Signed Net ΔOI (+ Put support / - Call resistance)">Net ΔOI</span>
                         <span className="text-right" title="Total option contracts volume">Opt Vol</span>
                     </div>
-                    <div className="flex-1 min-h-0 overflow-y-auto">
+                    <div className="flex-1 min-h-0 overflow-y-auto overflow-x-auto touch-scroll no-scrollbar">
+                        <div className="min-w-[320px]">
                         {screened.length === 0 ? (
                             <div className="h-full flex items-center justify-center text-zinc-500 text-sm px-4 py-8 text-center leading-relaxed">
                                 <div>
@@ -1542,6 +1561,7 @@ export default function OptionFlowRadar() {
                                 );
                             })
                         )}
+                        </div>
                     </div>
                 </section>
 
@@ -1916,46 +1936,48 @@ function SetupTable({
                     Opt Vol {sortArrow(sortKey === 'vol', sortDir)}
                 </button>
             </div>
-            <div className="flex-1 overflow-y-auto">
-                {sorted.map((row) => (
-                    <button
-                        key={row.symbol}
-                        onClick={() => onSelect(row.symbol)}
-                        className={`w-full grid grid-cols-[40px_1fr_72px_56px] items-center px-3 py-1.5 text-left border-b border-[#c4b5fd]/45 ${
-                            selected === row.symbol ? 'bg-violet-500/15' : 'hover:bg-white/[0.03]'
-                        }`}
-                    >
-                        <span className={`font-mono text-[12px] font-bold ${scoreTone(row.setup_score)}`}>
-                            {row.setup_score ?? '—'}
-                        </span>
-                        {(() => {
-                            const topTags = getTopTwoTags(row, hotSet);
-                            const vorVal = row.vor ?? row.flags?.vor ?? row.top_anomaly?.vor;
-                            return (
-                                <span className="min-w-0">
-                                    <span className="flex items-center gap-1 text-[12px] font-semibold truncate">
-                                        <span className="truncate">{row.name}</span>
-                                        {freshnessBadge(row.ts, dataMode)}
+            <div className="flex-1 overflow-y-auto overflow-x-auto touch-scroll no-scrollbar">
+                <div className="min-w-[320px]">
+                    {sorted.map((row) => (
+                        <button
+                            key={row.symbol}
+                            onClick={() => onSelect(row.symbol)}
+                            className={`w-full grid grid-cols-[40px_1fr_72px_56px] items-center px-3 py-1.5 text-left border-b border-[#c4b5fd]/45 ${
+                                selected === row.symbol ? 'bg-violet-500/15' : 'hover:bg-white/[0.03]'
+                            }`}
+                        >
+                            <span className={`font-mono text-[12px] font-bold ${scoreTone(row.setup_score)}`}>
+                                {row.setup_score ?? '—'}
+                            </span>
+                            {(() => {
+                                const topTags = getTopTwoTags(row, hotSet);
+                                const vorVal = row.vor ?? row.flags?.vor ?? row.top_anomaly?.vor;
+                                return (
+                                    <span className="min-w-0">
+                                        <span className="flex items-center gap-1 text-[12px] font-semibold truncate">
+                                            <span className="truncate">{row.name}</span>
+                                            {freshnessBadge(row.ts, dataMode)}
+                                        </span>
+                                        <span className="block text-[10px] text-violet-300/90 font-mono truncate">
+                                            {topTags.join(' · ')} {vorVal && vorVal >= 0.4 ? `· VOR ${Number(vorVal).toFixed(1)}×` : ''}
+                                        </span>
                                     </span>
-                                    <span className="block text-[10px] text-violet-300/90 font-mono truncate">
-                                        {topTags.join(' · ')} {vorVal && vorVal >= 0.4 ? `· VOR ${Number(vorVal).toFixed(1)}×` : ''}
+                                );
+                            })()}
+                            {(() => {
+                                const oiInfo = fmtNetOi(oiOf(row));
+                                return (
+                                    <span className={`text-right font-mono text-[11px] ${oiInfo.color}`}>
+                                        {oiInfo.text}
                                     </span>
-                                </span>
-                            );
-                        })()}
-                        {(() => {
-                            const oiInfo = fmtNetOi(oiOf(row));
-                            return (
-                                <span className={`text-right font-mono text-[11px] ${oiInfo.color}`}>
-                                    {oiInfo.text}
-                                </span>
-                            );
-                        })()}
-                        <span className="text-right font-mono text-[11px] text-zinc-400">
-                            {fmtVol(volOf(row))}
-                        </span>
-                    </button>
-                ))}
+                                );
+                            })()}
+                            <span className="text-right font-mono text-[11px] text-zinc-400">
+                                {fmtVol(volOf(row))}
+                            </span>
+                        </button>
+                    ))}
+                </div>
             </div>
         </section>
     );

@@ -3,7 +3,14 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services.trade_watch import flatten, mark_and_exit, refresh_open_prices, run_pick, snapshot
+from app.services.trade_watch import (
+    flatten,
+    mark_and_exit,
+    refresh_open_prices,
+    reset_desk,
+    run_pick,
+    snapshot,
+)
 
 router = APIRouter()
 
@@ -36,3 +43,8 @@ async def mark_trade_watch():
 @router.post("/trade-watch/flatten")
 async def flatten_trade_watch():
     return {"success": True, **flatten("Manual square-off")}
+
+
+@router.post("/trade-watch/reset")
+async def reset_trade_watch():
+    return {"success": True, **reset_desk()}

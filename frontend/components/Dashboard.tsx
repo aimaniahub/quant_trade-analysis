@@ -88,8 +88,8 @@ export default function Dashboard() {
   return (
     <div className="w-full min-h-screen bg-[#07090d] text-zinc-100 font-sans selection:bg-emerald-500/20 selection:text-emerald-300 pb-24 sm:pb-12 overflow-x-hidden">
       {/* ── Top Header & Global Bar ───────────────────────────────────────────── */}
-      <header className="sticky top-0 z-40 bg-[#07090d]/95 backdrop-blur-md border-b border-zinc-800/80 px-3 sm:px-4 lg:px-6 py-2 sm:py-2.5">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-2 sm:gap-4 w-full">
+      <header className="sticky top-0 z-40 bg-[#07090d]/95 backdrop-blur-md border-b border-zinc-800/80 px-2.5 sm:px-4 lg:px-6 py-2 sm:py-2.5">
+        <div className="w-full max-w-[1720px] mx-auto flex items-center justify-between gap-2 sm:gap-3">
           {/* Logo & Brand */}
           <div className="flex items-center gap-2 sm:gap-2.5 cursor-pointer shrink-0" onClick={() => switchTab('home')}>
             <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-tr from-emerald-600 via-teal-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
@@ -102,11 +102,11 @@ export default function Dashboard() {
                   PRO
                 </span>
               </div>
-              <p className="text-[9px] text-zinc-400 font-mono hidden xl:block">Quant & F&O Execution Terminal</p>
+              <p className="text-[9px] text-zinc-400 font-mono hidden 2xl:block">Quant & F&O Execution Terminal</p>
             </div>
           </div>
 
-          {/* Desktop Navigation Tabs */}
+          {/* Desktop Navigation Tabs - Responsive between 1024px and 1440px+ */}
           <nav className="hidden lg:flex items-center gap-0.5 xl:gap-1 bg-zinc-900/80 p-1 rounded-xl border border-zinc-800/80 shrink-0 shadow-inner">
             {[
               { key: 'home', icon: '🏠', label: 'Home', short: 'Home' },
@@ -120,7 +120,7 @@ export default function Dashboard() {
               <button
                 key={tab.key}
                 onClick={() => switchTab(tab.key as TabKey)}
-                className={`px-2 xl:px-2.5 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1 whitespace-nowrap select-none ${
+                className={`px-1.5 xl:px-2.5 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1 whitespace-nowrap select-none ${
                   activeTab === tab.key
                     ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/35 shadow-sm shadow-emerald-500/10'
                     : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60 border border-transparent'
@@ -128,14 +128,14 @@ export default function Dashboard() {
                 title={tab.label}
               >
                 <span className="text-xs leading-none">{tab.icon}</span>
-                <span className="hidden xl:inline">{tab.label}</span>
-                <span className="xl:hidden">{tab.short}</span>
+                <span className="hidden min-[1380px]:inline">{tab.label}</span>
+                <span className="min-[1380px]:hidden inline">{tab.short}</span>
               </button>
             ))}
           </nav>
 
           {/* Right Header Controls: Market Clock, Telemetry Status & Auth */}
-          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 xl:gap-2.5 shrink-0">
             {/* Live IST Market Hours Gate Pill */}
             <div
               className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-lg text-[10px] sm:text-[11px] font-mono border shrink-0 ${
@@ -150,12 +150,14 @@ export default function Dashboard() {
               }
             >
               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${market.isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span className="font-semibold hidden md:inline">{market.isOpen ? 'OPEN' : 'CLOSED'}</span>
+              <span className="font-semibold hidden sm:inline">{market.isOpen ? 'OPEN' : 'CLOSED'}</span>
               <span className="text-zinc-400 text-[9px] sm:text-[10px]">{market.istTimeStr}</span>
             </div>
 
             <SystemStatus />
-            <AuthButton compact />
+            <div className="shrink-0 flex items-center">
+              <AuthButton compact />
+            </div>
 
             {/* Mobile Hamburger Menu Button */}
             <button

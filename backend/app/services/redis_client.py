@@ -84,12 +84,19 @@ def init_redis(force: bool = False) -> bool:
                 health_check_interval=30,
                 retry_on_timeout=True,
             )
+            if s.redis_url.startswith("rediss://"):
+                try:
+                    import ssl
+                    common["ssl_cert_reqs"] = ssl.CERT_NONE
+                except Exception:
+                    pass
+
             try:
                 _client = redis.Redis.from_url(
                     s.redis_url, protocol=2, **common
                 )
-            except TypeError:
-                # Older redis-py without protocol kwarg
+            except Exception:
+                # Fallback without protocol kwarg
                 _client = redis.Redis.from_url(s.redis_url, **common)
 
             pong = _client.ping()

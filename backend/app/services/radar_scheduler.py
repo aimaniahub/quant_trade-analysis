@@ -299,28 +299,44 @@ class RadarScheduler:
         from app.services.scan_jobs import get_scan_job_manager
 
         mgr = get_scan_job_manager()
-        job = mgr.find_running("radar")
-        if job:
-            mgr.cancel(job.id)
+        cancelled_ids = mgr.cancel_all("radar")
         if self._active_task and not self._active_task.done():
             self._active_task.cancel()
+        self._active_task = None
         if hasattr(self.radar, "cancel_scan"):
             self.radar.cancel_scan()
-        return {"success": True, "message": "Scan pass cancelled"}
+        return {"success": True, "message": "Scan pass cancelled", "cancelled_jobs": cancelled_ids}
 
     async def reset_pass(self) -> Dict[str, Any]:
-        """Hard-reset radar scanning locks, stale jobs, and harvest status."""
+        """Hard-reset radar scanning locks, stale jobs, restart scheduler, and clean desk error."""
         from app.services.scan_jobs import get_scan_job_manager
 
         mgr = get_scan_job_manager()
-        job = mgr.find_running("radar")
-        if job:
-            mgr.finish(job.id, status="interrupted", error_message="Reset by user")
+        mgr.cancel_all("radar")
         if self._active_task and not self._active_task.done():
             self._active_task.cancel()
+        self._active_task = None
         if hasattr(self.radar, "reset_scan"):
             self.radar.reset_scan()
-        return {"success": True, "message": "Scan lock and state reset successfully"}
+
+        # Also reset paper desk error state if any
+        try:
+            from app.services.trade_watch import reset_desk
+            reset_desk()
+        except Exception:
+            pass
+
+        # Stop and restart scheduler task to ensure a fresh, unblocked event loop
+        try:
+            if self._task and not self._task.done():
+                self._task.cancel()
+            self._running = True
+            self._task = asyncio.create_task(self._loop())
+            logger.info("[RadarScheduler] background loop restarted via hard reset")
+        except Exception as exc:
+            logger.debug("[RadarScheduler] loop restart: %s", exc)
+
+        return {"success": True, "message": "Scan lock, desk state, and scheduler service reset successfully"}
 
     async def run_once(self) -> dict:
         """Scheduled full-book harvest — waits until the pass finishes."""

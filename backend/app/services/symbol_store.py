@@ -898,6 +898,7 @@ def set_board(board: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_board() -> Optional[Dict[str, Any]]:
+    global _mem_board
     rc = _rc()
     if rc.is_available():
         try:
@@ -943,6 +944,7 @@ def set_session_board(board: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_session_board() -> Optional[Dict[str, Any]]:
+    global _mem_session_board
     rc = _rc()
     if rc.is_available():
         try:

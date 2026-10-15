@@ -58,13 +58,8 @@ export default function AuthTokenModal({ isOpen, onClose, onLogin, onSubmitCode 
     const isUrl = rawInput.trim().startsWith('http');
 
     const handleOpenLogin = useCallback(() => {
-        try {
-            onLogin();
-        } catch {
-            // onLogin might fail if window.open was blocked; native anchor handles primary navigation
-        }
         setStep(2);
-    }, [onLogin]);
+    }, []);
 
     const handleCopyUrl = useCallback(async () => {
         try {

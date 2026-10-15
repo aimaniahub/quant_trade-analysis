@@ -73,16 +73,54 @@ class Settings(BaseSettings):
     market_close_minute: int = 30
     allow_off_hours_scan: bool = False
 
-    # Redis (optional — graceful fallback to in-memory when disabled/unreachable)
-    # Set REDIS_ENABLED=true and REDIS_URL=redis://localhost:6379/0
+    # Redis (Upstash Redis integration on Vercel or local fallback)
     redis_enabled: bool = True
     redis_url: str = "redis://localhost:6379/0"
     redis_prefix: str = "optiongreek"
     redis_job_ttl_seconds: int = 3600  # scan job retention
-    redis_socket_timeout: float = 2.0
-    redis_connect_timeout: float = 2.0
+    redis_socket_timeout: float = 4.0
+    redis_connect_timeout: float = 4.0
     # How often to flush large job payloads during a running scan
     redis_job_persist_interval: float = 1.5
+
+    @field_validator("redis_url", mode="before")
+    @classmethod
+    def assemble_redis_url(cls, v):
+        import os
+        # Check explicit Upstash integration environment variables from Vercel
+        candidates = [
+            os.getenv("redisupstashfyers_REDIS_URL"),
+            os.getenv("redisupstashfyers_KV_URL"),
+            os.getenv("UPSTASH_REDIS_URL"),
+            os.getenv("KV_URL"),
+            os.getenv("REDIS_URL"),
+        ]
+        for c in candidates:
+            if c and str(c).strip() and not str(c).strip().startswith("redis://localhost:6379"):
+                return str(c).strip()
+        for k, val in os.environ.items():
+            if (k.endswith("_REDIS_URL") or k.endswith("_KV_URL")) and val and str(val).strip():
+                return str(val).strip()
+        return v or "redis://localhost:6379/0"
+
+    @field_validator("redis_enabled", mode="before")
+    @classmethod
+    def assemble_redis_enabled(cls, v):
+        import os
+        has_remote = any(
+            bool(os.getenv(k))
+            for k in [
+                "redisupstashfyers_REDIS_URL",
+                "redisupstashfyers_KV_URL",
+                "UPSTASH_REDIS_URL",
+                "KV_URL",
+            ]
+        ) or any((k.endswith("_REDIS_URL") or k.endswith("_KV_URL")) and bool(val) for k, val in os.environ.items())
+        if has_remote:
+            return True
+        if isinstance(v, str):
+            return v.lower() in ("true", "1", "yes")
+        return bool(v)
 
     # Harvest / Redis symbol store (one writer, many readers)
     harvest_interval_secs: int = 180

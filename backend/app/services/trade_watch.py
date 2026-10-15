@@ -889,6 +889,24 @@ def flatten(reason: str = "Manual square-off") -> Dict[str, Any]:
     return snapshot()
 
 
+def reset_desk() -> Dict[str, Any]:
+    """Force-reset desk state, clear errors, and purge stale tape events."""
+    global _state, _pick_running
+    with _lock:
+        _pick_running = False
+        book = _load()
+        # Keep open trades if any, but clear error flags and error events
+        book["error"] = None
+        if book.get("phase") == "error":
+            has_open = any(t.get("status") == "OPEN" for t in book.get("trades") or [])
+            book["phase"] = "open" if has_open else "idle"
+        # Filter out error events from tape
+        evs = [e for e in (book.get("events") or []) if (e.get("kind") != "error" and "_mem_board" not in str(e.get("message") or ""))]
+        book["events"] = evs
+        _save(book)
+    return snapshot()
+
+
 def tick() -> None:
     """Called by the scheduler. Enter at 09:23; mark open trades every MARK_SECS."""
     global _last_mark_at

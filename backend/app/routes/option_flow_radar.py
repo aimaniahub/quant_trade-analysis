@@ -61,7 +61,9 @@ async def get_last_radar_scan():
         last.setdefault("tradeable", last.get("flagged") or [])
 
     running = get_scan_job_manager().find_running("radar")
-    scan_running = bool(getattr(service, "_scan_running", False) or running)
+    if not running and getattr(service, "_scan_running", False):
+        service._scan_running = False
+    scan_running = bool(running or getattr(service, "_scan_running", False))
     harvest = get_harvest_meta() or {}
     book = {}
     try:

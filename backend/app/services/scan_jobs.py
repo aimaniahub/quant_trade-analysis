@@ -488,7 +488,7 @@ class ScanJobManager:
                 self._persist(job, force=True)
 
     def find_running(self, kind: str) -> Optional[ScanJob]:
-        """Return the newest live job of this kind. Stale heartbeats are dropped."""
+        """Return the newest live job of this kind. Stale heartbeats or missing tasks are dropped."""
         with self._lock:
             self._purge_old()
             now = time.time()
@@ -497,9 +497,18 @@ class ScanJobManager:
                 if j.kind != kind or j.status != "running":
                     continue
                 hb = float((j.meta or {}).get("heartbeat_at") or 0)
-                if hb and now - hb > 35.0:
+                # Fallback to started_at or created_at if heartbeat_at is missing/0
+                if not hb:
+                    try:
+                        from datetime import datetime
+                        ts_str = j.started_at or j.created_at
+                        if ts_str:
+                            hb = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        hb = 0
+                if not hb or (now - hb > 30.0):
                     j.status = "interrupted"
-                    j.error_message = "No heartbeat — scan stalled or interrupted"
+                    j.error_message = "Scan stalled or interrupted (heartbeat timeout)"
                     j.finished_at = _now_iso()
                     self._persist(j, force=True)
                     continue
@@ -556,23 +565,43 @@ class ScanJobManager:
         task.add_done_callback(_done)
 
     def cancel(self, job_id: str) -> bool:
-        task = self._running_tasks.get(job_id)
-        if task and not task.done():
-            task.cancel()
+        with self._lock:
+            task = self._running_tasks.get(job_id)
+            if task and not task.done():
+                task.cancel()
             self.finish(job_id, status="cancelled", error_message="cancelled by client")
             return True
-        return False
+
+    def cancel_all(self, kind: Optional[str] = None) -> int:
+        """Cancel all running jobs (optionally by kind)."""
+        count = 0
+        with self._lock:
+            for jid, job in list(self._jobs.items()):
+                if (not kind or job.kind == kind) and job.status == "running":
+                    self.cancel(jid)
+                    count += 1
+        return count
 
     def recover_orphans(self) -> int:
         """
-        On startup: any Redis job still 'running'/'queued' has no worker —
+        On startup: any job still 'running'/'queued' without an active task —
         mark interrupted so UI can retry-failed.
         """
         from app.services import redis_client as rc
 
-        if not rc.is_available():
-            return 0
         n = 0
+        with self._lock:
+            for jid, job in list(self._jobs.items()):
+                if job.status in ("running", "queued") and jid not in self._running_tasks:
+                    job.status = "interrupted"
+                    job.error_message = "Server restarted or task finished without completion"
+                    job.finished_at = _now_iso()
+                    self._persist(job, force=True)
+                    n += 1
+
+        if not rc.is_available():
+            return n
+
         try:
             ids = rc.zrevrange(self._index_key("all"), 0, 99)
             for jid in ids:
