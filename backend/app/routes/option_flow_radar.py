@@ -216,7 +216,7 @@ async def start_radar_scan_job(
     min_lis: float = Query(0),
     option_type: Optional[str] = Query(None),
     strike_count: int = Query(14, ge=4, le=20),
-    scope: str = Query("top", description="'top' (fast ~35 liquid) or 'full' (187 symbols)"),
+    scope: str = Query("full", description="Universe scope: 'full' (canonical F&O universe)"),
 ):
     """Nudge the single harvest actor. Poll GET /radar/scan/jobs/{job_id}."""
     from app.services.radar_scheduler import get_radar_scheduler

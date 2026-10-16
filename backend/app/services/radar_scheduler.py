@@ -113,7 +113,7 @@ class RadarScheduler:
             mgr.update(
                 job_id,
                 completed=int(scanned or 0),
-                results=list(last.get("flagged") or []),
+                results=list(last.get("flow") or last.get("all_hits") or last.get("flagged") or []),
                 partial=bool(last.get("partial", True)),
                 meta=meta,
             )
@@ -143,7 +143,7 @@ class RadarScheduler:
         flagged = result.get("flagged") or []
         mgr.update(
             job_id,
-            results=flagged,
+            results=list(result.get("flow") or result.get("all_hits") or flagged),
             completed=int(result.get("attempted") or result.get("scanned") or 0),
             rate_limited_skips=int(result.get("rate_limited_skips") or 0),
             partial=bool(result.get("partial")),
@@ -169,6 +169,11 @@ class RadarScheduler:
                     "quiet_count": result.get("quiet_count") or 0,
                     "watch": result.get("watch") or [],
                     "flow": result.get("flow") or [],
+                    "bullish": result.get("bullish") or [],
+                    "bearish": result.get("bearish") or [],
+                    "screen": result.get("screen") or [],
+                    "top": result.get("top") or [],
+                    "unique": result.get("unique") or [],
                     "alert_box": result.get("alert_box") or [],
                     "ideas": result.get("ideas") or [],
                     "ideas_confirmed": result.get("ideas_confirmed") or [],
@@ -196,13 +201,13 @@ class RadarScheduler:
         self,
         *,
         source: str = "scheduler",
-        scope: str = "top",
+        scope: str = "full",
         symbols: Optional[List[str]] = None,
         min_lis: float = 0,
         option_type: Optional[str] = None,
         strike_count: int = 14,
     ) -> Dict[str, Any]:
-        """Start one harvest pass if idle (default: fast top 35 liquid). If running, reuse that job."""
+        """Start one harvest pass for the canonical universe if idle. If running, reuse that job."""
         from app.services.scan_jobs import get_scan_job_manager
 
         mgr = get_scan_job_manager()
@@ -236,8 +241,6 @@ class RadarScheduler:
 
             if symbols:
                 target_symbols = filter_valid_symbols(symbols)
-            elif scope == "top":
-                target_symbols = TOP_SYMBOLS
             else:
                 target_symbols = SCHEDULE_SYMBOLS
 

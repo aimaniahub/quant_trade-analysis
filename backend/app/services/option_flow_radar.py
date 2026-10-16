@@ -65,8 +65,8 @@ INDICES_WATCHLIST = filter_valid_symbols(list(FNO_INDICES))
 ALL_FNO_WATCHLIST = filter_valid_symbols(get_fno_universe(include_indices=True))
 
 # Phase 2 harvest — concurrency hides RTT; limiter owns quota
-CHAIN_WORKERS = 4
-HARVEST_RPS = 3.0
+CHAIN_WORKERS = 2
+HARVEST_RPS = 0.8
 SYMBOL_TIMEOUT_SEC = 8.0
 RETRY_BACKOFF_SEC = 1.5
 MAX_CHAIN_RETRIES = 0

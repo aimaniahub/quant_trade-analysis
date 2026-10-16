@@ -463,7 +463,6 @@ export default function OptionFlowRadar() {
     const [board, setBoard] = useState<any>(null);
     const [scanLoading, setScanLoading] = useState(false);
     const [scanError, setScanError] = useState<string | null>(null);
-    const [scanScope, setScanScope] = useState<'top' | 'full'>('top');
     const [activeScanJob, setActiveScanJob] = useState<{
         id: string | null;
         status: string;
@@ -537,13 +536,27 @@ export default function OptionFlowRadar() {
 
             next.tradeable = snapTradeable || snapFlagged || prev?.tradeable || prev?.flagged || [];
             next.watch = snapWatch || prev?.watch || [];
-            next.flow = snapFlow || prev?.flow || prev?.all_hits;
-            if (Array.isArray(snap.screen) && snap.screen.length > 0) next.screen = snap.screen;
-            else if (prev?.screen) next.screen = prev.screen;
-            if (Array.isArray(snap.bullish) && snap.bullish.length > 0) next.bullish = snap.bullish;
-            else if (prev?.bullish) next.bullish = prev.bullish;
-            if (Array.isArray(snap.bearish) && snap.bearish.length > 0) next.bearish = snap.bearish;
-            else if (prev?.bearish) next.bearish = prev.bearish;
+            next.flow = snapFlow || prev?.flow || prev?.all_hits || [];
+
+            // Derive or preserve bullish, bearish, and screen so UI is never blank
+            const flowPool = [...(next.tradeable || []), ...(next.watch || []), ...(next.flow || [])];
+            if (Array.isArray(snap.bullish) && snap.bullish.length > 0) {
+                next.bullish = snap.bullish;
+            } else if (!next.bullish || next.bullish.length === 0) {
+                next.bullish = flowPool.filter((r: any) => r.chain_bias === 'BULLISH');
+            }
+
+            if (Array.isArray(snap.bearish) && snap.bearish.length > 0) {
+                next.bearish = snap.bearish;
+            } else if (!next.bearish || next.bearish.length === 0) {
+                next.bearish = flowPool.filter((r: any) => r.chain_bias === 'BEARISH');
+            }
+
+            if (Array.isArray(snap.screen) && snap.screen.length > 0) {
+                next.screen = snap.screen;
+            } else if (!next.screen || next.screen.length === 0) {
+                next.screen = flowPool;
+            }
 
             return next;
         });
@@ -698,8 +711,7 @@ export default function OptionFlowRadar() {
         await loadLast();
     }, [loadLast]);
 
-    const runScan = useCallback(async (scopeOverride?: 'top' | 'full') => {
-        const targetScope = scopeOverride || scanScope;
+    const runScan = useCallback(async () => {
         const runId = ++scanRun.current;
         const t0 = Date.now();
         setScanLoading(true);
@@ -708,14 +720,14 @@ export default function OptionFlowRadar() {
             id: null,
             status: 'starting',
             completed: 0,
-            total: targetScope === 'top' ? 35 : 187,
+            total: 187,
             pct: 0,
             phase: 'quotes',
             startedAt: t0,
             elapsedSec: 0,
         });
         try {
-            const started: any = await api.radar.startScan(0, undefined, 14, targetScope);
+            const started: any = await api.radar.startScan(0, undefined, 14, 'full');
             const jid = started?.job_id;
             if (!jid) {
                 if (started?.error) {
@@ -744,7 +756,7 @@ export default function OptionFlowRadar() {
                     commit(snap);
 
                     const comp = snap.completed || 0;
-                    const tot = snap.total || (targetScope === 'top' ? 35 : 187);
+                    const tot = snap.total || 187;
                     const elapsedSec = Math.max(1, Math.round((Date.now() - t0) / 1000));
                     const speed = comp > 0 ? comp / elapsedSec : 0;
                     const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
@@ -817,7 +829,7 @@ export default function OptionFlowRadar() {
             setActiveScanJob(null);
             setScanError(e?.message || 'Could not start harvest');
         }
-    }, [commit, loadLast, scanScope]);
+    }, [commit, loadLast]);
 
     useEffect(() => {
         loadLast();
@@ -969,20 +981,37 @@ export default function OptionFlowRadar() {
 
     const screened = useMemo(() => {
         if (!scanTypes.length) {
+            // Priority 1: TRADEABLE with unique flag
             const uniqueRows = screenPool.filter((row) => {
                 const f = flagsOf(row);
                 return row.grade === 'TRADEABLE' && f.unique;
             });
-            return rankRows(uniqueRows).slice(0, 12);
+            if (uniqueRows.length > 0) {
+                return rankRows(uniqueRows).slice(0, 16);
+            }
+            // Priority 2: All TRADEABLE setups
+            const tradeableRows = screenPool.filter((row) => row.grade === 'TRADEABLE');
+            if (tradeableRows.length > 0) {
+                return rankRows(tradeableRows).slice(0, 16);
+            }
+            // Priority 3: Scored setups with anomalies or WATCH grade
+            const scoredRows = screenPool.filter(
+                (row) => (row.setup_score || 0) > 0 || row.grade === 'WATCH' || Boolean(row.top_anomaly)
+            );
+            if (scoredRows.length > 0) {
+                return rankRows(scoredRows).slice(0, 16);
+            }
+            // Priority 4: All available rows in screenPool
+            return rankRows(screenPool).slice(0, 16);
         }
-        return rankRows(screenPool.filter((row) => matchesFilters(row, scanTypes))).slice(0, 12);
+        return rankRows(screenPool.filter((row) => matchesFilters(row, scanTypes))).slice(0, 16);
     }, [screenPool, scanTypes]);
 
     useEffect(() => {
         if (selected) return;
-        const first = screened[0];
-        if (first?.symbol) setSelected(first.symbol);
-    }, [selected, screened]);
+        const candidate = screened[0]?.symbol || bullish[0]?.symbol || bearish[0]?.symbol || boardRows[0]?.symbol;
+        if (candidate) setSelected(candidate);
+    }, [selected, screened, bullish, bearish, boardRows]);
 
     const harvest = board?.harvest || {};
     const attempted = board?.attempted || board?.scanned || harvest.scanned || 0;
@@ -1097,47 +1126,20 @@ export default function OptionFlowRadar() {
                         <span>⚡</span>
                         <span>QUANT</span>
                     </button>
-                    {/* Scope Toggle + Scan Button */}
-                    <div className="flex items-center rounded-full bg-zinc-900 border border-zinc-700/60 p-0.5 shrink-0">
-                        <button
-                            onClick={() => setScanScope('top')}
-                            disabled={running}
-                            className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
-                                scanScope === 'top'
-                                    ? 'bg-violet-600 text-white shadow'
-                                    : 'text-zinc-400 hover:text-zinc-200'
-                            }`}
-                            title="Fast Scan: Top 35 high-liquidity F&O stocks & indices (~10-12s)"
-                        >
-                            ⚡ 35 Top
-                        </button>
-                        <button
-                            onClick={() => setScanScope('full')}
-                            disabled={running}
-                            className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase transition-all cursor-pointer ${
-                                scanScope === 'full'
-                                    ? 'bg-violet-600 text-white shadow'
-                                    : 'text-zinc-400 hover:text-zinc-200'
-                            }`}
-                            title="Full Universe Scan: All 187 F&O stocks (~1-2m)"
-                        >
-                            🌐 187 All
-                        </button>
-                    </div>
                     <button
                         onClick={() => runScan()}
                         disabled={running}
-                        className="px-2.5 sm:px-4 py-1 sm:py-1.5 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(124,58,237,0.3)] shrink-0 flex items-center gap-1.5 cursor-pointer"
+                        className="px-3 sm:px-4 py-1 sm:py-1.5 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(124,58,237,0.3)] shrink-0 flex items-center gap-1.5 cursor-pointer"
                     >
                         {running ? (
                             <>
                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
-                                <span>Scanning…</span>
+                                <span>Scanning Universe…</span>
                             </>
                         ) : (
                             <>
                                 <span>⚡</span>
-                                <span>Scan {scanScope === 'top' ? 'Top 35' : 'All 187'}</span>
+                                <span>Scan Universe (F&O)</span>
                             </>
                         )}
                     </button>
@@ -1263,7 +1265,7 @@ export default function OptionFlowRadar() {
                             <span className="text-[11px] sm:text-xs font-black tracking-wider uppercase text-white flex items-center gap-1.5">
                                 <span>Radar Flow Scanner</span>
                                 <span className="text-[9px] px-1.5 py-0.2 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono">
-                                    {scanScope === 'top' ? '⚡ Top 35 Liquid' : '🌐 Full 187 Universe'}
+                                    🌐 F&O Universe
                                 </span>
                             </span>
                             {activeScanJob?.phase && (
@@ -1309,7 +1311,7 @@ export default function OptionFlowRadar() {
                             </span>
                             <div className="flex items-center gap-2">
                                 <span className="text-violet-300 font-bold">
-                                    {attempted} / {total || (scanScope === 'top' ? 35 : 187)}
+                                    {attempted} / {total || 187}
                                 </span>
                                 <span className="text-white font-extrabold text-[11px]">
                                     {fmt(pct, 1)}%

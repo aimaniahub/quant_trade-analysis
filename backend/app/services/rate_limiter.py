@@ -17,20 +17,22 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Fyers documented minute cap. Health/telemetry uses this as the budget.
-FYERS_RPM_LIMIT = 200
-HARVEST_MIN_INTERVAL = 0.33   # ~3.0 RPS, 180 RPM operational cap
-IDLE_MIN_INTERVAL = 0.4
+# Fyers documented minute cap (Standard plan default: 50 requests/min; Prime: 500 requests/min)
+FYERS_RPM_LIMIT = 50
+HARVEST_MIN_INTERVAL = 1.25   # ~48 RPM operational cap strictly under 50 RPM limit
+IDLE_MIN_INTERVAL = 1.25
 
 
 class AsyncRateLimiter:
-    def __init__(self, min_interval: float = 0.35, cooldown_on_limit: float = 6.0):
+    def __init__(self, min_interval: float = 1.25, rpm_limit: int = FYERS_RPM_LIMIT, cooldown_on_limit: float = 15.0):
         """
         Args:
-            min_interval: minimum seconds between granted tokens (≈3 RPS default)
+            min_interval: minimum seconds between granted tokens (~1.25s for 50 RPM)
+            rpm_limit: maximum allowable requests in any rolling 60-second window
             cooldown_on_limit: extra sleep after a 429 / "request limit" response
         """
         self.min_interval = min_interval
+        self.rpm_limit = rpm_limit
         self.cooldown_on_limit = cooldown_on_limit
         self._lock = asyncio.Lock()
         self._sync = threading.Lock()
@@ -107,7 +109,7 @@ class AsyncRateLimiter:
         with self._sync:
             self._limit_hits += 1
             self._trip_count += 1
-            extra = min(self.cooldown_on_limit * (1 + self._limit_hits // 3), 20.0)
+            extra = min(15.0 + (self._limit_hits * 5.0), 30.0)
             self._cooldown_until = time.monotonic() + extra
             hits = self._limit_hits
         logger.warning(
@@ -122,11 +124,10 @@ class AsyncRateLimiter:
                 self._limit_hits = 0
 
     def try_acquire_sync(self) -> Optional[float]:
-        """Grant a Fyers token, or None if cooldown is long.
+        """Grant a Fyers token respecting both interval and rolling 60s quota.
 
-        If remaining cooldown is brief (<= 3s), wait it out so harvest doesn't
+        If remaining cooldown is brief (<= 8s), wait it out so harvest doesn't
         drop the rest of the universe unnecessarily.
-        Still waits the min_interval between grants.
         """
         waited = 0.0
         while True:
@@ -135,58 +136,65 @@ class AsyncRateLimiter:
                 now = time.monotonic()
                 if now < self._cooldown_until:
                     rem = self._cooldown_until - now
-                    if rem <= 3.0:
+                    if rem <= 8.0:
                         wait = rem
                     else:
                         self._wait_tls.last_wait = waited
                         return None
                 else:
+                    # Clean up rolling window
+                    cutoff = now - 60.0
+                    while self._grant_times and self._grant_times[0] < cutoff:
+                        self._grant_times.popleft()
+
+                    # Enforce rolling 60-second quota safety cap
+                    safe_minute_cap = max(5, self.rpm_limit - 2)
+                    if len(self._grant_times) >= safe_minute_cap:
+                        oldest = self._grant_times[0]
+                        wait = max(wait, (oldest + 60.0) - now + 0.05)
+
                     elapsed = now - self._last_grant
                     if elapsed < self.min_interval:
-                        wait = self.min_interval - elapsed
-                    else:
+                        wait = max(wait, self.min_interval - elapsed)
+
+                    if wait <= 0.001:
                         self._note_grant_unlocked(now)
                         self._wait_tls.last_wait = waited
                         return waited
+
             if wait > 0:
                 time.sleep(wait)
                 waited += wait
 
     def acquire_sync(self) -> float:
         """Block the calling thread until a Fyers token is available. Returns wait seconds."""
-        waited = 0.0
-        while True:
-            with self._sync:
-                now = time.monotonic()
-                wait = 0.0
-                if now < self._cooldown_until:
-                    wait = self._cooldown_until - now
-                else:
-                    elapsed = now - self._last_grant
-                    if elapsed < self.min_interval:
-                        wait = self.min_interval - elapsed
-                    else:
-                        self._note_grant_unlocked(now)
-                        self._wait_tls.last_wait = waited
-                        return waited
-            if wait > 0:
-                logger.info("[RateLimiter] waiting %.1fs (sync)", wait)
-                time.sleep(wait)
-                waited += wait
+        res = self.try_acquire_sync()
+        return res if res is not None else 0.0
 
     async def acquire(self) -> None:
         async with self._lock:
             now = time.monotonic()
-            # Global cooldown after 429
             if now < self._cooldown_until:
                 wait = self._cooldown_until - now
                 logger.info(f"[RateLimiter] waiting {wait:.1f}s for cooldown")
                 await asyncio.sleep(wait)
                 now = time.monotonic()
 
-            elapsed = now - self._last_grant
-            if elapsed < self.min_interval:
-                await asyncio.sleep(self.min_interval - elapsed)
+            with self._sync:
+                cutoff = now - 60.0
+                while self._grant_times and self._grant_times[0] < cutoff:
+                    self._grant_times.popleft()
+                safe_minute_cap = max(5, self.rpm_limit - 2)
+                wait = 0.0
+                if len(self._grant_times) >= safe_minute_cap:
+                    oldest = self._grant_times[0]
+                    wait = max(wait, (oldest + 60.0) - now + 0.05)
+                elapsed = now - self._last_grant
+                if elapsed < self.min_interval:
+                    wait = max(wait, self.min_interval - elapsed)
+
+            if wait > 0:
+                await asyncio.sleep(wait)
 
             with self._sync:
                 self._note_grant_unlocked(time.monotonic())
@@ -198,15 +206,20 @@ _fyers_limiter: Optional[AsyncRateLimiter] = None
 def get_fyers_limiter() -> AsyncRateLimiter:
     global _fyers_limiter
     if _fyers_limiter is None:
-        # ~2.5–3 req/s keeps well under common 10 RPS caps when other services run
-        _fyers_limiter = AsyncRateLimiter(min_interval=0.4, cooldown_on_limit=60.0)
+        try:
+            from app.core.config import get_settings
+            rpm = int(get_settings().fyers_rpm_limit or 50)
+        except Exception:
+            rpm = 50
+        min_int = 1.25 if rpm <= 60 else 0.2
+        _fyers_limiter = AsyncRateLimiter(min_interval=min_int, rpm_limit=rpm, cooldown_on_limit=15.0)
     return _fyers_limiter
 
 
 def reset_fyers_limiter_for_tests() -> AsyncRateLimiter:
     """Replace the process singleton. Tests only."""
     global _fyers_limiter
-    _fyers_limiter = AsyncRateLimiter(min_interval=0.4, cooldown_on_limit=60.0)
+    _fyers_limiter = AsyncRateLimiter(min_interval=1.25, rpm_limit=50, cooldown_on_limit=15.0)
     return _fyers_limiter
 
 
