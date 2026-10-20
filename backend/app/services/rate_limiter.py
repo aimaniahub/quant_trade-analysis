@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Fyers documented minute cap (Standard plan default: 50 requests/min; Prime: 500 requests/min)
 FYERS_RPM_LIMIT = 50
-HARVEST_MIN_INTERVAL = 1.25   # ~48 RPM operational cap strictly under 50 RPM limit
+HARVEST_MIN_INTERVAL = 0.5    # 0.5s per-grant; 3 workers → ~45 RPM total (safe under 50 limit)
 IDLE_MIN_INTERVAL = 1.25
 
 

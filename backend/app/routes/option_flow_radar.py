@@ -415,6 +415,17 @@ async def get_radar_scan_job(job_id: str):
         "has_data": bool(
             flagged or watch or ideas or _pick("flow") or last.get("symbol_states")
         ),
+        "elapsed_sec": meta.get("elapsed_sec") or _pick("elapsed_sec") or (
+            get_radar_service()._elapsed_sec() if not done and hasattr(get_radar_service(), "_elapsed_sec") else None
+        ),
+        "pass_id": _pick("pass_id") or meta.get("pass_id"),
+        "meta": {
+            **meta,
+            # Always surface elapsed_sec at meta level so frontend can read snap.meta.elapsed_sec
+            "elapsed_sec": meta.get("elapsed_sec") or _pick("elapsed_sec") or (
+                get_radar_service()._elapsed_sec() if not done and hasattr(get_radar_service(), "_elapsed_sec") else None
+            ),
+        },
     }
 
 

@@ -65,7 +65,7 @@ INDICES_WATCHLIST = filter_valid_symbols(list(FNO_INDICES))
 ALL_FNO_WATCHLIST = filter_valid_symbols(get_fno_universe(include_indices=True))
 
 # Phase 2 harvest — concurrency hides RTT; limiter owns quota
-CHAIN_WORKERS = 2
+CHAIN_WORKERS = 3          # 3 workers at 1.25s cadence ≈ 3 chains/1.25s ≈ 2.4 sym/s → ~78s for 187
 HARVEST_RPS = 0.8
 SYMBOL_TIMEOUT_SEC = 8.0
 RETRY_BACKOFF_SEC = 1.5
@@ -622,6 +622,12 @@ class OptionFlowRadarService:
         except Exception:
             return out
 
+    def _elapsed_sec(self) -> float:
+        """Real elapsed seconds since harvest started."""
+        if not self._harvest_t0:
+            return 0.0
+        return round(time.perf_counter() - self._harvest_t0, 1)
+
     def _live_board_shell(self, *, total: int, pass_id: str, phase: str) -> Dict[str, Any]:
         flagged, watch_list, alert_box, flow = self._repartition_hits(self._live_all_hits)
         skipped = list(self._skipped_syms)
@@ -668,6 +674,7 @@ class OptionFlowRadarService:
                 "QUIET": quiet_n,
             },
             "completion_pct": round(100.0 * min(attempted, total) / max(total, 1), 1),
+            "elapsed_sec": self._elapsed_sec(),
             "timestamp": datetime.now().isoformat(),
             "market_hours": self._is_market_hours(),
         }
@@ -1739,11 +1746,18 @@ class OptionFlowRadarService:
             "attempted": len(excluded),
             "cooldown_remaining": round(limiter.cooldown_remaining, 1),
         })
-        self._publish_live_board(total=total, pass_id=pass_id, phase=quotes_phase)
-        try:
-            self._harvest_quotes_pass(watch)
-        except Exception as exc:
-            logger.warning("harvest quotes pass failed: %s", exc)
+        self._publish_live_board(total=total, pass_id=pass_id, phase="chains")
+        store.set_harvest_meta({"phase": "chains"})
+        # Launch quotes pass in a background thread so chains begin immediately.
+        # Chain workers fall back to spot from chain_resp.spot_price if store hasn't arrived yet.
+        _quotes_thread = threading.Thread(
+            target=lambda: (
+                self._harvest_quotes_pass(watch)
+            ),
+            name="radar-quotes",
+            daemon=True,
+        )
+        _quotes_thread.start()
 
         def _progress(sym: str, flagged_row=None, err=None, *, status: str = "ok", ms: int = 0):
             if progress_callback:

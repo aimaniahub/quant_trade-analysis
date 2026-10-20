@@ -578,8 +578,11 @@ export default function OptionFlowRadar() {
                 commit(snap);
                 const comp = snap.completed != null ? snap.completed : (snap.scanned || 0);
                 const tot = snap.total || 187;
-                const elapsedSec = Math.max(1, Math.round((Date.now() - resumeT0) / 1000));
-                const speed = comp > 0 ? comp / elapsedSec : 0;
+                // Prefer backend elapsed_sec (real engine time), fallback to client wall-clock
+                const backendElapsed: number | undefined = snap.meta?.elapsed_sec ?? snap.elapsed_sec;
+                const clientElapsed = Math.max(1, Math.round((Date.now() - resumeT0) / 1000));
+                const elapsedSec = (backendElapsed != null && backendElapsed > 0) ? Math.round(backendElapsed) : clientElapsed;
+                const speed = comp > 0 && elapsedSec > 0 ? comp / elapsedSec : 0;
                 const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
                 const pctVal = snap.completion_pct != null ? snap.completion_pct : Math.round((comp / Math.max(tot, 1)) * 100);
 
@@ -633,7 +636,7 @@ export default function OptionFlowRadar() {
             }
         };
         resumeTick();
-        pollRef.current = setInterval(resumeTick, 1500);
+        pollRef.current = setInterval(resumeTick, 1000);
     }, [commit]);
 
     const loadLast = useCallback(async () => {
@@ -844,8 +847,12 @@ export default function OptionFlowRadar() {
 
                     const comp = snap.completed != null ? snap.completed : (snap.scanned || 0);
                     const tot = snap.total || 187;
-                    const elapsedSec = Math.max(1, Math.round((Date.now() - t0) / 1000));
-                    const speed = comp > 0 ? comp / elapsedSec : 0;
+                    // Use backend elapsed_sec from job meta (real engine time) when available.
+                    // Fallback to client wall-clock only if not yet reported.
+                    const backendElapsed: number | undefined = snap.meta?.elapsed_sec ?? snap.elapsed_sec;
+                    const clientElapsed = Math.max(1, Math.round((Date.now() - t0) / 1000));
+                    const elapsedSec = (backendElapsed != null && backendElapsed > 0) ? Math.round(backendElapsed) : clientElapsed;
+                    const speed = comp > 0 && elapsedSec > 0 ? comp / elapsedSec : 0;
                     const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
                     const pctVal = snap.completion_pct != null ? snap.completion_pct : Math.round((comp / Math.max(tot, 1)) * 100);
 
@@ -901,7 +908,7 @@ export default function OptionFlowRadar() {
                 }
             };
             await tick();
-            pollRef.current = setInterval(tick, 1500);
+            pollRef.current = setInterval(tick, 1000);
         } catch (e: any) {
             setScanLoading(false);
             setActiveScanJob(null);
@@ -1371,14 +1378,22 @@ export default function OptionFlowRadar() {
                             {activeScanJob?.speedSymPerSec ? (
                                 <span className="flex items-center gap-1 text-emerald-400 font-semibold">
                                     <span>⚡</span>
-                                    <span>{activeScanJob.speedSymPerSec} stocks/s</span>
+                                    <span>{activeScanJob.speedSymPerSec} sym/s</span>
                                 </span>
                             ) : null}
                             {activeScanJob?.elapsedSec ? (
-                                <span>Elapsed: <strong className="text-zinc-200">{activeScanJob.elapsedSec}s</strong></span>
+                                <span>Elapsed: <strong className="text-zinc-200">
+                                    {activeScanJob.elapsedSec >= 60
+                                        ? `${Math.floor(activeScanJob.elapsedSec / 60)}m ${activeScanJob.elapsedSec % 60}s`
+                                        : `${activeScanJob.elapsedSec}s`}
+                                </strong></span>
                             ) : null}
                             {activeScanJob?.etaSeconds !== undefined && activeScanJob.etaSeconds > 0 ? (
-                                <span>ETA: <strong className="text-violet-300">~{activeScanJob.etaSeconds}s</strong></span>
+                                <span>ETA: <strong className="text-violet-300">
+                                    ~{activeScanJob.etaSeconds >= 60
+                                        ? `${Math.floor(activeScanJob.etaSeconds / 60)}m ${activeScanJob.etaSeconds % 60}s`
+                                        : `${activeScanJob.etaSeconds}s`}
+                                </strong></span>
                             ) : null}
                         </div>
 

@@ -121,6 +121,10 @@ class RadarScheduler:
                 meta["phase"] = last.get("phase")
             if status in ("wait", "retry", "retry_hit", "retry_start"):
                 meta["phase"] = "wait"
+            # Surface real backend elapsed_sec so UI shows actual scan time, not client wall-clock
+            backend_elapsed = last.get("elapsed_sec") or (self.radar._elapsed_sec() if hasattr(self.radar, "_elapsed_sec") else None)
+            if backend_elapsed is not None:
+                meta["elapsed_sec"] = backend_elapsed
             mgr.set_current(job_id, symbol)
             mgr.update(
                 job_id,
