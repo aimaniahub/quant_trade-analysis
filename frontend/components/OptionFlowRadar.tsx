@@ -506,13 +506,22 @@ export default function OptionFlowRadar() {
         setAiPickerError(null);
         setShowAiPickerModal(true);
         try {
-            const pool = [
+            const seen = new Set<string>();
+            const rawPool = [
+                ...(Array.isArray(board?.tradeable) ? board.tradeable : []),
                 ...(Array.isArray(board?.bullish) ? board.bullish : []),
                 ...(Array.isArray(board?.bearish) ? board.bearish : []),
-                ...(Array.isArray(board?.tradeable) ? board.tradeable : []),
                 ...(Array.isArray(board?.watch) ? board.watch : []),
+                ...(Array.isArray(board?.flow) ? board.flow : []),
+                ...(Array.isArray(board?.screen) ? board.screen : []),
             ];
-            const res: any = await api.radar.getAiBestPicks({ force: true, candidates: pool.slice(0, 16) });
+            const pool = rawPool.filter((r) => {
+                const s = r?.symbol;
+                if (!s || seen.has(s)) return false;
+                seen.add(s);
+                return true;
+            });
+            const res: any = await api.radar.getAiBestPicks({ force: true, candidates: pool.slice(0, 24) });
             if (res && res.success) {
                 setAiPickerResult(res);
             } else {
@@ -1036,7 +1045,25 @@ export default function OptionFlowRadar() {
             // Priority 4: All available rows in screenPool
             return rankRows(screenPool).slice(0, 16);
         }
-        return rankRows(screenPool.filter((row) => matchesFilters(row, scanTypes))).slice(0, 16);
+        // When filters are selected: first try strict AND
+        const exactMatches = screenPool.filter((row) => matchesFilters(row, scanTypes));
+        if (exactMatches.length > 0) {
+            return rankRows(exactMatches).slice(0, 16);
+        }
+        // If 0 names match all combined chips, match any selected filter (OR) so user still sees relevant setups
+        const partialMatches = screenPool
+            .map((row) => {
+                const f = flagsOf(row);
+                const matchCount = scanTypes.filter((k) => flagValue(f, k)).length;
+                return { row, matchCount };
+            })
+            .filter((item) => item.matchCount > 0)
+            .sort((a, b) => {
+                if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount;
+                return (b.row.setup_score || 0) - (a.row.setup_score || 0);
+            })
+            .map((item) => item.row);
+        return partialMatches.slice(0, 16);
     }, [screenPool, scanTypes]);
 
     useEffect(() => {
@@ -1566,11 +1593,21 @@ export default function OptionFlowRadar() {
                                     </div>
                                     <div className="mt-1 text-[12px] text-zinc-500">
                                         {hasAnyBoardData
-                                            ? 'AND filters — add fewer chips, or wait for an OR break with OI + premium + clean room.'
+                                            ? 'AND filters active — click chips above to unselect, or click Clear Filters below.'
                                             : dataMode === 'last_close'
                                               ? 'Last harvest is not pinned yet. Scan once after auth to freeze last close.'
                                               : 'Waiting for the first harvest of the session.'}
                                     </div>
+                                    {scanTypes.length > 0 && (
+                                        <div className="mt-3 flex items-center justify-center">
+                                            <button
+                                                onClick={() => setScanTypes([])}
+                                                className="px-3 py-1.5 rounded-full bg-violet-600/40 hover:bg-violet-600 text-[11px] font-bold text-violet-200 hover:text-white border border-violet-400/60 transition cursor-pointer"
+                                            >
+                                                ✕ Clear Active Filters ({scanTypes.length})
+                                            </button>
+                                        </div>
+                                    )}
                                     {!hasAnyBoardData && (
                                         <div className="mt-3 flex items-center justify-center gap-2">
                                             <button
@@ -1673,6 +1710,16 @@ export default function OptionFlowRadar() {
                             </div>
                             <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-1.5 mb-2">
                                 <Mini k="PCR" v={fmt(structure.oi_pcr, 2)} />
+                                {(() => {
+                                    const netVal = selFlags?.net_delta_oi ?? (detail as any)?.net_delta_oi ?? report?.net_delta_oi;
+                                    const oiInfo = fmtNetOi(netVal);
+                                    return (
+                                        <div title="Total Net New OI added across all strikes: Put New OI minus Call New OI. Positive indicates institutional Put Writing / Bullish support; Negative indicates Call Writing / Bearish resistance.">
+                                            <div className="text-[9px] uppercase tracking-widest text-zinc-500">Net ΔOI</div>
+                                            <div className={`font-mono text-[12px] ${oiInfo.color}`}>{oiInfo.text}</div>
+                                        </div>
+                                    );
+                                })()}
                                 <Mini k="Put wall" v={fmt(structure.put_wall, 0)} />
                                 <Mini k="Call wall" v={fmt(structure.call_wall, 0)} />
                                 <Mini k="Futures" v={futures.state || '—'} />
@@ -1683,7 +1730,6 @@ export default function OptionFlowRadar() {
                                 <Mini k="VOR Mult" v={report?.top_anomaly?.vor || selFlags?.vor ? `${Number(report?.top_anomaly?.vor || selFlags?.vor).toFixed(2)}×` : '—'} />
                                 <Mini k="OI Vel" v={report?.top_anomaly?.oi_velocity || selFlags?.oi_velocity ? `${fmt(report?.top_anomaly?.oi_velocity || selFlags?.oi_velocity, 0)}/m` : '—'} />
                                 <Mini k="ORH" v={fmt((report?.session || (detail as any)?.session || {}).orh, 1)} />
-                                <Mini k="ORL" v={fmt((report?.session || (detail as any)?.session || {}).orl, 1)} />
                             </div>
                             <div className="flex gap-1.5 mb-2 text-[9px] font-bold uppercase tracking-wider overflow-x-auto no-scrollbar">
                                 {SCREEN_FILTERS.map((f) => {
@@ -1742,15 +1788,15 @@ export default function OptionFlowRadar() {
                                 </tr>
                                 <tr className="text-zinc-500 bg-[#0c1016] border-b-2 border-[#c4b5fd]">
                                     <th className="px-1.5 py-1 text-left font-medium">Signal</th>
-                                    <th className="px-1.5 py-1 text-right font-medium">CE OI</th>
-                                    <th className="px-1.5 py-1 text-right font-medium">Δ</th>
+                                    <th className="px-1.5 py-1 text-right font-medium" title="Call Open Interest">CE OI</th>
+                                    <th className="px-1.5 py-1 text-right font-medium text-emerald-300" title="Call New OI added today (+ Buying/Writing / - Unwinding)">New OI (Δ)</th>
                                     <th className="px-1.5 py-1 text-right font-medium">Vol</th>
                                     <th className="px-1.5 py-1 text-right font-medium">IV</th>
                                     <th className="px-1.5 py-1 text-right font-medium">LTP</th>
-                                    <th className="px-1.5 py-1 text-center font-medium"> </th>
+                                    <th className="px-1.5 py-1 text-center font-medium text-violet-300" title="Strike & Net New OI (Put Δ - Call Δ: Green = Support, Red = Resistance)">Strike · Net ΔOI</th>
                                     <th className="px-1.5 py-1 text-left font-medium">Signal</th>
-                                    <th className="px-1.5 py-1 text-right font-medium">PE OI</th>
-                                    <th className="px-1.5 py-1 text-right font-medium">Δ</th>
+                                    <th className="px-1.5 py-1 text-right font-medium" title="Put Open Interest">PE OI</th>
+                                    <th className="px-1.5 py-1 text-right font-medium text-rose-300" title="Put New OI added today (+ Writing floor / - Unwinding)">New OI (Δ)</th>
                                     <th className="px-1.5 py-1 text-right font-medium">Vol</th>
                                     <th className="px-1.5 py-1 text-right font-medium">IV</th>
                                     <th className="px-1.5 py-1 text-right font-medium">LTP</th>
@@ -1793,7 +1839,22 @@ export default function OptionFlowRadar() {
                                         <td className="p-1 text-right">{fmt(r.call?.iv, 1)}</td>
                                         <td className="p-1 text-right">{fmt(r.call?.ltp, 1)}</td>
                                         <td className="p-1 text-center font-bold bg-zinc-900/90 text-violet-300">
-                                            {fmt(k, 0)}
+                                            <div>{fmt(k, 0)}</div>
+                                            {(() => {
+                                                const netStrikeOi = pChg - cChg;
+                                                if (netStrikeOi === 0) return null;
+                                                const isBull = netStrikeOi > 0;
+                                                return (
+                                                    <div
+                                                        className={`text-[8px] font-mono leading-none mt-0.5 ${
+                                                            isBull ? 'text-emerald-400' : 'text-rose-400'
+                                                        }`}
+                                                        title={`Strike Net New OI: ${isBull ? '+' : ''}${fmt(netStrikeOi, 0)} (${isBull ? 'Put Writing Support' : 'Call Writing Resistance'})`}
+                                                    >
+                                                        {isBull ? '+' : ''}{fmtNetOi(netStrikeOi).text}
+                                                    </div>
+                                                );
+                                            })()}
                                             {isCallWall ? <span className="ml-0.5 text-[8px] text-rose-400">RES</span> : null}
                                             {isPutWall ? <span className="ml-0.5 text-[8px] text-emerald-400">SUP</span> : null}
                                         </td>

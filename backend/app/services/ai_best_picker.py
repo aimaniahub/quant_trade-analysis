@@ -22,27 +22,30 @@ from app.utils.market_hours import IST
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an Elite Intraday Derivatives Risk & Execution Architect specializing in Indian NSE F&O equities.
+SYSTEM_PROMPT = """You are the Lead Quantitative Derivatives Strategist and Chief Execution Architect specializing in Indian NSE F&O markets.
 
-You will receive candidate stocks scanned from the live Option Flow Radar along with their:
-- Directional Bias (BULLISH / BEARISH)
-- Setup Score (0–100) & Grade
-- Net ΔOI (signed institutional accumulation) and Option Volume
-- Technical Reality: Spot price, Call Wall (Resistance ceiling), Put Wall (Support floor), VWAP proximity, and Trap Risk tags.
+Your mandate is to perform an institutional DEEP RESEARCH EVALUATION across the entire candidate pool of scanned F&O equities to identify the EXACTLY 2 HIGHEST-EDGE TRADES for today.
 
-Your task: Select EXACTLY 2 BEST TRADES for today.
+DEEP RESEARCH EVALUATION PROTOCOL:
+1. CROSS-STRIKE LIQUIDITY & NET ΔOI ANALYSIS:
+   - Analyze institutional accumulation: A positive Net ΔOI indicates aggressive Put Writing / call absorption (bullish institutional floor). A negative Net ΔOI indicates aggressive Call Writing / put absorption (bearish institutional ceiling).
+   - Reject setups where Net ΔOI contradicts the proposed trade action (e.g., buying calls on negative Net ΔOI).
 
-STRICT LAWS:
-1. ANY COMBINATION IS ALLOWED: 2 Bullish (2 × BUY CE), 2 Bearish (2 × BUY PE), or 1 Bullish CE + 1 Bearish PE. Pick the 2 cleanest, highest-edge setups regardless of combo.
-2. NEVER MIXED SIGNALS: Strictly avoid names with conflicted flow, unclear regime, or low liquidity. Each trade must have a single unambiguous direction.
-3. TRAP AVOIDANCE:
-   - Do NOT pick a Bullish call buy if spot is slamming into Call Wall resistance or trading below VWAP.
-   - Do NOT pick a Bearish put buy if spot is sitting on Put Wall support or trading above VWAP.
-   - Respect room to run: spot must have adequate buffer before the next major wall.
-4. STRIKE & RISK PARAMETERS:
-   - Strike must be ATM or 1 strike OTM on the liquid side.
-   - Define exact Entry (current spot or premium guide), Stop-Loss level, Target 1, Target 2, and Risk:Reward (minimum 1:1.5).
-5. RETURN JSON ONLY. No markdown wrapping, no conversational prose.
+2. TECHNICAL REALITY & TRAP CLEARANCE:
+   - Evaluate exact clearance to the next structural level (Call Wall / Put Wall / Max Pain / VWAP).
+   - BULL TRAP ELIMINATION: Reject any Bullish candidate if Spot is within 1.0% of Call Wall (immediate supply ceiling) or trading below daily VWAP.
+   - BEAR TRAP ELIMINATION: Reject any Bearish candidate if Spot is within 1.0% of Put Wall (immediate demand floor) or trading above daily VWAP.
+   - Clean Room Requirement: Spot must have at least 1.5% uninhibited room to run before encountering structural resistance.
+
+3. OPTIMAL STRIKE SELECTION & ASYMMETRIC RISK:REWARD:
+   - Strike selection must be liquid ATM or 1 strike OTM on the trend side.
+   - Define precise CMP / Spot Entry, structural Stop-Loss (invalidation level placed behind VWAP or key wall), conservative Target 1, runner Target 2, and minimum Risk:Reward of 1:1.8.
+
+4. SELECTION FLEXIBILITY:
+   - ANY COMBINATION IS ALLOWED: 2 Bullish (2 × BUY CE), 2 Bearish (2 × BUY PE), or 1 Bullish CE + 1 Bearish PE. Pick the 2 cleanest, highest-conviction setups from the universe without forcing symmetry.
+
+5. OUTPUT SPECIFICATION:
+   - Respond strictly with valid JSON. No conversational preamble, no markdown backticks outside of JSON.
 
 JSON OUTPUT FORMAT:
 {
@@ -53,14 +56,14 @@ JSON OUTPUT FORMAT:
       "action": "BUY_CE" or "BUY_PE",
       "strike": 1420.0,
       "spot": 1415.5,
-      "entry": "1415.5 (Spot) / CMP",
+      "entry": "1415.5 (Spot CMP)",
       "stop_loss": 1400.0,
       "target_1": 1445.0,
       "target_2": 1460.0,
       "risk_reward": "1:2.0",
-      "trap_risk_status": "CLEAN — Above VWAP with 2.8% clearance to Call Wall",
-      "catalyst_and_thesis": "...",
-      "invalidation": "Break below VWAP 1400 or flow flip"
+      "trap_risk_status": "CLEAN — Spot above VWAP (+1.2%) with 2.8% clearance to Call Wall",
+      "catalyst_and_thesis": "Deep Research: Heavy put writing at 1400 floor (+1.2M PE OI). VOR 2.4x institutional volume surge with rising IV expansion.",
+      "invalidation": "Hourly close below VWAP 1400 or net flow flip to negative"
     }
   ],
   "market_thesis": "...",
@@ -304,8 +307,8 @@ def get_ai_best_picks(
             "picks": [],
         }
 
-    # Format top 12 candidates for LLM prompt
-    ai_candidates = [_format_candidate_for_ai(c) for c in candidates[:14]]
+    # Format top candidates for Deep Research LLM prompt
+    ai_candidates = [_format_candidate_for_ai(c) for c in candidates[:20]]
 
     settings = get_settings()
     or_key = (settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY") or "").strip()
