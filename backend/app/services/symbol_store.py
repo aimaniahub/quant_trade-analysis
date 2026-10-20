@@ -880,6 +880,11 @@ def slim_board(board: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def set_board(board: Dict[str, Any]) -> Dict[str, Any]:
     global _mem_board
     slim = slim_board(board)
+    hits = len(slim.get("tradeable") or slim.get("flagged") or []) + len(slim.get("watch") or []) + len(slim.get("flow") or [])
+    if int(slim.get("ok_chain") or 0) == 0 and hits == 0 and slim.get("errors"):
+        logger.warning("[symbol_store] Refusing to overwrite board with 0-hit failed scan")
+        return _mem_board or slim
+
     rc = _rc()
     ttl = session_snapshot_ttl()
     if rc.is_available():
@@ -926,6 +931,11 @@ def set_session_board(board: Dict[str, Any]) -> Dict[str, Any]:
     """Pin the last completed session so after-hours UI is never blank."""
     global _mem_session_board
     slim = slim_board(board)
+    hits = len(slim.get("tradeable") or slim.get("flagged") or []) + len(slim.get("watch") or []) + len(slim.get("flow") or [])
+    if int(slim.get("ok_chain") or 0) == 0 and hits == 0 and slim.get("errors"):
+        logger.warning("[symbol_store] Refusing to overwrite session board with 0-hit failed scan")
+        return _mem_session_board or slim
+
     slim["data_mode"] = slim.get("data_mode") or "last_close"
     rc = _rc()
     if rc.is_available():

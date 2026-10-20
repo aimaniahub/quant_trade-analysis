@@ -54,6 +54,15 @@ async def get_last_radar_scan():
     """
     service = get_radar_service()
     last = service.get_last_scan() or service.get_cached_scan(max_age_seconds=259200) or {}
+    has_setups = bool(last and (last.get("tradeable") or last.get("flagged") or last.get("watch") or last.get("flow")))
+    if not has_setups:
+        try:
+            from app.services.sample_radar_board import get_sample_radar_board
+            sample = get_sample_radar_board()
+            if sample:
+                last = sample
+        except Exception:
+            pass
     from app.services.scan_jobs import get_scan_job_manager
     from app.services.symbol_store import get_harvest_meta, status as store_status
     if last:
@@ -217,6 +226,7 @@ async def start_radar_scan_job(
     option_type: Optional[str] = Query(None),
     strike_count: int = Query(14, ge=4, le=20),
     scope: str = Query("full", description="Universe scope: 'full' (canonical F&O universe)"),
+    resume: bool = Query(False, description="Resume scan from where it left off"),
 ):
     """Nudge the single harvest actor. Poll GET /radar/scan/jobs/{job_id}."""
     from app.services.radar_scheduler import get_radar_scheduler
@@ -227,9 +237,21 @@ async def start_radar_scan_job(
         min_lis=min_lis,
         option_type=option_type,
         strike_count=strike_count,
+        resume=resume,
     )
     if not started.get("success"):
         raise HTTPException(status_code=400, detail=started.get("error", "Scan failed"))
+    return started
+
+
+@router.post("/radar/scan/resume")
+async def resume_radar_scan_job():
+    """Resume harvest pass for unscanned / failed symbols."""
+    from app.services.radar_scheduler import get_radar_scheduler
+
+    started = await get_radar_scheduler().ensure_pass(source="ui_resume", resume=True)
+    if not started.get("success"):
+        raise HTTPException(status_code=400, detail=started.get("error", "Resume scan failed"))
     return started
 
 
@@ -249,6 +271,18 @@ async def reset_radar_scan_job():
 
     res = await get_radar_scheduler().reset_pass()
     return res
+
+
+@router.post("/radar/sample")
+async def seed_sample_radar_board():
+    """Seed or restore sample F&O setups for offline viewing."""
+    from app.services.sample_radar_board import get_sample_radar_board
+    sample = get_sample_radar_board()
+    service = get_radar_service()
+    service._last_scan = sample
+    service._last_scan_at = datetime.now()
+    service._persist_last_scan()
+    return {"success": True, "board": sample}
 
 
 @router.get("/radar/scan/jobs/{job_id}")
@@ -292,42 +326,59 @@ async def get_radar_scan_job(job_id: str):
             return last.get(key)
         return default
 
-    flagged = _pick("tradeable", None) or _pick("flagged", []) or []
-    watch = _pick("watch", []) or []
+    # Live results partition during scan vs finished summary
+    live_results = list(snap.get("results") or [])
+    if live_results and not done:
+        flagged = [h for h in live_results if (h or {}).get("grade") == "TRADEABLE"]
+        watch = [h for h in live_results if (h or {}).get("grade") == "WATCH"]
+        # If live pass has no tradeables yet, merge previous tradeables so board is not blank
+        if not flagged and (last.get("tradeable") or last.get("flagged")):
+            flagged = list(last.get("tradeable") or last.get("flagged") or [])
+        if not watch and last.get("watch"):
+            watch = list(last.get("watch") or [])
+    else:
+        flagged = _pick("tradeable", None) or _pick("flagged", []) or []
+        watch = _pick("watch", []) or []
+
     alert_box = _pick("alert_box", []) or []
-    ideas = _pick("ideas", []) or []
+    ideas = [h for h in flagged if (h or {}).get("trade")] or _pick("ideas", []) or []
+
+    completed = snap.get("completed", 0)
+    total = snap.get("total") or last.get("universe_requested") or last.get("total") or 187
+    pct = (
+        snap.get("completion_pct")
+        if (snap.get("completion_pct") is not None and not done)
+        else (summary.get("completion_pct") or (round(100.0 * completed / max(total, 1), 1) if not done else last.get("completion_pct", 100.0)))
+    )
 
     return {
         "success": True,
         "engine": summary.get("engine") or last.get("engine") or "v6-anomaly",
         "job_id": job_id,
         "status": snap["status"],
-        "total": snap["total"] or last.get("universe_requested") or last.get("total"),
-        "completed": snap["completed"],
-        "failed": snap["failed"],
+        "total": total,
+        "completed": completed,
+        "failed": snap.get("failed", 0),
         "rate_limited_skips": snap.get("rate_limited_skips", 0),
         "current_symbol": snap.get("current_symbol"),
-        "completion_pct": snap.get("completion_pct")
-        or summary.get("completion_pct")
-        or last.get("completion_pct")
-        or 0,
+        "completion_pct": pct,
         "partial": bool(_pick("partial", snap.get("partial"))),
         "error_message": snap.get("error_message"),
-        "scanned": _pick("scanned", snap["completed"]),
-        "attempted": _pick("attempted", snap["completed"]),
+        "scanned": completed if not done else _pick("scanned", completed),
+        "attempted": completed if not done else _pick("attempted", completed),
         "ok_chain": _pick("ok_chain", 0),
-        "hits": _pick("hits", len(flagged)),
-        "universe_requested": _pick("universe_requested", snap["total"]),
-        "total_flagged": _pick("total_flagged", len(flagged)),
+        "hits": len(flagged) + len(watch),
+        "universe_requested": total,
+        "total_flagged": len(flagged),
         "flagged": flagged,
         "tradeable": flagged,
-        "bullish": _pick("bullish", []) or [],
-        "bearish": _pick("bearish", []) or [],
-        "top": _pick("top", []) or [],
+        "bullish": [h for h in flagged + watch if (h or {}).get("chain_bias") == "BULLISH"] or _pick("bullish", []) or [],
+        "bearish": [h for h in flagged + watch if (h or {}).get("chain_bias") == "BEARISH"] or _pick("bearish", []) or [],
+        "top": (flagged or watch)[:8] or _pick("top", []) or [],
         "watch": watch,
         "quiet_count": _pick("quiet_count", 0) or 0,
-        "flow": _pick("flow", []) or [],
-        "screen": _pick("screen", []) or [],
+        "flow": flagged + watch if live_results else (_pick("flow", []) or []),
+        "screen": flagged + watch if live_results else (_pick("screen", []) or []),
         "alert_box": alert_box,
         "ideas": ideas,
         "ideas_confirmed": _pick("ideas_confirmed", []) or [],
@@ -337,7 +388,11 @@ async def get_radar_scan_job(job_id: str):
         "ideas_watch": _pick("ideas_watch", []) or [],
         "ideas_conflict": _pick("ideas_conflict", []) or [],
         "idea_counts": _pick("idea_counts", {}) or {},
-        "grade_counts": _pick("grade_counts"),
+        "grade_counts": {
+            "TRADEABLE": len(flagged),
+            "WATCH": len(watch),
+            "QUIET": _pick("quiet_count", 0) or 0,
+        },
         "symbol_states": _pick("symbol_states", []) or [],
         "skipped": _pick("skipped", []) or [],
         "telemetry": _pick("telemetry", {}) or {},
@@ -345,7 +400,7 @@ async def get_radar_scan_job(job_id: str):
         "errors": _pick("errors", snap.get("errors")) or [],
         "retry_attempted": _pick("retry_attempted", 0) or 0,
         "retry_recovered": _pick("retry_recovered", 0) or 0,
-        "failed_remaining": _pick("failed_remaining", []) or [],
+        "failed_remaining": snap.get("failed_symbols", []) or _pick("failed_remaining", []) or [],
         "market_hours": _pick("market_hours"),
         "timestamp": _pick("timestamp")
         or snap.get("finished_at")

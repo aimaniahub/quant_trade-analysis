@@ -208,12 +208,24 @@ class OptionFlowRadarService:
         return list(self._hot_symbols)
 
     def _is_authenticated(self) -> bool:
-        return bool(self.auth_service.get_fyers_model())
+        """Validate active Fyers credentials against token check."""
+        try:
+            status = self.auth_service.get_auth_status()
+            return bool(status.get("authenticated") and status.get("is_valid"))
+        except Exception:
+            return False
 
     def _persist_last_scan(self) -> None:
         """Redis + memory + disk durability for last radar board (restart-safe)."""
         if not self._last_scan or not self._last_scan_at:
             return
+        # Guard: Never overwrite a previously valid board with an empty or completely failed scan
+        ok_chain = int(self._last_scan.get("ok_chain") or 0)
+        hits = len(self._last_scan.get("tradeable") or self._last_scan.get("flagged") or []) + len(self._last_scan.get("watch") or [])
+        if ok_chain == 0 and hits == 0 and self._last_scan.get("errors"):
+            logger.warning("[OptionFlowRadar] Skipping persist: 0 ok_chain and 0 hits (scan failed / auth expired)")
+            return
+
         slim = dict(self._last_scan)
         slim.pop("all_hits", None)
         try:
@@ -366,6 +378,18 @@ class OptionFlowRadarService:
                 last = None
             if last:
                 self._last_scan = last
+
+        # If last scan is completely empty or has 0 setups, provide sample board so UI is never blank
+        has_setups = bool(last and (last.get("tradeable") or last.get("flagged") or last.get("watch") or last.get("flow")))
+        if not has_setups:
+            try:
+                from app.services.sample_radar_board import get_sample_radar_board
+                last = get_sample_radar_board()
+                self._last_scan = last
+                self._last_scan_at = datetime.now()
+            except Exception:
+                pass
+
         if not last:
             return None
         age = (
@@ -469,15 +493,20 @@ class OptionFlowRadarService:
             pass
 
     def _is_hard_fail(self, err: Optional[str]) -> bool:
-        """Return True when Fyers confirms the symbol is invalid or has no option chain contracts."""
+        """Return True ONLY when Fyers confirms the symbol is permanently invalid or delisted."""
         if not err:
             return False
         e = str(err).lower()
+        transient_markers = (
+            "token", "auth", "login", "code=-15", "code=-8",
+            "rate_limit", "429", "cooldown", "timeout", "timed out",
+            "connection", "resolve", "max retries", "network", "getaddrinfo"
+        )
+        if any(m in e for m in transient_markers):
+            return False
         if "invalid symbol" in e or ("invalid" in e and "symbol" in e):
             return True
-        if "no_chain" in e or "empty" in e or "not found" in e or "no contracts" in e:
-            return True
-        if "fyers_code=-99" in e or "fyers_code=-1" in e or "fyers_code=404" in e:
+        if "delisted" in e or "not trading" in e or "not allowed" in e:
             return True
         return False
 
@@ -1602,6 +1631,9 @@ class OptionFlowRadarService:
         opt_type_filter: Optional[str] = None,
         strike_count: int = 14,
         progress_callback: Optional[Any] = None,
+        resume: bool = False,
+        seeded_count: int = 0,
+        total_override: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Harvest + scan FNO universe — ONE best strike per stock (v3 graded).
@@ -1646,10 +1678,10 @@ class OptionFlowRadarService:
         raw_watch = filter_valid_symbols(symbols or ALL_FNO_WATCHLIST)
         excluded = [s for s in raw_watch if s in self._skip_symbols]
         watch = [s for s in raw_watch if s not in self._skip_symbols]
-        total = len(raw_watch)
+        total = total_override or len(raw_watch)
         all_hits: List[Dict] = []
         errors: List[str] = []
-        scanned = 0
+        scanned = int(seeded_count or 0)
         rate_limited_skips = 0
         pass_id = f"h{int(time.time())}"
         limiter = get_fyers_limiter()
@@ -1848,6 +1880,7 @@ class OptionFlowRadarService:
         futures_calls = 0
 
         def _work(sym: str) -> Dict[str, Any]:
+            _progress(sym, status="start")
             if self._cancel_requested:
                 return {
                     "symbol": sym,
@@ -1986,17 +2019,33 @@ class OptionFlowRadarService:
 
         try:
             pool = ThreadPoolExecutor(max_workers=workers_n, thread_name_prefix="radar-sym")
+            auth_aborted = False
+            consecutive_auth_fails = 0
             try:
                 futs = {pool.submit(_work, sym): sym for sym in watch}
                 for fut in as_completed(futs):
-                    if self._cancel_requested:
-                        logger.info("Scan cancelled by user; breaking worker loop")
+                    if self._cancel_requested or auth_aborted:
+                        logger.info("Scan cancelled or auth aborted; breaking worker loop")
                         break
                     self._scan_heartbeat = time.time()
                     try:
                         res = fut.result()
                     except Exception as exc:
                         res = {"symbol": futs[fut], "hit": None, "err": str(exc)[:120], "retries": 0, "ms": 0}
+                    
+                    err_str = str(res.get("err") or "").lower()
+                    if "fyers_code=-15" in err_str or "please provide valid token" in err_str or "token expired" in err_str:
+                        consecutive_auth_fails += 1
+                        if consecutive_auth_fails >= 3:
+                            logger.error("Scan aborted: Fyers token is expired / invalid (3 consecutive auth failures).")
+                            self._cancel_requested = True
+                            auth_aborted = True
+                            errors.append("AUTH_EXPIRED: Fyers session token expired or invalid. Please click Login.")
+                            _accept(res)
+                            break
+                    else:
+                        consecutive_auth_fails = 0
+
                     _accept(res)
             finally:
                 pool.shutdown(wait=False if self._cancel_requested else True, cancel_futures=True)
@@ -2146,15 +2195,23 @@ class OptionFlowRadarService:
                     ),
                 },
             }
-            # Always update last scan so top-tier and full harvests reflect immediately
-            self._last_scan = result
-            self._last_scan_at = datetime.now()
-            self._persist_last_scan()
-            if not self._is_market_hours():
-                try:
-                    self.pin_last_session()
-                except Exception:
-                    pass
+            if auth_aborted:
+                result["success"] = False
+                result["error"] = "Fyers session expired / invalid token. Please click Login to authenticate."
+                result["auth_required"] = True
+
+            # Only overwrite last scan if we got valid chains or hits, not a complete auth/network blowout
+            if ok_chain > 0 or len(all_hits) > 0 or not errors:
+                self._last_scan = result
+                self._last_scan_at = datetime.now()
+                self._persist_last_scan()
+                if not self._is_market_hours():
+                    try:
+                        self.pin_last_session()
+                    except Exception:
+                        pass
+            else:
+                logger.warning("Harvest produced 0 valid chains with errors; preserving previously cached board")
             try:
                 self._rebuild_hv_index()
             except Exception:

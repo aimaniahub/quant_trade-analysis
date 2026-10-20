@@ -372,17 +372,23 @@ export const api = {
             params.set('strike_count', String(strikeCount));
             return api.fetch(`/radar/scan?${params.toString()}`);
         },
-        startScan: (minLis = 0, optionType?: string, strikeCount = 14, scope: 'top' | 'full' = 'top') => {
+        startScan: (minLis = 0, optionType?: string, strikeCount = 14, scope: 'top' | 'full' = 'top', resume = false) => {
             const params = new URLSearchParams();
             params.set('min_lis', String(minLis));
             if (optionType) params.set('option_type', optionType);
             params.set('strike_count', String(strikeCount));
             params.set('scope', scope);
+            params.set('resume', String(resume));
             return api.fetch(`/radar/scan/start?${params.toString()}`, {
                 method: 'POST',
                 body: JSON.stringify({}),
             });
         },
+        resumeScan: () =>
+            api.fetch('/radar/scan/resume', {
+                method: 'POST',
+                body: JSON.stringify({}),
+            }),
         cancelScan: () =>
             api.fetch('/radar/scan/cancel', {
                 method: 'POST',
@@ -427,6 +433,7 @@ export const api = {
         getAiChainJob: (jobId: string) =>
             api.fetch(`/radar/ai-chain/jobs/${encodeURIComponent(jobId)}`),
         getAiChainLast: () => api.fetch('/radar/ai-chain/last'),
+        loadSample: () => api.fetch('/radar/sample', { method: 'POST' }),
         getTradeWatch: () => api.fetch('/trade-watch'),
         runTradeWatch: (force = false) =>
             api.fetch('/trade-watch/run', {

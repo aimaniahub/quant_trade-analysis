@@ -92,13 +92,25 @@ class RadarScheduler:
             meta = dict((job_obj.meta if job_obj else {}) or {})
             log = list(meta.get("log") or [])
             short = (symbol or "?").replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
-            if status != "start":
-                log.append({
-                    "sym": short,
-                    "status": status,
-                    "ms": int(ms or 0),
-                    "err": (str(err)[:80] if err else None),
-                })
+            if status == "start":
+                mgr.set_current(job_id, symbol)
+                meta["current_symbol"] = symbol
+                meta["heartbeat_at"] = time.time()
+                meta["phase"] = "chains"
+                mgr.update(
+                    job_id,
+                    completed=int(scanned or 0),
+                    current_symbol=symbol,
+                    meta=meta,
+                )
+                return
+
+            log.append({
+                "sym": short,
+                "status": status,
+                "ms": int(ms or 0),
+                "err": (str(err)[:80] if err else None),
+            })
             meta["log"] = log[-28:]
             meta["heartbeat_at"] = time.time()
             meta["last_status"] = status
@@ -206,6 +218,7 @@ class RadarScheduler:
         min_lis: float = 0,
         option_type: Optional[str] = None,
         strike_count: int = 14,
+        resume: bool = False,
     ) -> Dict[str, Any]:
         """Start one harvest pass for the canonical universe if idle. If running, reuse that job."""
         from app.services.scan_jobs import get_scan_job_manager
@@ -237,17 +250,37 @@ class RadarScheduler:
                     "poll_url": "/api/v1/radar/last",
                 }
             if not self.radar._is_authenticated():
-                return {"success": False, "error": "Not authenticated", "status": "blocked"}
+                return {
+                    "success": False,
+                    "error": "Fyers access token expired or not logged in. Please click Login above.",
+                    "status": "blocked",
+                    "auth_required": True,
+                }
 
             if symbols:
                 target_symbols = filter_valid_symbols(symbols)
             else:
                 target_symbols = SCHEDULE_SYMBOLS
 
+            already_done: List[str] = []
+            last = self.radar.get_last_scan() or {}
+            if resume:
+                from app.services import symbol_store as store
+                states = {s.get("symbol"): s for s in (last.get("symbol_states") or []) if s.get("symbol")}
+                for s in target_symbols:
+                    st = states.get(s, {})
+                    if st.get("fetch_status") == "SUCCESS" and store.is_fresh(s, "chain", 900):
+                        already_done.append(s)
+
+            work_symbols = [s for s in target_symbols if s not in already_done]
+            if not work_symbols:
+                work_symbols = list(target_symbols)
+                already_done = []
+
             job = mgr.create(
                 kind="radar",
                 total=len(target_symbols),
-                label=f"option flow radar ({scope} - {source})",
+                label=f"option flow radar ({scope} - {source}{' resume' if already_done else ''})",
                 meta={
                     "scope": scope,
                     "min_lis": min_lis,
@@ -255,10 +288,18 @@ class RadarScheduler:
                     "strike_count": strike_count,
                     "source": source,
                     "heartbeat_at": time.time(),
-                    "phase": "quotes",
+                    "phase": "chains" if already_done else "quotes",
+                    "resumed": bool(already_done),
+                    "already_completed": len(already_done),
                 },
-                pending_symbols=list(target_symbols),
+                pending_symbols=list(work_symbols),
             )
+            if already_done:
+                prev_results = list(last.get("flow") or last.get("all_hits") or last.get("flagged") or [])
+                if prev_results:
+                    mgr.set_results(job.id, prev_results)
+                mgr.update(job.id, completed=len(already_done))
+
             mgr.mark_running(job.id)
             on_progress = self._make_progress(job.id)
 
@@ -266,11 +307,14 @@ class RadarScheduler:
                 try:
                     result = await asyncio.to_thread(
                         self.radar.scan_all,
-                        target_symbols,
+                        work_symbols,
                         min_lis,
                         option_type,
                         strike_count,
                         on_progress,
+                        resume=resume,
+                        seeded_count=len(already_done),
+                        total_override=len(target_symbols),
                     )
                     self._finish_job(job.id, result)
                     if result.get("success"):

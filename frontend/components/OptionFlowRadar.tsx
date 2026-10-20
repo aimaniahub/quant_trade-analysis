@@ -562,21 +562,101 @@ export default function OptionFlowRadar() {
         });
     }, []);
 
+    const resumeActiveScan = useCallback((jid: string) => {
+        if (!jid) return;
+        stopPoll();
+        setScanLoading(true);
+        const runId = ++scanRun.current;
+        const resumeT0 = Date.now();
+        let fails = 0;
+        const resumeTick = async () => {
+            if (runId !== scanRun.current) return;
+            try {
+                const snap: any = await api.radar.getScanJob(jid);
+                if (runId !== scanRun.current) return;
+                fails = 0;
+                commit(snap);
+                const comp = snap.completed != null ? snap.completed : (snap.scanned || 0);
+                const tot = snap.total || 187;
+                const elapsedSec = Math.max(1, Math.round((Date.now() - resumeT0) / 1000));
+                const speed = comp > 0 ? comp / elapsedSec : 0;
+                const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
+                const pctVal = snap.completion_pct != null ? snap.completion_pct : Math.round((comp / Math.max(tot, 1)) * 100);
+
+                setActiveScanJob({
+                    id: jid,
+                    status: snap.status,
+                    completed: comp,
+                    total: tot,
+                    pct: pctVal,
+                    currentSymbol: snap.current_symbol || (snap.meta?.log?.length ? snap.meta.log[snap.meta.log.length - 1]?.sym : null),
+                    phase: snap.meta?.phase || snap.phase || 'scanning',
+                    lastStatus: snap.meta?.last_status,
+                    lastMs: snap.meta?.last_ms,
+                    startedAt: resumeT0,
+                    elapsedSec,
+                    speedSymPerSec: Math.round(speed * 10) / 10,
+                    etaSeconds: eta,
+                    tradeableCount: Array.isArray(snap.tradeable) ? snap.tradeable.length : (Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'TRADEABLE').length : 0),
+                    watchCount: Array.isArray(snap.watch) ? snap.watch.length : (Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'WATCH').length : 0),
+                });
+
+                const done =
+                    ['completed', 'failed', 'cancelled', 'interrupted'].includes(snap?.status) ||
+                    snap?.scan_running === false;
+                if (done) {
+                    stopPoll();
+                    setScanLoading(false);
+                    setTimeout(() => setActiveScanJob(null), 2500);
+                    if (typeof window !== 'undefined') {
+                        sessionStorage.removeItem('optionflow_radar_active_job');
+                    }
+                    if (snap?.status === 'failed' || (snap?.completed > 0 && snap?.ok_chain === 0)) {
+                        const isAuthErr = (snap?.errors || []).some((e: any) => typeof e === 'string' && (e.includes('token') || e.includes('fyers_code=-15') || e.includes('AUTH_EXPIRED') || e.includes('Not authenticated')));
+                        if (isAuthErr) {
+                            setScanError('Fyers access token expired or invalid (FYERS OFF). Click 🔑 LOGIN to authenticate.');
+                        } else if (snap?.error_message || snap?.error) {
+                            setScanError(snap.error_message || snap.error);
+                        }
+                    }
+                }
+            } catch (err: any) {
+                fails += 1;
+                if (fails >= 4) {
+                    stopPoll();
+                    setScanLoading(false);
+                    setActiveScanJob(null);
+                    if (typeof window !== 'undefined') {
+                        sessionStorage.removeItem('optionflow_radar_active_job');
+                    }
+                }
+            }
+        };
+        resumeTick();
+        pollRef.current = setInterval(resumeTick, 1500);
+    }, [commit]);
+
     const loadLast = useCallback(async () => {
         try {
             const last: any = await api.radar.getLastScan();
             if (last && (last.has_data !== false || (last.tradeable && last.tradeable.length > 0) || (last.flagged && last.flagged.length > 0))) {
                 commit(last);
                 setScanError(null);
-                if (!last.scan_running && !last.active_job_id) {
+                if (!last.scan_running && !last.active_job_id && !pollRef.current) {
                     setScanLoading(false);
                     setActiveScanJob(null);
+                } else if (last.active_job_id && !pollRef.current && typeof window !== 'undefined') {
+                    sessionStorage.setItem('optionflow_radar_active_job', last.active_job_id);
+                    resumeActiveScan(last.active_job_id);
                 }
             } else if (last) {
                 setBoard((prev: any) => (prev ? { ...prev, market_hours: last.market_hours, data_mode: last.data_mode, next_open: last.next_open, scan_running: Boolean(last.scan_running) } : last));
-                if (!last.scan_running && !last.active_job_id) {
+                if (!last.scan_running && !last.active_job_id && !pollRef.current) {
                     setScanLoading(false);
                     setActiveScanJob(null);
+                } else if (last.active_job_id && !pollRef.current && typeof window !== 'undefined') {
+                    sessionStorage.setItem('optionflow_radar_active_job', last.active_job_id);
+                    resumeActiveScan(last.active_job_id);
                 }
             }
         } catch (e: any) {
@@ -584,9 +664,9 @@ export default function OptionFlowRadar() {
                 if (!prev) setScanError(e?.message || 'Board load failed');
                 return prev ? { ...prev, scan_running: false } : prev;
             });
-            setScanLoading(false);
+            if (!pollRef.current) setScanLoading(false);
         }
-    }, [commit]);
+    }, [commit, resumeActiveScan]);
 
     const loadTape = useCallback(async () => {
         try {
@@ -711,27 +791,34 @@ export default function OptionFlowRadar() {
         await loadLast();
     }, [loadLast]);
 
-    const runScan = useCallback(async () => {
+    const runScan = useCallback(async (opts?: { resume?: boolean }) => {
         const runId = ++scanRun.current;
         const t0 = Date.now();
         setScanLoading(true);
         setScanError(null);
+        stopPoll();
+        const isResume = Boolean(opts?.resume);
+        const startComp = isResume && (board?.attempted || board?.scanned || 0) > 0 ? (board.attempted || board.scanned) : 0;
+        const startTot = board?.total || 187;
+        const startPct = isResume && startComp > 0 ? Math.round((startComp / startTot) * 100) : 0;
+
         setActiveScanJob({
             id: null,
             status: 'starting',
-            completed: 0,
-            total: 187,
-            pct: 0,
-            phase: 'quotes',
+            completed: startComp,
+            total: startTot,
+            pct: startPct,
+            phase: isResume ? 'chains' : 'quotes',
             startedAt: t0,
             elapsedSec: 0,
         });
         try {
-            const started: any = await api.radar.startScan(0, undefined, 14, 'full');
+            const started: any = await api.radar.startScan(0, undefined, 14, 'full', isResume);
             const jid = started?.job_id;
             if (!jid) {
                 if (started?.error) {
-                    setScanError(started.error === 'Not authenticated' ? 'Fyers authentication required to scan live chains. Click 🔑 Login above.' : started.error);
+                    const isAuth = started.error.includes('token') || started.error.includes('Not authenticated') || started.error.includes('Login') || started.auth_required;
+                    setScanError(isAuth ? 'Fyers authentication required: Session token is expired or not logged in (FYERS OFF). Click 🔑 LOGIN above to reconnect.' : started.error);
                 }
                 setScanLoading(false);
                 setActiveScanJob(null);
@@ -755,28 +842,29 @@ export default function OptionFlowRadar() {
                     consecutiveFailures = 0;
                     commit(snap);
 
-                    const comp = snap.completed || 0;
+                    const comp = snap.completed != null ? snap.completed : (snap.scanned || 0);
                     const tot = snap.total || 187;
                     const elapsedSec = Math.max(1, Math.round((Date.now() - t0) / 1000));
                     const speed = comp > 0 ? comp / elapsedSec : 0;
                     const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
+                    const pctVal = snap.completion_pct != null ? snap.completion_pct : Math.round((comp / Math.max(tot, 1)) * 100);
 
                     setActiveScanJob({
                         id: jid,
                         status: snap.status,
                         completed: comp,
                         total: tot,
-                        pct: snap.completion_pct ?? Math.round((comp / Math.max(tot, 1)) * 100),
+                        pct: pctVal,
                         currentSymbol: snap.current_symbol || (snap.meta?.log?.length ? snap.meta.log[snap.meta.log.length - 1]?.sym : null),
-                        phase: snap.meta?.phase || 'scanning',
+                        phase: snap.meta?.phase || snap.phase || 'scanning',
                         lastStatus: snap.meta?.last_status,
                         lastMs: snap.meta?.last_ms,
                         startedAt: t0,
                         elapsedSec,
                         speedSymPerSec: Math.round(speed * 10) / 10,
                         etaSeconds: eta,
-                        tradeableCount: Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'TRADEABLE').length : 0,
-                        watchCount: Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'WATCH').length : 0,
+                        tradeableCount: Array.isArray(snap.tradeable) ? snap.tradeable.length : (Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'TRADEABLE').length : 0),
+                        watchCount: Array.isArray(snap.watch) ? snap.watch.length : (Array.isArray(snap.results) ? snap.results.filter((r: any) => r.grade === 'WATCH').length : 0),
                     });
 
                     const done =
@@ -789,28 +877,18 @@ export default function OptionFlowRadar() {
                         if (typeof window !== 'undefined') {
                             sessionStorage.removeItem('optionflow_radar_active_job');
                         }
-                        if (snap.status === 'failed') setScanError(snap.error_message || 'Harvest failed');
+                        if (snap.status === 'failed' || (snap.completed > 0 && snap.ok_chain === 0)) {
+                            const isAuthErr = (snap.errors || []).some((e: any) => typeof e === 'string' && (e.includes('token') || e.includes('fyers_code=-15') || e.includes('AUTH_EXPIRED') || e.includes('Not authenticated')));
+                            if (isAuthErr) {
+                                setScanError('Fyers access token expired or invalid (FYERS OFF). Click 🔑 LOGIN above to authenticate.');
+                            } else if (snap.error_message || snap.error) {
+                                setScanError(snap.error_message || snap.error);
+                            }
+                        }
                         await loadLast();
                     }
                 } catch (e: any) {
                     consecutiveFailures += 1;
-                    try {
-                        const fallbackLast: any = await api.radar.getLastScan();
-                        if (fallbackLast && (fallbackLast.tradeable?.length || fallbackLast.flagged?.length)) {
-                            commit(fallbackLast);
-                            if (fallbackLast.scan_running === false) {
-                                stopPoll();
-                                setScanLoading(false);
-                                setActiveScanJob(null);
-                                if (typeof window !== 'undefined') {
-                                    sessionStorage.removeItem('optionflow_radar_active_job');
-                                }
-                                return;
-                            }
-                        }
-                    } catch {
-                        /* ignore */
-                    }
                     if (consecutiveFailures >= 4) {
                         stopPoll();
                         setScanLoading(false);
@@ -823,13 +901,13 @@ export default function OptionFlowRadar() {
                 }
             };
             await tick();
-            pollRef.current = setInterval(tick, 1200);
+            pollRef.current = setInterval(tick, 1500);
         } catch (e: any) {
             setScanLoading(false);
             setActiveScanJob(null);
             setScanError(e?.message || 'Could not start harvest');
         }
-    }, [commit, loadLast]);
+    }, [commit, loadLast, board]);
 
     useEffect(() => {
         loadLast();
@@ -838,61 +916,8 @@ export default function OptionFlowRadar() {
         // Resume active background scan if user refreshed page while scanning
         if (typeof window !== 'undefined') {
             const pendingJid = sessionStorage.getItem('optionflow_radar_active_job');
-            if (pendingJid) {
-                setScanLoading(true);
-                const runId = ++scanRun.current;
-                const resumeT0 = Date.now();
-                let fails = 0;
-                const resumeTick = async () => {
-                    if (runId !== scanRun.current) return;
-                    try {
-                        const snap: any = await api.radar.getScanJob(pendingJid);
-                        if (runId !== scanRun.current) return;
-                        fails = 0;
-                        commit(snap);
-                        const comp = snap.completed || 0;
-                        const tot = snap.total || 35;
-                        const elapsedSec = Math.max(1, Math.round((Date.now() - resumeT0) / 1000));
-                        const speed = comp > 0 ? comp / elapsedSec : 0;
-                        const eta = speed > 0 ? Math.max(0, Math.round((tot - comp) / speed)) : 0;
-
-                        setActiveScanJob({
-                            id: pendingJid,
-                            status: snap.status,
-                            completed: comp,
-                            total: tot,
-                            pct: snap.completion_pct ?? Math.round((comp / Math.max(tot, 1)) * 100),
-                            currentSymbol: snap.current_symbol,
-                            phase: snap.meta?.phase || 'scanning',
-                            lastStatus: snap.meta?.last_status,
-                            lastMs: snap.meta?.last_ms,
-                            startedAt: resumeT0,
-                            elapsedSec,
-                            speedSymPerSec: Math.round(speed * 10) / 10,
-                            etaSeconds: eta,
-                        });
-
-                        const done =
-                            ['completed', 'failed', 'cancelled', 'interrupted'].includes(snap?.status) ||
-                            snap?.scan_running === false;
-                        if (done) {
-                            stopPoll();
-                            setScanLoading(false);
-                            setTimeout(() => setActiveScanJob(null), 2500);
-                            sessionStorage.removeItem('optionflow_radar_active_job');
-                        }
-                    } catch {
-                        fails += 1;
-                        if (fails >= 3) {
-                            stopPoll();
-                            setScanLoading(false);
-                            setActiveScanJob(null);
-                            sessionStorage.removeItem('optionflow_radar_active_job');
-                        }
-                    }
-                };
-                resumeTick();
-                pollRef.current = setInterval(resumeTick, 1200);
+            if (pendingJid && !pollRef.current) {
+                resumeActiveScan(pendingJid);
             }
         }
 
@@ -917,7 +942,7 @@ export default function OptionFlowRadar() {
             stopPoll();
             stopAiPoll();
         };
-    }, [loadLast, loadTape]);
+    }, [loadLast, loadTape, resumeActiveScan]);
 
     useEffect(() => {
         if (!selected) return;
@@ -1014,13 +1039,15 @@ export default function OptionFlowRadar() {
     }, [selected, screened, bullish, bearish, boardRows]);
 
     const harvest = board?.harvest || {};
-    const attempted = board?.attempted || board?.scanned || harvest.scanned || 0;
-    const total = board?.universe_requested || board?.total || harvest.total || 0;
-    const pct = board?.completion_pct ?? (total ? Math.round((attempted / total) * 1000) / 10 : 0);
+    const attempted = activeScanJob?.completed ?? (board?.attempted || board?.scanned || harvest.scanned || 0);
+    const total = activeScanJob?.total ?? (board?.universe_requested || board?.total || harvest.total || 187);
+    const pct = activeScanJob?.pct ?? (board?.completion_pct != null ? board.completion_pct : (total ? Math.round((attempted / total) * 1000) / 10 : 0));
     const running = Boolean(
         scanLoading ||
+        (activeScanJob && (activeScanJob.status === 'running' || activeScanJob.status === 'starting')) ||
         (board?.scan_running && activeScanJob && activeScanJob.status === 'running')
     );
+    const canResume = !running && attempted > 0 && attempted < (total || 187);
     const marketHours = Boolean(board?.market_hours);
     const dataMode: string = board?.data_mode || (marketHours ? 'live' : 'last_close');
     const hasAnyBoardData = Boolean(
@@ -1126,8 +1153,19 @@ export default function OptionFlowRadar() {
                         <span>⚡</span>
                         <span>QUANT</span>
                     </button>
+                    {canResume && (
+                        <button
+                            onClick={() => runScan({ resume: true })}
+                            disabled={running}
+                            className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full border border-emerald-400/80 bg-emerald-500/20 hover:bg-emerald-500/30 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-emerald-300 hover:text-white transition-all shadow-[0_0_12px_rgba(16,185,129,0.25)] flex items-center gap-1 cursor-pointer shrink-0"
+                            title={`Resume scan from symbol ${attempted + 1} (${attempted}/${total} completed)`}
+                        >
+                            <span>▶</span>
+                            <span>Resume ({attempted}/{total})</span>
+                        </button>
+                    )}
                     <button
-                        onClick={() => runScan()}
+                        onClick={() => runScan({ resume: false })}
                         disabled={running}
                         className="px-3 sm:px-4 py-1 sm:py-1.5 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(124,58,237,0.3)] shrink-0 flex items-center gap-1.5 cursor-pointer"
                     >
@@ -1139,7 +1177,7 @@ export default function OptionFlowRadar() {
                         ) : (
                             <>
                                 <span>⚡</span>
-                                <span>Scan Universe (F&O)</span>
+                                <span>{canResume ? 'Restart Scan' : 'Scan Universe (F&O)'}</span>
                             </>
                         )}
                     </button>
@@ -1518,6 +1556,25 @@ export default function OptionFlowRadar() {
                                               ? 'Last harvest is not pinned yet. Scan once after auth to freeze last close.'
                                               : 'Waiting for the first harvest of the session.'}
                                     </div>
+                                    {!hasAnyBoardData && (
+                                        <div className="mt-3 flex items-center justify-center gap-2">
+                                            <button
+                                                onClick={async () => {
+                                                    setScanLoading(true);
+                                                    try {
+                                                        const res: any = await api.radar.loadSample();
+                                                        if (res?.board) commit(res.board);
+                                                    } finally {
+                                                        setScanLoading(false);
+                                                    }
+                                                }}
+                                                className="px-3 py-1.5 rounded-full bg-violet-600/30 hover:bg-violet-600/50 border border-violet-400 text-[10px] font-black uppercase tracking-wider text-violet-200 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 shadow"
+                                            >
+                                                <span>⚡</span>
+                                                <span>Load Sample F&O Setups</span>
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         ) : (
