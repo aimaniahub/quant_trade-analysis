@@ -396,6 +396,23 @@ const DEFAULT_FALLBACK_STOCKS: ConstituentStockItem[] = [
     return list;
   }, [data?.constituents_report, data?.heavyweights, constituentTab, selectedSector, searchStock]);
 
+  const cRep = data?.constituents_report;
+
+  // React Hook: Must be called unconditionally before any early returns
+  const sectorList = useMemo(() => {
+    const rawSectors = (cRep?.sectors && cRep.sectors.length > 0 ? cRep.sectors : (cRep as any)?.sector_breakdown) || [];
+    if (rawSectors.length > 0) return rawSectors;
+    const map = new Map<string, { sector: string; weight: number; net_point_contribution: number }>();
+    for (const s of filteredStocks) {
+      const sec = s.sector || "Other";
+      const cur = map.get(sec) || { sector: sec, weight: 0, net_point_contribution: 0 };
+      cur.weight = Math.round((cur.weight + (s.weight || 0)) * 10) / 10;
+      cur.net_point_contribution = Math.round((cur.net_point_contribution + (s.point_impact || 0)) * 10) / 10;
+      map.set(sec, cur);
+    }
+    return Array.from(map.values()).sort((a, b) => b.weight - a.weight);
+  }, [cRep?.sectors, filteredStocks]);
+
   if (!mounted) {
     return (
       <div className="w-full min-h-[300px] flex items-center justify-center bg-[#07090d] border border-violet-900/50 rounded-xl p-8" suppressHydrationWarning>
@@ -484,7 +501,6 @@ const DEFAULT_FALLBACK_STOCKS: ConstituentStockItem[] = [
   const regimeBadge = qg.gamma_regime_badge || (netGexCr >= 0 ? "LONG Γ (STABLE)" : "SHORT Γ (VOLATILITY)");
   const regimeDesc = qg.gamma_regime_desc || (netGexCr >= 0 ? "Dealers dampening volatility via mean reversion" : "Dealers chasing breakouts");
 
-  const cRep = data?.constituents_report;
   const netPts = cRep?.net_point_contribution ?? (cRep as any)?.net_transmitted_thrust_pts ?? data?.net_heavyweight_points ?? 0;
   const advCount = cRep?.advances ?? (cRep as any)?.market_breadth?.advances ?? 26;
   const decCount = cRep?.declines ?? (cRep as any)?.market_breadth?.declines ?? 22;
@@ -493,20 +509,6 @@ const DEFAULT_FALLBACK_STOCKS: ConstituentStockItem[] = [
   const repSentiment = cRep?.sentiment ? String(cRep.sentiment).replace(/_/g, " ") : ((cRep as any)?.market_breadth?.breadth_regime ? String((cRep as any).market_breadth.breadth_regime).replace(/_/g, " ") : "SELECTIVE CHOP");
   const topDrivers = (cRep?.top_positive_drivers && cRep.top_positive_drivers.length > 0 ? cRep.top_positive_drivers : (cRep as any)?.top_drivers) || filteredStocks.filter((s) => (s.point_impact || 0) > 0).slice(0, 3);
   const topDrags = (cRep?.top_negative_drags && cRep.top_negative_drags.length > 0 ? cRep.top_negative_drags : (cRep as any)?.top_drags) || filteredStocks.filter((s) => (s.point_impact || 0) < 0).slice(0, 3);
-
-  const sectorList = useMemo(() => {
-    const rawSectors = (cRep?.sectors && cRep.sectors.length > 0 ? cRep.sectors : (cRep as any)?.sector_breakdown) || [];
-    if (rawSectors.length > 0) return rawSectors;
-    const map = new Map<string, { sector: string; weight: number; net_point_contribution: number }>();
-    for (const s of filteredStocks) {
-      const sec = s.sector || "Other";
-      const cur = map.get(sec) || { sector: sec, weight: 0, net_point_contribution: 0 };
-      cur.weight = Math.round((cur.weight + (s.weight || 0)) * 10) / 10;
-      cur.net_point_contribution = Math.round((cur.net_point_contribution + (s.point_impact || 0)) * 10) / 10;
-      map.set(sec, cur);
-    }
-    return Array.from(map.values()).sort((a, b) => b.weight - a.weight);
-  }, [cRep?.sectors, filteredStocks]);
 
   return (
     <div className="w-full flex flex-col bg-[#07090d] text-zinc-100 rounded-xl border border-violet-800/60 shadow-2xl overflow-hidden font-sans space-y-4 p-3 sm:p-4">
