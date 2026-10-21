@@ -275,7 +275,7 @@ class NiftyQuantService:
             analyzed_strikes, spot_price, atm_strike, time_to_expiry_days, quant_greeks, constituents_report, trap_alerts, call_wall, put_wall
         )
         best_trade = strategies[0] if strategies else self._select_best_trade(
-            analyzed_strikes, spot_price, atm_strike, time_to_expiry_days, effective_pts, trap_alerts
+            analyzed_strikes, spot_price, atm_strike, time_to_expiry_days, effective_pts, trap_alerts, constituents_report=constituents_report
         )
 
         return {
@@ -1410,417 +1410,249 @@ class NiftyQuantService:
         put_wall: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         """
-        Algorithmic, rule-based quantitative strike selector evaluating:
-        1. Dealer Gamma (GEX) Regime: Long Gamma (Mean-Reversion) vs Negative Gamma (Expansion)
-        2. 2 DTE Expiry Risk: Enforces defined-risk spreads or ITM delta (>= 0.55), disables naked OTM
-        3. F&O Point Transmission Alignment: Never recommends PE on positive thrust or CE on negative thrust
-        4. Institutional Traps & OI Walls: Bear Call Spreads at Call Traps, Bull Put Spreads at Put Floors
+        Directional Quantitative Strike Selection Engine:
+        Strict Constraints:
+        1. Long Options Only: ONLY recommends buying options (Long CE or Long PE).
+           Never recommends credit spreads, short selling, or theta harvesting.
+        2. Momentum Over Range: Treats 40-50 point index momentum thrusts as valid directional trades.
+        3. F&O Constituent Point Transmission Alignment:
+           Net thrust > 0 -> Strictly LONG CE.
+           Net thrust < 0 -> Strictly LONG PE.
+        4. Delta Sweet Spot (Delta 0.55 - 0.65, Slightly ITM):
+           Selects 1 strike ITM (Spot - 50 for CE, Spot + 50 for PE) with intrinsic value
+           to shield against 1-2 DTE theta decay.
+        5. OI Walls and Call/Put Traps are used EXCLUSIVELY as Take-Profit targets (Target 2),
+           not as reasons to avoid the trade.
         """
         strategies = []
         if not analyzed_strikes:
             return strategies
 
-        net_gex = quant_greeks.get("total_net_gex_cr", 0.0) or quant_greeks.get("net_gex_crores", 0.0)
-        flip_strike = quant_greeks.get("gamma_flip_strike", atm_strike)
-        skew_25d = quant_greeks.get("skew_25d_pct", 0.0)
-        net_thrust = constituents_report.get("net_point_contribution", 0.0) or constituents_report.get("net_transmitted_thrust_pts", 0.0)
-
-        is_long_gamma = net_gex >= 0
-        is_short_dte = days_to_expiry <= 2.5
-        is_flip_zone = abs(spot_price - flip_strike) / max(spot_price, 1.0) <= 0.003
+        net_thrust = (
+            constituents_report.get("net_point_contribution", 0.0)
+            or constituents_report.get("net_transmitted_thrust_pts", 0.0)
+        )
+        is_bullish = net_thrust >= 0
+        opt_type = "CE" if is_bullish else "PE"
+        target_type = "call" if is_bullish else "put"
+        bias_label = "BULLISH" if is_bullish else "BEARISH"
 
         cw_strike = float(call_wall.get("strike") or (atm_strike + 150))
         pw_strike = float(put_wall.get("strike") or (atm_strike - 150))
-
-        # Identify Call Trap & Put Trap strikes
-        call_traps = [t for t in traps if t.get("type") == "CALL_WRITER_TRAP"]
-        put_traps = [t for t in traps if t.get("type") in ("PUT_SUPPORT_LOCK", "PUT_WRITER_TRAP")]
-        has_call_trap = len(call_traps) > 0
-        has_put_trap = len(put_traps) > 0
 
         # Helper to find strike row
         def get_row(target_k: float) -> Optional[Dict[str, Any]]:
             return min(analyzed_strikes, key=lambda r: abs(r["strike"] - target_k), default=None)
 
-        # ═════════════════════════════════════════════════════════════════════
-        # PLAYBOOK 1: REGIME-GOVERNED PRIMARY QUANT PLAYBOOK
-        # ═════════════════════════════════════════════════════════════════════
-        if is_long_gamma:
-            # ─────────────────────────────────────────────────────────────────
-            # LONG GAMMA REGIME (+GEX): Mean-Reversion / Premium Selling
-            # Strict Rule: NEVER buy naked ATM/OTM options!
-            # ─────────────────────────────────────────────────────────────────
-            if has_call_trap:
-                # SCENARIO 1A: Call Writer Trap -> Bear Call Credit Spread
-                short_k = cw_strike if cw_strike > spot_price else (atm_strike + 100)
-                long_k = short_k + 100
-
-                short_row = get_row(short_k)
-                long_row = get_row(long_k)
-                short_ltp = short_row["call"]["ltp"] if short_row else 42.0
-                long_ltp = long_row["call"]["ltp"] if long_row else 16.0
-                net_credit = round(max(short_ltp - long_ltp, 4.0), 1)
-                max_risk = round(100.0 - net_credit, 1)
-                rr = round(net_credit / max(max_risk, 1.0), 2)
-                sl = round(net_credit * 1.5, 1)
-                t1 = round(net_credit * 0.40, 1)
-                t2 = round(net_credit * 0.15, 1)
-
-                strategies.append({
-                    "id": "regime_credit_spread",
-                    "name": f"Bear Call Credit Spread (Sell {int(short_k)} CE / Buy {int(long_k)} CE)",
-                    "tag": "THETA HARVEST",
-                    "type": "SPREAD",
-                    "option_type": "BEAR_CALL_SPREAD",
-                    "bias": "RANGE_BOUND_BEARISH",
-                    "strike": short_k,
-                    "entry_ltp": net_credit,
-                    "net_credit": net_credit,
-                    "max_risk": max_risk,
-                    "stop_loss": sl,
-                    "target_1": t1,
-                    "target_2": t2,
-                    "risk_reward": f"1:{rr}",
-                    "conviction_score": 89.5,
-                    "greeks": {
-                        "delta": round((short_row["call"]["greeks"]["delta"] if short_row else -0.25) - (long_row["call"]["greeks"]["delta"] if long_row else -0.12), 3),
-                        "gamma": -0.0002,
-                        "theta": round(abs((short_row["call"]["greeks"]["theta"] if short_row else 12.0) - (long_row["call"]["greeks"]["theta"] if long_row else 6.0)), 2),
-                        "vega": -1.2,
-                        "vanna": 0.002,
-                        "charm": 0.001,
-                    },
-                    "legs": [
-                        {"action": "SELL", "strike": short_k, "type": "CE", "ltp": short_ltp, "oi": short_row["call"]["oi"] if short_row else 0, "role": "CREDIT_GENERATOR"},
-                        {"action": "BUY", "strike": long_k, "type": "CE", "ltp": long_ltp, "oi": long_row["call"]["oi"] if long_row else 0, "role": "TAIL_RISK_HEDGE"},
-                    ],
-                    "rationale": (
-                        f"Long Gamma (+₹{net_gex:.0f}Cr) suppresses volatility expansion. Call Writer Trap at {int(short_k)} CE "
-                        f"establishes a strong institutional ceiling. Selling the {int(short_k)} CE and buying {int(long_k)} CE "
-                        f"captures ₹{net_credit:.1f} net decay with defined risk, immune to naked theta burn with {days_to_expiry:.1f} DTE."
-                    ),
-                })
-            elif has_put_trap or net_thrust > 0:
-                # SCENARIO 1B: Put Floor Secured / Dip Absorption -> Bull Put Credit Spread
-                short_k = pw_strike if pw_strike < spot_price else (atm_strike - 100)
-                long_k = short_k - 100
-
-                short_row = get_row(short_k)
-                long_row = get_row(long_k)
-                short_ltp = short_row["put"]["ltp"] if short_row else 38.0
-                long_ltp = long_row["put"]["ltp"] if long_row else 14.0
-                net_credit = round(max(short_ltp - long_ltp, 4.0), 1)
-                max_risk = round(100.0 - net_credit, 1)
-                rr = round(net_credit / max(max_risk, 1.0), 2)
-                sl = round(net_credit * 1.5, 1)
-                t1 = round(net_credit * 0.40, 1)
-                t2 = round(net_credit * 0.15, 1)
-
-                strategies.append({
-                    "id": "regime_credit_spread",
-                    "name": f"Bull Put Credit Spread (Sell {int(short_k)} PE / Buy {int(long_k)} PE)",
-                    "tag": "THETA HARVEST",
-                    "type": "SPREAD",
-                    "option_type": "BULL_PUT_SPREAD",
-                    "bias": "RANGE_BOUND_BULLISH",
-                    "strike": short_k,
-                    "entry_ltp": net_credit,
-                    "net_credit": net_credit,
-                    "max_risk": max_risk,
-                    "stop_loss": sl,
-                    "target_1": t1,
-                    "target_2": t2,
-                    "risk_reward": f"1:{rr}",
-                    "conviction_score": 87.5,
-                    "greeks": {
-                        "delta": round(abs((short_row["put"]["greeks"]["delta"] if short_row else 0.22) - (long_row["put"]["greeks"]["delta"] if long_row else 0.10)), 3),
-                        "gamma": -0.0002,
-                        "theta": round(abs((short_row["put"]["greeks"]["theta"] if short_row else 11.0) - (long_row["put"]["greeks"]["theta"] if long_row else 5.0)), 2),
-                        "vega": -1.1,
-                        "vanna": 0.002,
-                        "charm": 0.001,
-                    },
-                    "legs": [
-                        {"action": "SELL", "strike": short_k, "type": "PE", "ltp": short_ltp, "oi": short_row["put"]["oi"] if short_row else 0, "role": "CREDIT_GENERATOR"},
-                        {"action": "BUY", "strike": long_k, "type": "PE", "ltp": long_ltp, "oi": long_row["put"]["oi"] if long_row else 0, "role": "TAIL_RISK_HEDGE"},
-                    ],
-                    "rationale": (
-                        f"Long Gamma (+₹{net_gex:.0f}Cr) locks downside support. Put floor writing at {int(short_k)} PE "
-                        f"absorbs dips. Bull Put Spread harvests ₹{net_credit:.1f} premium decay backed by heavyweight basket "
-                        f"momentum ({net_thrust:+.1f} pts) without directional naked option decay."
-                    ),
-                })
+        # ── 1. Determine Constituent Drivers String ─────────────────────────────
+        if is_bullish:
+            drivers = (
+                constituents_report.get("top_positive_drivers", [])
+                or constituents_report.get("top_drivers", [])
+            )
+            if drivers:
+                lead_str = f"{drivers[0].get('name', 'Heavyweights')} (+{drivers[0].get('point_impact', 0.0):.1f} pts)"
+                if len(drivers) > 1:
+                    lead_str += f" and {drivers[1].get('name', '')} (+{drivers[1].get('point_impact', 0.0):.1f} pts)"
             else:
-                # SCENARIO 1C: Delta-Neutral Wall Pinning / Iron Condor
-                c_short = cw_strike
-                c_long = c_short + 100
-                p_short = pw_strike
-                p_long = p_short - 100
-
-                cs_row, cl_row = get_row(c_short), get_row(c_long)
-                ps_row, pl_row = get_row(p_short), get_row(p_long)
-                c_cred = max((cs_row["call"]["ltp"] if cs_row else 30) - (cl_row["call"]["ltp"] if cl_row else 12), 3.0)
-                p_cred = max((ps_row["put"]["ltp"] if ps_row else 28) - (pl_row["put"]["ltp"] if pl_row else 10), 3.0)
-                tot_credit = round(c_cred + p_cred, 1)
-
-                strategies.append({
-                    "id": "regime_credit_spread",
-                    "name": f"Delta-Neutral Iron Condor ({int(p_short)}P-{int(c_short)}C)",
-                    "tag": "THETA HARVEST",
-                    "type": "CONDOR",
-                    "option_type": "IRON_CONDOR",
-                    "bias": "RANGE_BOUND",
-                    "strike": (c_short + p_short) / 2.0,
-                    "entry_ltp": tot_credit,
-                    "net_credit": tot_credit,
-                    "max_risk": round(100.0 - tot_credit, 1),
-                    "stop_loss": round(tot_credit * 1.45, 1),
-                    "target_1": round(tot_credit * 0.40, 1),
-                    "target_2": round(tot_credit * 0.15, 1),
-                    "risk_reward": "1:1.75",
-                    "conviction_score": 85.0,
-                    "greeks": {"delta": 0.02, "gamma": -0.0004, "theta": 18.5, "vega": -2.4, "vanna": 0.0, "charm": 0.0},
-                    "legs": [
-                        {"action": "SELL", "strike": p_short, "type": "PE", "ltp": ps_row["put"]["ltp"] if ps_row else 28, "oi": ps_row["put"]["oi"] if ps_row else 0},
-                        {"action": "BUY", "strike": p_long, "type": "PE", "ltp": pl_row["put"]["ltp"] if pl_row else 10, "oi": pl_row["put"]["oi"] if pl_row else 0},
-                        {"action": "SELL", "strike": c_short, "type": "CE", "ltp": cs_row["call"]["ltp"] if cs_row else 30, "oi": cs_row["call"]["oi"] if cs_row else 0},
-                        {"action": "BUY", "strike": c_long, "type": "CE", "ltp": cl_row["call"]["ltp"] if cl_row else 12, "oi": cl_row["call"]["oi"] if cl_row else 0},
-                    ],
-                    "rationale": (
-                        f"Dealers Long Gamma (+₹{net_gex:.0f}Cr). Spot is bracketed by Put Floor ₹{int(p_short)} "
-                        f"and Call Wall ₹{int(c_short)}. Mean-reversion expected with ₹{tot_credit:.1f} decay capture."
-                    ),
-                })
+                lead_str = "heavyweight basket momentum"
         else:
-            # ─────────────────────────────────────────────────────────────────
-            # NEGATIVE GAMMA REGIME (-GEX): Volatility Expansion & Momentum
-            # Directional long options valid ONLY when confirmed by Point Transmission!
-            # ─────────────────────────────────────────────────────────────────
-            if net_thrust > 8.0 and not has_call_trap:
-                # Aligned Bullish Expansion -> ITM CE (Delta 0.52 - 0.65)
-                scored = self._evaluate_multi_strike_surface(
-                    analyzed_strikes, spot_price, atm_strike, net_thrust, target_type="call", preferred_delta_range=(0.52, 0.65)
-                )
-                top = scored[0] if scored else None
-                tgt_strike = top["strike"] if top else (atm_strike - 50)
-                leg = top["leg"] if top else get_row(tgt_strike)["call"]
-                ltp = leg["ltp"]
-                d_mag = abs(leg["greeks"]["delta"])
-                sl = round(max(ltp * 0.82, ltp - (d_mag * 35.0)), 1)
-                t1 = round(ltp + (d_mag * 60.0), 1)
-                t2 = round(ltp + (d_mag * 120.0), 1)
-                rr = round((t1 - ltp) / max(ltp - sl, 1.0), 2)
-
-                strategies.append({
-                    "id": "regime_momentum_long",
-                    "name": f"ITM Gamma Acceleration ({int(tgt_strike)} CE)",
-                    "tag": "TREND CAPTURE",
-                    "type": "CE",
-                    "option_type": "CE",
-                    "bias": "BULLISH",
-                    "strike": tgt_strike,
-                    "entry_ltp": ltp,
-                    "stop_loss": sl,
-                    "target_1": t1,
-                    "target_2": t2,
-                    "risk_reward": f"1:{rr}",
-                    "conviction_score": top["composite_score"] if top else 86.0,
-                    "greeks": leg["greeks"],
-                    "state": leg.get("state", "LONG_BUILDUP"),
-                    "legs": [
-                        {"action": "BUY", "strike": tgt_strike, "type": "CE", "ltp": ltp, "oi": leg["oi"], "role": "DIRECTIONAL_EXPANSION"},
-                    ],
-                    "rationale": (
-                        f"Negative Dealer Gamma (₹{net_gex:.0f}Cr) fuels explosive upward dealer hedging. "
-                        f"Constituent transmission confirms bullish alignment (+{net_thrust:.1f} pts). "
-                        f"Recommending ITM {int(tgt_strike)} CE (Delta {d_mag:.3f}) where intrinsic value insulates against "
-                        f"{days_to_expiry:.1f} DTE theta decay."
-                    ),
-                })
-            elif net_thrust < -8.0:
-                # Aligned Bearish Breakdown -> ITM PE (Delta -0.52 to -0.65)
-                scored = self._evaluate_multi_strike_surface(
-                    analyzed_strikes, spot_price, atm_strike, net_thrust, target_type="put", preferred_delta_range=(0.52, 0.65)
-                )
-                top = scored[0] if scored else None
-                tgt_strike = top["strike"] if top else (atm_strike + 50)
-                leg = top["leg"] if top else get_row(tgt_strike)["put"]
-                ltp = leg["ltp"]
-                d_mag = abs(leg["greeks"]["delta"])
-                sl = round(max(ltp * 0.82, ltp - (d_mag * 35.0)), 1)
-                t1 = round(ltp + (d_mag * 60.0), 1)
-                t2 = round(ltp + (d_mag * 120.0), 1)
-                rr = round((t1 - ltp) / max(ltp - sl, 1.0), 2)
-
-                strategies.append({
-                    "id": "regime_momentum_long",
-                    "name": f"ITM Breakdown Momentum ({int(tgt_strike)} PE)",
-                    "tag": "TREND CAPTURE",
-                    "type": "PE",
-                    "option_type": "PE",
-                    "bias": "BEARISH",
-                    "strike": tgt_strike,
-                    "entry_ltp": ltp,
-                    "stop_loss": sl,
-                    "target_1": t1,
-                    "target_2": t2,
-                    "risk_reward": f"1:{rr}",
-                    "conviction_score": top["composite_score"] if top else 86.0,
-                    "greeks": leg["greeks"],
-                    "state": leg.get("state", "SHORT_BUILDUP"),
-                    "legs": [
-                        {"action": "BUY", "strike": tgt_strike, "type": "PE", "ltp": ltp, "oi": leg["oi"], "role": "DIRECTIONAL_EXPANSION"},
-                    ],
-                    "rationale": (
-                        f"Negative Dealer Gamma (₹{net_gex:.0f}Cr) accelerates downward hedging pressure. "
-                        f"Constituent transmission ({net_thrust:.1f} pts) confirms selling pressure across heavyweights. "
-                        f"Recommending ITM {int(tgt_strike)} PE (Delta {d_mag:.3f}) with intrinsic protection against {days_to_expiry:.1f} DTE decay."
-                    ),
-                })
+            drags = (
+                constituents_report.get("top_negative_drags", [])
+                or constituents_report.get("top_drags", [])
+            )
+            if drags:
+                lead_str = f"{drags[0].get('name', 'Heavyweights')} ({drags[0].get('point_impact', 0.0):.1f} pts)"
+                if len(drags) > 1:
+                    lead_str += f" and {drags[1].get('name', '')} ({drags[1].get('point_impact', 0.0):.1f} pts)"
             else:
-                # DIVERGENCE / CROSS-CURRENT: Transmission does not confirm option flow!
-                short_k = cw_strike if net_thrust >= 0 else pw_strike
-                opt_t = "CE" if net_thrust >= 0 else "PE"
-                long_k = short_k + 100 if opt_t == "CE" else short_k - 100
-                strategies.append({
-                    "id": "regime_divergence_hedge",
-                    "name": f"Flow Divergence Defined Spread ({int(short_k)}/{int(long_k)} {opt_t})",
-                    "tag": "CAPITAL PRESERVATION",
-                    "type": "SPREAD",
-                    "option_type": f"{opt_t}_SPREAD",
-                    "bias": "FLOW_DIVERGENCE",
-                    "strike": short_k,
-                    "entry_ltp": 22.0,
-                    "stop_loss": 35.0,
-                    "target_1": 8.0,
-                    "target_2": 2.0,
-                    "risk_reward": "1:1.60",
-                    "conviction_score": 70.0,
-                    "greeks": {"delta": 0.05, "gamma": 0.0, "theta": 8.0, "vega": -0.8, "vanna": 0.0, "charm": 0.0},
-                    "legs": [
-                        {"action": "SELL", "strike": short_k, "type": opt_t, "ltp": 38.0, "oi": 0},
-                        {"action": "BUY", "strike": long_k, "type": opt_t, "ltp": 16.0, "oi": 0},
-                    ],
-                    "rationale": (
-                        f"FLOW DIVERGENCE DETECTED: Constituent basket transmission ({net_thrust:+.1f} pts) conflicts with "
-                        f"negative dealer gamma (₹{net_gex:.0f}Cr). Naked long options strictly disabled to prevent "
-                        f"theta burn. Defined-risk spread recommended until spot breaks {flip_strike}."
-                    ),
-                })
+                lead_str = "heavyweight basket drag"
 
-        # ═════════════════════════════════════════════════════════════════════
-        # PLAYBOOK 2: GAMMA SQUEEZE & FLIP ZONE PLAYBOOK
-        # ═════════════════════════════════════════════════════════════════════
-        if is_flip_zone:
-            # Spot right on Gamma Flip: Extreme non-linear volatility zone
-            straddle_row = get_row(flip_strike)
-            c_ltp = straddle_row["call"]["ltp"] if straddle_row else 85.0
-            p_ltp = straddle_row["put"]["ltp"] if straddle_row else 85.0
-            comb_ltp = round(c_ltp + p_ltp, 1)
+        # ── 2. ITM Candidates Selection (Delta 0.55 - 0.65) ─────────────────────
+        if is_bullish:
+            # In-The-Money Calls: strike <= spot_price
+            itm_candidates = [r for r in analyzed_strikes if r["strike"] <= spot_price]
+            ideal_strike_k = math.floor(spot_price / 50.0) * 50.0
+            if spot_price - ideal_strike_k < 15.0:
+                ideal_strike_k -= 50.0  # Ensure solid ITM intrinsic cushion
+            ceiling_k = cw_strike if cw_strike > spot_price else (atm_strike + 200)
+            exit_spot = ceiling_k - 20.0  # Exit 20 points before trap/wall ceiling
+            dist_to_ceiling = max(exit_spot - spot_price, 75.0)
+            ceiling_desc = f"{int(ceiling_k)} Call Trap / Wall ceiling (exit at {int(exit_spot)})"
+        else:
+            # In-The-Money Puts: strike >= spot_price
+            itm_candidates = [r for r in analyzed_strikes if r["strike"] >= spot_price]
+            ideal_strike_k = math.ceil(spot_price / 50.0) * 50.0
+            if ideal_strike_k - spot_price < 15.0:
+                ideal_strike_k += 50.0  # Ensure solid ITM intrinsic cushion
+            floor_k = pw_strike if pw_strike < spot_price else (atm_strike - 200)
+            exit_spot = floor_k + 20.0  # Exit 20 points before floor
+            dist_to_ceiling = max(spot_price - exit_spot, 75.0)
+            ceiling_desc = f"{int(floor_k)} Put Wall support floor (exit at {int(exit_spot)})"
+
+        if not itm_candidates:
+            itm_candidates = analyzed_strikes
+
+        # Score candidates prioritizing Delta in [0.55, 0.65] (sweet spot center 0.60)
+        scored = []
+        for r in itm_candidates:
+            leg = r[target_type]
+            delta = abs(leg["greeks"].get("delta") or 0.50)
+            in_sweet_spot = 1.0 if 0.55 <= delta <= 0.65 else 0.0
+            delta_dist = abs(delta - 0.60)
+            delta_fit = max(0.0, 1.0 - delta_dist * 3.5)
+            strike_dist = abs(r["strike"] - ideal_strike_k)
+            proximity_score = max(0.0, 25.0 - (strike_dist / 50.0) * 10.0)
+            score = (in_sweet_spot * 40.0) + (delta_fit * 35.0) + proximity_score
+            scored.append({
+                "strike": r["strike"],
+                "delta": delta,
+                "score": score,
+                "row": r,
+                "leg": leg,
+            })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        primary = scored[0]
+        primary_k = primary["strike"]
+        primary_leg = primary["leg"]
+        primary_ltp = primary_leg["ltp"]
+        primary_delta = primary["delta"]
+
+        # Actionable Levels for Primary Strategy
+        # Target 1: Captures a 50-point Nifty move (LTP + Delta * 50)
+        t1 = round(primary_ltp + primary_delta * 50.0, 1)
+        # Target 2: Nearest OI resistance / trap / wall
+        t2 = round(primary_ltp + primary_delta * dist_to_ceiling, 1)
+        # Hard Stop Loss: ~25 pt adverse move or 20% max risk
+        sl = round(max(primary_ltp * 0.80, primary_ltp - primary_delta * 25.0), 1)
+        rr = round((t1 - primary_ltp) / max(primary_ltp - sl, 0.5), 1)
+
+        primary_rationale = (
+            f"Cash transmission is {net_thrust:+.1f} pts led by {lead_str}. "
+            f"Selecting the {primary_delta:.2f} Delta ITM strike ({int(primary_k)} {opt_type}) to capture the 50-point momentum thrust "
+            f"while minimizing {days_to_expiry:.1f} DTE theta drag via intrinsic value cushion. "
+            f"Target 1: ₹{t1} (+50 pt Nifty move). Target 2: ₹{t2} (exit before {ceiling_desc}). Hard Stop Loss: ₹{sl}."
+        )
+
+        # ── PLAYBOOK 1: OPTIMAL ITM DIRECTIONAL SCALP (PRIMARY) ─────────────────
+        strategies.append({
+            "id": "itm_directional_scalp",
+            "name": f"Optimal ITM Scalp (Buy {int(primary_k)} {opt_type})",
+            "tag": "TREND CAPTURE",
+            "type": opt_type,
+            "option_type": opt_type,
+            "bias": bias_label,
+            "strike": primary_k,
+            "entry_ltp": primary_ltp,
+            "stop_loss": sl,
+            "target_1": t1,
+            "target_2": t2,
+            "risk_reward": f"1:{rr}",
+            "conviction_score": 92.5,
+            "greeks": primary_leg["greeks"],
+            "state": primary_leg.get("state", "LONG_BUILDUP"),
+            "legs": [
+                {
+                    "action": "BUY",
+                    "strike": primary_k,
+                    "type": opt_type,
+                    "ltp": primary_ltp,
+                    "oi": primary_leg.get("oi", 0),
+                    "role": "PRIMARY_ITM_SCALP",
+                }
+            ],
+            "rationale": primary_rationale,
+        })
+
+        # ── PLAYBOOK 2: DEEP ITM INTRINSIC SHIELD (DELTA 0.68 - 0.75) ───────────
+        deep_k = (primary_k - 50.0) if is_bullish else (primary_k + 50.0)
+        deep_row = get_row(deep_k)
+        if deep_row:
+            deep_leg = deep_row[target_type]
+            deep_ltp = deep_leg["ltp"]
+            deep_delta = abs(deep_leg["greeks"].get("delta") or 0.70)
+            deep_t1 = round(deep_ltp + deep_delta * 50.0, 1)
+            deep_t2 = round(deep_ltp + deep_delta * dist_to_ceiling, 1)
+            deep_sl = round(max(deep_ltp * 0.82, deep_ltp - deep_delta * 25.0), 1)
+            deep_rr = round((deep_t1 - deep_ltp) / max(deep_ltp - deep_sl, 0.5), 1)
+
             strategies.append({
-                "id": "gamma_flip_volatility",
-                "name": f"Gamma Flip Regime Straddle ({int(flip_strike)})",
-                "tag": "VOLATILITY EXPANSION",
-                "type": "STRADDLE",
-                "option_type": "LONG_STRADDLE",
-                "bias": "VOLATILITY_EXPANSION",
-                "strike": flip_strike,
-                "entry_ltp": comb_ltp,
-                "stop_loss": round(comb_ltp * 0.75, 1),
-                "target_1": round(comb_ltp * 1.35, 1),
-                "target_2": round(comb_ltp * 1.70, 1),
-                "risk_reward": "1:1.85",
-                "conviction_score": 91.0,
-                "greeks": {"delta": 0.02, "gamma": 0.0012, "theta": -28.0, "vega": 14.2, "vanna": 0.0, "charm": 0.0},
+                "id": "deep_itm_theta_shield",
+                "name": f"Deep ITM Intrinsic Shield (Buy {int(deep_k)} {opt_type})",
+                "tag": "THETA INSULATION",
+                "type": opt_type,
+                "option_type": opt_type,
+                "bias": bias_label,
+                "strike": deep_k,
+                "entry_ltp": deep_ltp,
+                "stop_loss": deep_sl,
+                "target_1": deep_t1,
+                "target_2": deep_t2,
+                "risk_reward": f"1:{deep_rr}",
+                "conviction_score": 89.0,
+                "greeks": deep_leg["greeks"],
+                "state": deep_leg.get("state", "LONG_ACCUMULATION"),
                 "legs": [
-                    {"action": "BUY", "strike": flip_strike, "type": "CE", "ltp": c_ltp, "oi": straddle_row["call"]["oi"] if straddle_row else 0},
-                    {"action": "BUY", "strike": flip_strike, "type": "PE", "ltp": p_ltp, "oi": straddle_row["put"]["oi"] if straddle_row else 0},
+                    {
+                        "action": "BUY",
+                        "strike": deep_k,
+                        "type": opt_type,
+                        "ltp": deep_ltp,
+                        "oi": deep_leg.get("oi", 0),
+                        "role": "DEEP_ITM_THETA_SHIELD",
+                    }
                 ],
                 "rationale": (
-                    f"Spot is trading inside the Gamma Flip Pivot Zone ({int(flip_strike)}). "
-                    f"Regime transition produces extreme delta instability. Long Straddle captures non-linear expansion "
-                    f"regardless of breakout direction."
+                    f"Deep ITM {int(deep_k)} {opt_type} (Delta {deep_delta:.2f}) carries >70% intrinsic value, "
+                    f"virtually eliminating {days_to_expiry:.1f} DTE theta decay if Nifty pauses while transmitting "
+                    f"~{int(deep_delta * 50)} points on the 50-point index thrust."
                 ),
             })
-        else:
-            # Wall Squeeze / Breakout: Evaluates Call Wall or Put Wall
-            sq_strike = cw_strike if net_thrust >= 0 else pw_strike
-            sq_type = "CE" if net_thrust >= 0 else "PE"
-            sq_row = get_row(sq_strike)
-            if sq_row:
-                leg = sq_row["call"] if sq_type == "CE" else sq_row["put"]
-                ltp = leg["ltp"]
-                d_mag = abs(leg["greeks"]["delta"])
-                sl = round(ltp * 0.68, 1)
-                t1 = round(ltp + d_mag * 70.0, 1)
-                t2 = round(ltp + d_mag * 135.0, 1)
-                rr = round((t1 - ltp) / max(ltp - sl, 1.0), 2)
-                strategies.append({
-                    "id": "gamma_squeeze",
-                    "name": f"Wall Squeeze & Gamma Breach ({int(sq_strike)} {sq_type})",
-                    "tag": "VOLATILITY EXPANSION",
-                    "type": sq_type,
-                    "option_type": sq_type,
-                    "bias": "BULLISH_EXPANSION" if sq_type == "CE" else "BEARISH_EXPANSION",
-                    "strike": sq_strike,
-                    "entry_ltp": ltp,
-                    "stop_loss": sl,
-                    "target_1": t1,
-                    "target_2": t2,
-                    "risk_reward": f"1:{rr}",
-                    "conviction_score": 87.0 if not is_long_gamma else 74.0,
-                    "greeks": leg["greeks"],
-                    "state": leg.get("state", "GAMMA_EXPLOSION"),
-                    "legs": [
-                        {"action": "BUY", "strike": sq_strike, "type": sq_type, "ltp": ltp, "oi": leg["oi"], "role": "WALL_SQUEEZE_RUNNER"},
-                    ],
-                    "rationale": (
-                        f"Targeting a gamma squeeze at the {int(sq_strike)} {sq_type} wall. "
-                        f"If spot forces writers to cover, dealer negative hedging triggers an explosive acceleration."
-                    ),
-                })
 
-        # ═════════════════════════════════════════════════════════════════════
-        # PLAYBOOK 3: THETA CORRIDOR / IRON CORRIDOR (PINNING PLAY)
-        # ═════════════════════════════════════════════════════════════════════
-        cw_row = get_row(cw_strike)
-        pw_row = get_row(pw_strike)
-        c_prem = cw_row["call"]["ltp"] if cw_row else 25.0
-        p_prem = pw_row["put"]["ltp"] if pw_row else 25.0
-        tot_prem = round(c_prem + p_prem, 1)
-        strategies.append({
-            "id": "iron_corridor",
-            "name": f"Wall Pinning Strangle (Sell {int(pw_strike)} PE / {int(cw_strike)} CE)",
-            "tag": "THETA HARVEST",
-            "type": "STRANGLE",
-            "option_type": "STRANGLE_SELL",
-            "bias": "RANGE_BOUND",
-            "strike": (cw_strike + pw_strike) / 2.0,
-            "entry_ltp": tot_prem,
-            "net_credit": tot_prem,
-            "stop_loss": round(tot_prem * 1.5, 1),
-            "target_1": round(tot_prem * 0.45, 1),
-            "target_2": round(tot_prem * 0.20, 1),
-            "risk_reward": "1:1.80",
-            "conviction_score": 88.0 if is_long_gamma else 62.0,
-            "greeks": {
-                "delta": 0.03,
-                "gamma": -0.0003,
-                "theta": round(abs((cw_row["call"]["greeks"]["theta"] if cw_row else 10) + (pw_row["put"]["greeks"]["theta"] if pw_row else 10)), 1),
-                "vega": -1.8,
-                "vanna": 0.0,
-                "charm": 0.0,
-            },
-            "legs": [
-                {"action": "SELL", "strike": pw_strike, "type": "PE", "ltp": p_prem, "oi": pw_row["put"]["oi"] if pw_row else 0},
-                {"action": "SELL", "strike": cw_strike, "type": "CE", "ltp": c_prem, "oi": cw_row["call"]["oi"] if cw_row else 0},
-            ],
-            "rationale": (
-                f"Market Maker Pinning Corridor: Long Gamma (+₹{net_gex:.0f}Cr) suppresses range. "
-                f"Nifty is structurally pinned between Put Floor ₹{int(pw_strike)} and Call Cap ₹{int(cw_strike)}. "
-                f"Harvests ₹{tot_prem:.1f} total premium decay into expiry."
-            ),
-        })
+        # ── PLAYBOOK 3: WALL BREAKER MOMENTUM THRUST (MOMENTUM EXPANSION) ────────
+        runner_k = atm_strike
+        runner_row = get_row(runner_k)
+        if runner_row:
+            runner_leg = runner_row[target_type]
+            runner_ltp = runner_leg["ltp"]
+            runner_delta = abs(runner_leg["greeks"].get("delta") or 0.52)
+            runner_t1 = round(runner_ltp + runner_delta * 50.0, 1)
+            runner_t2 = round(runner_ltp + runner_delta * max(dist_to_ceiling + 30.0, 90.0), 1)
+            runner_sl = round(max(runner_ltp * 0.75, runner_ltp - runner_delta * 28.0), 1)
+            runner_rr = round((runner_t1 - runner_ltp) / max(runner_ltp - runner_sl, 0.5), 1)
+
+            strategies.append({
+                "id": "wall_runner_momentum",
+                "name": f"Wall Breaker Momentum Thrust (Buy {int(runner_k)} {opt_type})",
+                "tag": "VOLATILITY EXPANSION",
+                "type": opt_type,
+                "option_type": opt_type,
+                "bias": bias_label,
+                "strike": runner_k,
+                "entry_ltp": runner_ltp,
+                "stop_loss": runner_sl,
+                "target_1": runner_t1,
+                "target_2": runner_t2,
+                "risk_reward": f"1:{runner_rr}",
+                "conviction_score": 86.5,
+                "greeks": runner_leg["greeks"],
+                "state": runner_leg.get("state", "GAMMA_EXPLOSION"),
+                "legs": [
+                    {
+                        "action": "BUY",
+                        "strike": runner_k,
+                        "type": opt_type,
+                        "ltp": runner_ltp,
+                        "oi": runner_leg.get("oi", 0),
+                        "role": "WALL_RUNNER_EXPANSION",
+                    }
+                ],
+                "rationale": (
+                    f"Aggressive momentum expansion targeting a direct breakout into {ceiling_desc}. "
+                    f"As spot approaches the ceiling, dealer short-covering fuels rapid gamma expansion."
+                ),
+            })
 
         return strategies
 
@@ -1832,10 +1664,12 @@ class NiftyQuantService:
         days_to_expiry: float,
         heavyweight_points: float,
         traps: List[Dict[str, Any]],
+        constituents_report: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Direct wrapper: selects top strategy from algorithmic strategies matrix.
-        Guarantees zero contradiction between best trade and quant engine.
+        Direct wrapper: selects top directional ITM trade (Delta 0.55 - 0.65)
+        aligned with F&O Constituent Point Transmission.
+        Guarantees 100% adherence to Long Options Only mandate.
         """
         calls = [r for r in analyzed_strikes if r["strike"] >= spot_price]
         puts = [r for r in analyzed_strikes if r["strike"] <= spot_price]
@@ -1849,7 +1683,10 @@ class NiftyQuantService:
             "gamma_flip_strike": atm_strike,
             "skew_25d_pct": 0.0,
         }
-        crep = {"net_point_contribution": heavyweight_points}
+        crep = constituents_report or {
+            "net_point_contribution": heavyweight_points,
+            "net_transmitted_thrust_pts": heavyweight_points,
+        }
 
         strats = self._generate_strategies_matrix(
             analyzed_strikes, spot_price, atm_strike, days_to_expiry, quant_greeks, crep, traps, cw_dict, pw_dict

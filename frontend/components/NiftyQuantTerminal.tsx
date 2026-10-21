@@ -740,8 +740,8 @@ const DEFAULT_FALLBACK_STOCKS: ConstituentStockItem[] = [
           <div className="flex items-center gap-1.5 bg-[#090b12] p-1 rounded-lg border border-zinc-800">
             {strategies?.map((strat, idx) => {
               const sId = strat.id || (strat as any).strategy_type || String(idx);
-              const tag = strat.tag || (strat as any).strategy_type || (idx === 0 ? "TREND CAPTURE" : idx === 1 ? "VOLATILITY EXPANSION" : "THETA HARVEST");
-              const icon = tag.includes("TREND") || tag.includes("DIRECTIONAL") ? "🚀" : tag.includes("VOLATILITY") || tag.includes("GAMMA") ? "⚡" : "🛡️";
+              const tag = strat.tag || (strat as any).strategy_type || (idx === 0 ? "TREND CAPTURE" : idx === 1 ? "THETA INSULATION" : "VOLATILITY EXPANSION");
+              const icon = tag.includes("TREND") || tag.includes("DIRECTIONAL") ? "🚀" : tag.includes("THETA") || tag.includes("INSULATION") ? "🛡️" : "⚡";
               return (
                 <button
                   key={sId}
