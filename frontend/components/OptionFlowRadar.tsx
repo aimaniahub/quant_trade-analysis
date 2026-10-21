@@ -1153,6 +1153,17 @@ export default function OptionFlowRadar() {
                     </div>
 
                     <div className="flex items-center gap-1.5 sm:gap-2">
+                        {/* Manual Update UI Button */}
+                        <button
+                            onClick={async () => {
+                                await loadLast();
+                            }}
+                            className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full border border-violet-400/80 bg-violet-600/30 hover:bg-violet-600/50 text-[10px] font-bold uppercase tracking-wider text-violet-100 hover:text-white transition-all shadow flex items-center gap-1 cursor-pointer select-none"
+                            title="Force refresh & render all currently scanned F&O stocks to the UI immediately"
+                        >
+                            <span className="text-violet-300">↻</span>
+                            <span>Update UI</span>
+                        </button>
                         {/* Quick hard-reset button to immediately unblock UI if stuck */}
                         <button
                             onClick={handleResetScan}
@@ -1349,6 +1360,16 @@ export default function OptionFlowRadar() {
 
                         {/* Controls */}
                         <div className="flex items-center gap-1.5">
+                            <button
+                                onClick={async () => {
+                                    await loadLast();
+                                }}
+                                className="px-2.5 py-1 rounded-lg border border-violet-400 bg-violet-600/40 hover:bg-violet-600 text-white text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 transition-all cursor-pointer shadow"
+                                title="Force render currently scanned F&O stocks to the UI tables now"
+                            >
+                                <span className="text-violet-200">↻</span>
+                                <span>Update UI</span>
+                            </button>
                             <button
                                 onClick={handleCancelScan}
                                 className="px-2.5 py-1 rounded-lg border border-rose-500/50 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 hover:text-white text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 transition-all cursor-pointer shadow-sm"

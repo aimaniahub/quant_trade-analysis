@@ -2008,6 +2008,9 @@ class OptionFlowRadarService:
                 pass_id=pass_id,
                 phase="chains",
             )
+            self._live_all_hits = list(all_hits)
+            if hit or (scanned % 3 == 0) or (scanned == total):
+                self._publish_live_board(total=total, pass_id=pass_id, phase="chains", persist=False)
             _progress(
                 sym,
                 flagged_row=hit if hit else None,

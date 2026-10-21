@@ -336,9 +336,15 @@ async def get_radar_scan_job(job_id: str):
             flagged = list(last.get("tradeable") or last.get("flagged") or [])
         if not watch and last.get("watch"):
             watch = list(last.get("watch") or [])
+        bullish_live = [h for h in live_results if (h or {}).get("chain_bias") == "BULLISH"]
+        bearish_live = [h for h in live_results if (h or {}).get("chain_bias") == "BEARISH"]
+        screen_live = live_results
     else:
         flagged = _pick("tradeable", None) or _pick("flagged", []) or []
         watch = _pick("watch", []) or []
+        bullish_live = [h for h in flagged + watch if (h or {}).get("chain_bias") == "BULLISH"] or _pick("bullish", []) or []
+        bearish_live = [h for h in flagged + watch if (h or {}).get("chain_bias") == "BEARISH"] or _pick("bearish", []) or []
+        screen_live = _pick("screen", []) or (flagged + watch)
 
     alert_box = _pick("alert_box", []) or []
     ideas = [h for h in flagged if (h or {}).get("trade")] or _pick("ideas", []) or []
@@ -372,13 +378,13 @@ async def get_radar_scan_job(job_id: str):
         "total_flagged": len(flagged),
         "flagged": flagged,
         "tradeable": flagged,
-        "bullish": [h for h in flagged + watch if (h or {}).get("chain_bias") == "BULLISH"] or _pick("bullish", []) or [],
-        "bearish": [h for h in flagged + watch if (h or {}).get("chain_bias") == "BEARISH"] or _pick("bearish", []) or [],
+        "bullish": bullish_live,
+        "bearish": bearish_live,
         "top": (flagged or watch)[:8] or _pick("top", []) or [],
         "watch": watch,
         "quiet_count": _pick("quiet_count", 0) or 0,
-        "flow": flagged + watch if live_results else (_pick("flow", []) or []),
-        "screen": flagged + watch if live_results else (_pick("screen", []) or []),
+        "flow": live_results if live_results else (_pick("flow", []) or (flagged + watch)),
+        "screen": screen_live,
         "alert_box": alert_box,
         "ideas": ideas,
         "ideas_confirmed": _pick("ideas_confirmed", []) or [],

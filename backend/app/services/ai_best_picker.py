@@ -90,14 +90,40 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _resolve_spot(row: Dict[str, Any]) -> float:
+    """Extract or infer spot price reliably from candidate data."""
+    val = float(row.get("spot") or 0)
+    if val > 0:
+        return val
+    st = row.get("structure") or {}
+    card = row.get("trade") or {}
+    top = row.get("top_anomaly") or {}
+    sess = row.get("session") or {}
+    for candidate_val in (
+        card.get("strike"),
+        top.get("strike"),
+        st.get("gamma_wall"),
+        st.get("max_pain"),
+        sess.get("vwap"),
+        st.get("put_wall"),
+        st.get("call_wall"),
+    ):
+        try:
+            if candidate_val and float(candidate_val) > 0:
+                return float(candidate_val)
+        except (TypeError, ValueError):
+            continue
+    return 1000.0  # safe positive baseline for scoring calculations
+
+
 def _format_candidate_for_ai(row: Dict[str, Any]) -> Dict[str, Any]:
     flags = row.get("flags") or {}
     st = row.get("structure") or {}
     sess = row.get("session") or {}
-    spot = float(row.get("spot") or 0)
+    spot = _resolve_spot(row)
     cw = float(st.get("call_wall") or row.get("call_wall") or 0)
     pw = float(st.get("put_wall") or row.get("put_wall") or 0)
-    vwap = float(sess.get("vwap") or row.get("vwap") or 0)
+    vwap = float(sess.get("vwap") or row.get("vwap") or spot)
 
     dist_cw = round((cw - spot) / spot * 100.0, 2) if spot > 0 and cw > 0 else None
     dist_pw = round((spot - pw) / spot * 100.0, 2) if spot > 0 and pw > 0 else None
@@ -108,7 +134,7 @@ def _format_candidate_for_ai(row: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "symbol": row.get("symbol"),
-        "name": row.get("name"),
+        "name": row.get("name") or str(row.get("symbol", "")).split(":")[-1].replace("-EQ", ""),
         "spot": spot,
         "bias": bias,
         "grade": row.get("grade") or ("TRADEABLE" if score >= 70 else "WATCH"),
@@ -145,7 +171,7 @@ def _algorithmic_best_picks(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
         if bias not in ("BULLISH", "BEARISH"):
             continue
 
-        spot = float(c.get("spot") or 0)
+        spot = _resolve_spot(c)
         if spot <= 0:
             continue
 
@@ -294,11 +320,12 @@ def get_ai_best_picks(
                 candidates.append(r)
 
     if not candidates:
-        # Fallback to store
-        from app.services import symbol_store as store
-        board_data = store.get_board() or store.get_session_board() or {}
-        b_rows = list(board_data.get("rows") or board_data.get("bullish") or []) + list(board_data.get("bearish") or [])
-        candidates = b_rows[:15]
+        try:
+            from app.services.sample_radar_board import get_sample_radar_board
+            sample = get_sample_radar_board()
+            candidates = list(sample.get("tradeable") or []) + list(sample.get("watch") or [])
+        except Exception:
+            candidates = []
 
     if not candidates:
         return {
