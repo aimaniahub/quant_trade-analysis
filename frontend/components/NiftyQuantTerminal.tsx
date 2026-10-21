@@ -598,7 +598,7 @@ export default function NiftyQuantTerminal({
               {quant_greeks?.skew_25d_pct || 0}%
             </div>
             <div className="text-[9px] font-mono text-zinc-400">
-              {quant_greeks?.skew_bias?.replace(/_/g, " ") || "BALANCED SKEW"}
+              {quant_greeks?.skew_bias ? String(quant_greeks.skew_bias).replace(/_/g, " ") : "BALANCED SKEW"}
             </div>
           </div>
 
@@ -794,8 +794,8 @@ export default function NiftyQuantTerminal({
             >
               <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
                 <span>Net Point Transmission</span>
-                <span className={`font-bold ${constituents_report.net_point_contribution >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                  {constituents_report.sentiment.replace(/_/g, " ")}
+                <span className={`font-bold ${(constituents_report?.net_point_contribution || 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {constituents_report?.sentiment ? String(constituents_report.sentiment).replace(/_/g, " ") : "NEUTRAL"}
                 </span>
               </div>
               <div className="my-1.5 flex items-baseline gap-2">

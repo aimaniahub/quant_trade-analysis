@@ -248,7 +248,7 @@ export default function VATScanner({ onBack }: VATScannerProps) {
                                                 <div>
                                                     <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${opp.signal === 'BUY_CE' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'
                                                         }`}>
-                                                        {opp.signal.replace('_', ' ')}
+                                                        {opp.signal?.replace('_', ' ') || 'OPP'}
                                                     </span>
                                                     <h4 className="text-xl font-black mt-2">
                                                         {opp.undervalued_strike} {opp.signal === 'BUY_CE' ? 'CE' : 'PE'}

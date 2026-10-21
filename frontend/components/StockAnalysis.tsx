@@ -491,7 +491,7 @@ export default function StockAnalysis({ onBack }: StockAnalysisProps) {
             rows = rows.filter(
                 s =>
                     s.symbol?.toUpperCase().includes(q) ||
-                    s.symbol?.replace('NSE:', '').replace('-EQ', '').includes(q),
+                    (s.symbol ? s.symbol.replace('NSE:', '').replace('-EQ', '').includes(q) : false),
             );
         }
         if (filter === 'tradable') rows = rows.filter(s => s.tradable);
@@ -1665,7 +1665,7 @@ function DeepPanel({
                                 key={`${stock.symbol}-c-${i}`}
                                 className="text-[10px] px-2 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 font-mono"
                             >
-                                {c.strike} {c.type.replace('_', ' ')} ×{c.strength}
+                                {c.strike} {c.type?.replace('_', ' ') || 'FLOW'} ×{c.strength}
                             </span>
                         ))}
                     </div>

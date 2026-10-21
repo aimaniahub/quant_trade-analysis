@@ -195,7 +195,7 @@ export default function LiveTradeSignal({ symbol, autoRefresh = true, refreshInt
                                     </div>
                                     <div className="flex gap-2">
                                         <span className="px-2 py-1 text-[10px] font-bold uppercase rounded bg-zinc-800 text-zinc-300">
-                                            {trade.type.replace('_', ' ')}
+                                            {trade.type?.replace('_', ' ') || 'TRADE'}
                                         </span>
                                         <span className={`px-2 py-1 text-[10px] font-bold uppercase rounded ${trade.confidence === 'HIGH' ? 'bg-emerald-500/30 text-emerald-400' : 'bg-amber-500/30 text-amber-400'}`}>
                                             {trade.confidence}

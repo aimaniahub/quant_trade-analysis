@@ -342,7 +342,7 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
                                 </div>
                                 <div>
                                     <h4 className="text-lg font-black text-zinc-900 dark:text-white">{stock.name}</h4>
-                                    <p className="text-xs text-zinc-500">{stock.cap.replace('_', ' ')}</p>
+                                    <p className="text-xs text-zinc-500">{stock.cap?.replace('_', ' ') || '—'}</p>
                                 </div>
                             </div>
                             <div className="text-right">
@@ -365,7 +365,7 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
                             <div className="p-2 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg text-center">
                                 <p className="text-[9px] font-bold text-zinc-500 uppercase">Pressure</p>
                                 <p className={`text-sm font-black ${stock.buying_pressure.is_buying ? 'text-emerald-500' : 'text-zinc-400'}`}>
-                                    {stock.buying_pressure.pattern.replace('_', ' ')}
+                                    {stock.buying_pressure.pattern?.replace('_', ' ') || 'Neutral'}
                                 </p>
                             </div>
                             <div className="p-2 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg text-center">
@@ -491,7 +491,7 @@ export default function HighVolumeScanner({ onBack }: HighVolumeScannerProps) {
                                             : 'bg-amber-500/10 text-amber-500'
                                             }`}
                                     >
-                                        {signal.type.replace(/_/g, ' ')}
+                                        {signal.type?.replace(/_/g, ' ') || 'Signal'}
                                     </span>
                                 ))}
                             </div>

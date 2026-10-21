@@ -1326,7 +1326,7 @@ export default function OptionFlowRadar() {
                     <span>📊 Chain</span>
                     {selected && (
                         <span className="text-[9px] px-1 rounded bg-black/40 font-mono truncate max-w-[55px]">
-                            {selected.split(':').pop()?.replace('-EQ', '')}
+                            {(selected?.split(':').pop() || selected || '').replace('-EQ', '')}
                         </span>
                     )}
                 </button>
@@ -1396,7 +1396,7 @@ export default function OptionFlowRadar() {
                                 <span>Evaluating:</span>
                                 {activeScanJob?.currentSymbol ? (
                                     <span className="px-1.5 py-0.5 rounded bg-violet-600/30 text-violet-200 font-bold border border-violet-400/40 animate-pulse">
-                                        {activeScanJob.currentSymbol.replace('NSE:', '').replace('-EQ', '')}
+                                        {String(activeScanJob.currentSymbol).replace('NSE:', '').replace('-EQ', '')}
                                     </span>
                                 ) : (
                                     <span className="text-zinc-500 italic">Streaming chains…</span>
@@ -1718,7 +1718,7 @@ export default function OptionFlowRadar() {
                         <>
                             <div className="flex items-center gap-2 mb-2">
                                 <h2 className="text-sm font-black tracking-tight">
-                                    {selected.split(':').pop()?.replace('-EQ', '').replace('-INDEX', '')}
+                                    {(selected?.split(':').pop() || selected || '').replace('-EQ', '').replace('-INDEX', '')}
                                 </h2>
                                 {detailLoading && <span className="text-[10px] text-zinc-500">…</span>}
                                 <Tag on={report?.grade === 'WATCH' || report?.grade === 'TRADEABLE'}>
@@ -1907,7 +1907,7 @@ export default function OptionFlowRadar() {
                     <div className="flex items-center gap-2">
                         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                         <span className="font-bold text-white">
-                            {selected.split(':').pop()?.replace('-EQ', '')}
+                            {(selected?.split(':').pop() || selected || '').replace('-EQ', '')}
                         </span>
                         <span className="text-[10px] text-violet-300 font-mono">Selected</span>
                     </div>
@@ -2207,7 +2207,7 @@ function AiBestPickerModal({
                                     AI Best Picker · Top 2 High-Conviction Trades
                                 </h2>
                                 <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-violet-600/30 text-violet-200 border border-violet-500/40">
-                                    {stance.replace(/_/g, ' ')}
+                                    {String(stance || 'BALANCED').replace(/_/g, ' ')}
                                 </span>
                             </div>
                             <p className="text-xs text-zinc-400 mt-0.5">
@@ -2275,7 +2275,7 @@ function AiBestPickerModal({
                                                     <div>
                                                         <div className="flex items-center gap-2">
                                                             <span className="text-lg font-black tracking-tight text-white">
-                                                                {pick.name || pick.symbol?.split(':').pop()?.replace('-EQ', '')}
+                                                                {pick.name || (pick.symbol ? (pick.symbol.split(':').pop() || pick.symbol).replace('-EQ', '') : '—')}
                                                             </span>
                                                             <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider border ${badgeBg}`}>
                                                                 {isBull ? '▲ BUY CE' : '▼ BUY PE'}
