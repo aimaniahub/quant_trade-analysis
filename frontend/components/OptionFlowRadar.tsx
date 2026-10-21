@@ -1138,7 +1138,7 @@ export default function OptionFlowRadar() {
     };
 
     return (
-        <div className="w-full min-h-[calc(100vh-140px)] lg:h-[calc(100vh-120px)] bg-[#07090d] text-zinc-100 flex flex-col">
+        <div className="w-full min-h-screen bg-[#07090d] text-zinc-100 flex flex-col">
             {/* ── Responsive Header ─────────────────────────────────────── */}
             <header className="shrink-0 px-3 sm:px-4 py-2 sm:py-2.5 border-b-2 border-[#c4b5fd] bg-[#080b10] space-y-2">
                 {/* Row 1: Brand & Top Utilities (Reset & Auth) */}
@@ -1549,7 +1549,7 @@ export default function OptionFlowRadar() {
             )}
 
             {/* 3-column body: on desktop, 3 columns side by side; on mobile, controlled by mobileTab */}
-            <div className={`flex-1 min-h-0 ${mobileTab === 'chain' ? 'hidden lg:grid' : 'grid'} grid-cols-1 lg:grid-cols-[minmax(260px,1fr)_minmax(340px,1.15fr)_minmax(260px,1fr)]`}>
+            <div className={`flex-1 min-h-[380px] lg:h-[46vh] lg:min-h-[360px] ${mobileTab === 'chain' ? 'hidden lg:grid' : 'grid'} grid-cols-1 lg:grid-cols-[minmax(280px,1fr)_minmax(380px,1.2fr)_minmax(280px,1fr)]`}>
                 <div className={`${mobileTab === 'bull' ? 'flex flex-col' : 'hidden lg:flex lg:flex-col'} min-h-0`}>
                     <SetupTable
                         title="Bullish setups"
@@ -1712,8 +1712,8 @@ export default function OptionFlowRadar() {
             </div>
 
             {/* Bottom: selected + chain */}
-            <div className={`shrink-0 border-t-2 border-[#c4b5fd] ${mobileTab === 'chain' ? 'grid' : 'hidden lg:grid'} grid-cols-1 lg:grid-cols-[minmax(280px,0.85fr)_minmax(560px,1.5fr)] lg:h-[32vh] lg:min-h-[200px] h-auto`}>
-                <div className="p-3 overflow-hidden border-b-2 lg:border-b-0 lg:border-r-2 border-[#c4b5fd]">
+            <div className={`shrink-0 border-t-2 border-[#c4b5fd] ${mobileTab === 'chain' ? 'grid' : 'hidden lg:grid'} grid-cols-1 lg:grid-cols-[minmax(320px,0.85fr)_minmax(640px,1.5fr)] lg:h-[48vh] lg:min-h-[400px] h-auto`}>
+                <div className="p-3 overflow-y-auto border-b-2 lg:border-b-0 lg:border-r-2 border-[#c4b5fd]">
                     {selected ? (
                         <>
                             <div className="flex items-center gap-2 mb-2">
@@ -1788,7 +1788,7 @@ export default function OptionFlowRadar() {
                     )}
                 </div>
 
-                <div className="overflow-x-auto overflow-y-auto min-h-[220px] lg:min-h-0 touch-scroll">
+                <div className="overflow-x-auto overflow-y-auto h-full min-h-[340px] lg:min-h-0 touch-scroll">
                     <div className="lg:hidden px-3 py-1 bg-violet-950/60 text-[9px] font-mono text-violet-300 flex items-center justify-between border-b border-violet-800/40">
                         <span>⟵ Swipe for Calls / Puts Greeks ⟶</span>
                         <span>ATM: {report?.atm || '—'}</span>

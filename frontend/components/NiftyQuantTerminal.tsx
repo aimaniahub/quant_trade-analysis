@@ -1,18 +1,20 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { api } from "../lib/api";
 import { useApiQuery } from "../lib/hooks/useApiQuery";
 import { useMarketPolling } from "../lib/hooks/useMarketPolling";
 
-interface GreekData {
+export interface GreekData {
   delta: number;
   gamma: number;
   theta: number;
   vega: number;
+  vanna?: number;
+  charm?: number;
 }
 
-interface StrikeLeg {
+export interface StrikeLeg {
   ltp: number;
   chg: number;
   oi: number;
@@ -25,15 +27,16 @@ interface StrikeLeg {
   badge: string;
 }
 
-interface StrikeRow {
+export interface StrikeRow {
   strike: number;
   is_atm: boolean;
   aar: number;
+  net_gex_cr?: number;
   call: StrikeLeg;
   put: StrikeLeg;
 }
 
-interface HeavyweightItem {
+export interface HeavyweightItem {
   symbol: string;
   name: string;
   sector: string;
@@ -45,7 +48,7 @@ interface HeavyweightItem {
   bias: string;
 }
 
-interface BestTrade {
+export interface BestTrade {
   symbol: string;
   strike: number;
   option_type: string;
@@ -59,6 +62,85 @@ interface BestTrade {
   greeks: GreekData;
   state: string;
   rationale: string;
+}
+
+export interface QuantGreeks {
+  total_net_gex_cr: number;
+  gamma_flip_strike: number;
+  gamma_regime: string;
+  gamma_regime_badge: string;
+  gamma_regime_desc: string;
+  dealer_net_dex_cr: number;
+  dealer_net_vex_cr: number;
+  skew_25d_pct: number;
+  skew_bias: string;
+  atm_daily_theta_burn_cr: number;
+  put_wall: { strike: number; oi: number };
+  call_wall: { strike: number; oi: number };
+  max_pain: number;
+}
+
+export interface ConstituentStockItem {
+  symbol: string;
+  name: string;
+  sector: string;
+  weight: number;
+  ltp: number;
+  change_pct: number;
+  point_impact: number;
+  bias: string;
+  status: string;
+  call_wall: number;
+  put_wall: number;
+  pcr: number;
+  clue: string;
+}
+
+export interface SectorItem {
+  sector: string;
+  weight: number;
+  net_point_contribution: number;
+  advances: number;
+  declines: number;
+  stocks_count: number;
+}
+
+export interface ConstituentsReport {
+  net_point_contribution: number;
+  advances: number;
+  declines: number;
+  neutral: number;
+  market_breadth_pct: number;
+  sentiment: string;
+  total_stocks_tracked: number;
+  top_positive_drivers: ConstituentStockItem[];
+  top_negative_drags: ConstituentStockItem[];
+  sectors: SectorItem[];
+  stocks: ConstituentStockItem[];
+}
+
+export interface StrategyItem {
+  id: string;
+  name: string;
+  tag: string;
+  bias: string;
+  type: string;
+  strike: number;
+  entry_ltp: number;
+  stop_loss: number;
+  target_1: number;
+  target_2: number;
+  risk_reward: string;
+  conviction_score: number;
+  rationale: string;
+  greeks: {
+    delta: number;
+    gamma: number;
+    theta: number;
+    vega: number;
+    vanna?: number;
+    charm?: number;
+  };
 }
 
 export interface HeavyweightFnoStock {
@@ -127,6 +209,9 @@ interface NiftyQuantResponse {
   heavyweight_fno?: HeavyweightFnoReport;
   net_heavyweight_points: number;
   best_trade: BestTrade | null;
+  quant_greeks?: QuantGreeks;
+  constituents_report?: ConstituentsReport;
+  strategies?: StrategyItem[];
   strikes: StrikeRow[];
   timestamp: string;
   error?: string;
@@ -171,12 +256,18 @@ export default function NiftyQuantTerminal({
 }) {
   const [mounted, setMounted] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<"flow" | "greeks">("flow");
+  const [activeStrategyId, setActiveStrategyId] = useState<string>("delta_sweet_spot");
   const [simStock, setSimStock] = useState<string>("NSE:HDFCBANK-EQ");
   const [simMove, setSimMove] = useState<number>(2.5);
   const [simResult, setSimResult] = useState<any>(null);
   const [simLoading, setSimLoading] = useState<boolean>(false);
   const [strikeWindow, setStrikeWindow] = useState<number | "all">(12);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+
+  // 50 Constituents filter states
+  const [constituentTab, setConstituentTab] = useState<"all" | "top10" | "gainers" | "drags">("top10");
+  const [selectedSector, setSelectedSector] = useState<string>("ALL");
+  const [searchStock, setSearchStock] = useState<string>("");
 
   useEffect(() => {
     setMounted(true);
@@ -195,7 +286,7 @@ export default function NiftyQuantTerminal({
   const strikes = data?.strikes || [];
 
   // All React Hooks MUST be called unconditionally before any early returns
-  const displayedStrikes = React.useMemo(() => {
+  const displayedStrikes = useMemo(() => {
     if (strikeWindow === "all" || !strikes.length) return strikes;
     const atmIndex = strikes.findIndex((s) => s.is_atm);
     if (atmIndex === -1) return strikes;
@@ -238,6 +329,33 @@ export default function NiftyQuantTerminal({
     }
   };
 
+  // Filter 50 constituents
+  const filteredStocks = useMemo(() => {
+    const all = data?.constituents_report?.stocks || [];
+    let list = [...all];
+
+    if (constituentTab === "top10") {
+      list = list.slice(0, 10);
+    } else if (constituentTab === "gainers") {
+      list = list.filter((s) => s.change_pct > 0).sort((a, b) => b.point_impact - a.point_impact);
+    } else if (constituentTab === "drags") {
+      list = list.filter((s) => s.change_pct < 0).sort((a, b) => a.point_impact - b.point_impact);
+    }
+
+    if (selectedSector !== "ALL") {
+      list = list.filter((s) => s.sector === selectedSector);
+    }
+
+    if (searchStock.trim()) {
+      const q = searchStock.toLowerCase();
+      list = list.filter(
+        (s) => s.name.toLowerCase().includes(q) || s.symbol.toLowerCase().includes(q) || s.sector.toLowerCase().includes(q)
+      );
+    }
+
+    return list;
+  }, [data?.constituents_report?.stocks, constituentTab, selectedSector, searchStock]);
+
   if (!mounted) {
     return (
       <div className="w-full min-h-[300px] flex items-center justify-center bg-[#07090d] border border-violet-900/50 rounded-xl p-8" suppressHydrationWarning>
@@ -251,7 +369,7 @@ export default function NiftyQuantTerminal({
       <div className="w-full min-h-[500px] flex flex-col items-center justify-center bg-[#07090d] border border-violet-900/50 rounded-xl p-8 space-y-4" suppressHydrationWarning>
         <div className="w-10 h-10 border-4 border-violet-500 border-t-transparent rounded-full animate-spin" />
         <span className="text-sm font-mono text-violet-300">
-          Computing Nifty 50 Greeks, Microstructure & Heavyweight Transmission...
+          Computing Nifty 50 Deep Greeks, 50 Constituents Transmission &amp; Market Maker Profiles...
         </span>
         {onClose && (
           <button
@@ -308,7 +426,12 @@ export default function NiftyQuantTerminal({
     heavyweight_fno,
     net_heavyweight_points,
     best_trade,
+    quant_greeks,
+    constituents_report,
+    strategies,
   } = data;
+
+  const currentStrategy = strategies?.find((s) => s.id === activeStrategyId) || strategies?.[0];
 
   return (
     <div className="w-full flex flex-col bg-[#07090d] text-zinc-100 rounded-xl border border-violet-800/60 shadow-2xl overflow-hidden font-sans space-y-4 p-3 sm:p-4">
@@ -318,14 +441,14 @@ export default function NiftyQuantTerminal({
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
               <span className="text-base sm:text-lg font-black tracking-tight uppercase bg-gradient-to-r from-violet-300 via-indigo-200 to-white bg-clip-text text-transparent">
-                NIFTY 50 QUANT TERMINAL
+                NIFTY 50 DEEP QUANT DESK
               </span>
               <span className="px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-black uppercase bg-violet-600/30 text-violet-300 border border-violet-500/40">
-                PRO DESK LIVE
+                PRO INSTITUTIONAL LIVE
               </span>
             </div>
             <span className="text-[9px] sm:text-[10px] font-mono text-zinc-500">
-              Black-Scholes Greeks • Heavyweight Transmission • 4-Quadrant Flow
+              GEX / DEX / VEX Profiles • 50 F&amp;O Constituents Transmission • Vanna &amp; Charm Decay
             </span>
           </div>
 
@@ -354,7 +477,7 @@ export default function NiftyQuantTerminal({
                 viewMode === "flow" ? "bg-violet-600 text-white shadow" : "text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              🌊 Flow & OI Matrix
+              🌊 Flow &amp; OI Matrix
             </button>
             <button
               onClick={() => setViewMode("greeks")}
@@ -362,7 +485,7 @@ export default function NiftyQuantTerminal({
                 viewMode === "greeks" ? "bg-violet-600 text-white shadow" : "text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              📐 Live Greeks (Δ, Γ, Θ, ν)
+              📐 Deep Greeks (Δ, Γ, Θ, ν, Vanna, Charm, GEX)
             </button>
           </div>
 
@@ -389,71 +512,121 @@ export default function NiftyQuantTerminal({
         </div>
       </div>
 
-      {/* ── Key Metrics Ribbon ────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">
-        {/* Put Wall */}
-        <div className="p-2.5 rounded-lg bg-[#0c1017] border border-emerald-900/40 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-[10px] font-bold text-emerald-400 uppercase">
-            <span>🛡️ Put Wall (Floor)</span>
+      {/* ── 🧠 DEEP GREEKS & MARKET MAKER PROFILE RIBBON ────────────────── */}
+      <div className="p-3.5 rounded-xl border border-violet-900/60 bg-gradient-to-r from-[#0d101a] via-[#101524] to-[#0c0f18] space-y-3 shadow-xl">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-violet-900/40 pb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-black uppercase tracking-wider text-cyan-300 flex items-center gap-1.5">
+              <span>🏛️ Institutional Dealer Exposure &amp; Quant Greek Matrix</span>
+            </span>
+            {quant_greeks && (
+              <span
+                className={`px-2 py-0.5 rounded text-[9px] font-black uppercase font-mono border ${
+                  quant_greeks.gamma_regime.includes("LONG")
+                    ? "bg-emerald-950/80 text-emerald-300 border-emerald-600/60"
+                    : "bg-rose-950/80 text-rose-300 border-rose-600/60"
+                }`}
+              >
+                {quant_greeks.gamma_regime_badge}
+              </span>
+            )}
           </div>
-          <div className="text-lg font-black font-mono text-emerald-300 mt-1">{put_wall.strike}</div>
-          <div className="text-[9px] font-mono text-zinc-500">OI: {(put_wall.oi / 1000).toFixed(0)}k</div>
-        </div>
-
-        {/* Call Wall */}
-        <div className="p-2.5 rounded-lg bg-[#0c1017] border border-rose-900/40 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-[10px] font-bold text-rose-400 uppercase">
-            <span>🚧 Call Wall (Cap)</span>
-          </div>
-          <div className="text-lg font-black font-mono text-rose-300 mt-1">{call_wall.strike}</div>
-          <div className="text-[9px] font-mono text-zinc-500">OI: {(call_wall.oi / 1000).toFixed(0)}k</div>
-        </div>
-
-        {/* Max Pain */}
-        <div className="p-2.5 rounded-lg bg-[#0c1017] border border-purple-900/40 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-[10px] font-bold text-purple-400 uppercase">
-            <span>🎯 Max Pain Pin</span>
-          </div>
-          <div className="text-lg font-black font-mono text-purple-300 mt-1">{max_pain}</div>
-          <div className="text-[9px] font-mono text-zinc-500">
-            Bias: {spot_price > max_pain ? "Spot Above Pain" : "Spot Below Pain"}
+          <div className="text-[10px] font-mono text-zinc-400">
+            {quant_greeks?.gamma_regime_desc || "Dealer hedging mechanics driving mean-reversion or momentum"}
           </div>
         </div>
 
-        {/* ATM Straddle */}
-        <div className="p-2.5 rounded-lg bg-[#0c1017] border border-amber-900/40 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-[10px] font-bold text-amber-400 uppercase">
-            <span>⚖️ ATM Straddle</span>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+          {/* Net GEX in Cr */}
+          <div className="p-2.5 rounded-lg bg-[#07090f] border border-violet-900/40 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-zinc-400 uppercase">
+              <span>Net Gamma (GEX)</span>
+              <span className="text-violet-400">₹ Cr</span>
+            </div>
+            <div
+              className={`text-lg font-black font-mono mt-1 ${
+                (quant_greeks?.total_net_gex_cr || 0) >= 0 ? "text-emerald-400" : "text-rose-400"
+              }`}
+            >
+              {(quant_greeks?.total_net_gex_cr || 0) >= 0 ? "+" : ""}
+              {fmt(quant_greeks?.total_net_gex_cr, 1)} Cr
+            </div>
+            <div className="text-[9px] font-mono text-zinc-500">
+              {(quant_greeks?.total_net_gex_cr || 0) >= 0 ? "Dealers sell high / buy low" : "Dealers chase breakouts"}
+            </div>
           </div>
-          <div className="text-lg font-black font-mono text-amber-300 mt-1">₹{straddle.combined_premium}</div>
-          <div className="text-[9px] font-mono text-zinc-400">
-            BE: {straddle.lower_breakeven} – {straddle.upper_breakeven}
-          </div>
-        </div>
 
-        {/* PCR Metrics */}
-        <div className="p-2.5 rounded-lg bg-[#0c1017] border border-blue-900/40 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-[10px] font-bold text-blue-400 uppercase">
-            <span>📊 ATM ±3 PCR</span>
+          {/* Gamma Flip Strike */}
+          <div className="p-2.5 rounded-lg bg-[#07090f] border border-violet-900/40 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-amber-400 uppercase">
+              <span>Gamma Flip Strike</span>
+              <span className="text-zinc-500">Pivot</span>
+            </div>
+            <div className="text-lg font-black font-mono text-amber-300 mt-1">
+              {quant_greeks?.gamma_flip_strike || atm_strike}
+            </div>
+            <div className="text-[9px] font-mono text-zinc-500">
+              Dist: {(((spot_price - (quant_greeks?.gamma_flip_strike || atm_strike)) / spot_price) * 100).toFixed(2)}%
+            </div>
           </div>
-          <div className="text-lg font-black font-mono text-blue-300 mt-1">{pcr.atm_cluster_pcr}</div>
-          <div className="text-[9px] font-mono text-zinc-500">Total PCR: {pcr.total_pcr}</div>
-        </div>
 
-        {/* Heavyweight Net Impact */}
-        <div className="p-2.5 rounded-lg bg-[#0c1017] border border-indigo-900/40 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-[10px] font-bold text-indigo-400 uppercase">
-            <span>⚡ Heavyweight Impact</span>
+          {/* Dealer Net Delta DEX */}
+          <div className="p-2.5 rounded-lg bg-[#07090f] border border-violet-900/40 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-cyan-400 uppercase">
+              <span>Dealer Delta (DEX)</span>
+              <span className="text-zinc-500">₹ Cr</span>
+            </div>
+            <div
+              className={`text-lg font-black font-mono mt-1 ${
+                (quant_greeks?.dealer_net_dex_cr || 0) >= 0 ? "text-cyan-300" : "text-rose-300"
+              }`}
+            >
+              {(quant_greeks?.dealer_net_dex_cr || 0) >= 0 ? "+" : ""}
+              {fmt(quant_greeks?.dealer_net_dex_cr, 1)} Cr
+            </div>
+            <div className="text-[9px] font-mono text-zinc-500">Underlying hedging load</div>
           </div>
-          <div
-            className={`text-lg font-black font-mono mt-1 ${
-              net_heavyweight_points >= 0 ? "text-emerald-400" : "text-rose-400"
-            }`}
-          >
-            {net_heavyweight_points >= 0 ? "+" : ""}
-            {net_heavyweight_points} pts
+
+          {/* 25D IV Skew */}
+          <div className="p-2.5 rounded-lg bg-[#07090f] border border-violet-900/40 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-indigo-300 uppercase">
+              <span>25Δ IV Skew (PE-CE)</span>
+              <span className="text-zinc-500">%</span>
+            </div>
+            <div className="text-lg font-black font-mono text-indigo-200 mt-1">
+              {(quant_greeks?.skew_25d_pct || 0) >= 0 ? "+" : ""}
+              {quant_greeks?.skew_25d_pct || 0}%
+            </div>
+            <div className="text-[9px] font-mono text-zinc-400">
+              {quant_greeks?.skew_bias?.replace(/_/g, " ") || "BALANCED SKEW"}
+            </div>
           </div>
-          <div className="text-[9px] font-mono text-zinc-500">Top 10 Transmission</div>
+
+          {/* ATM Daily Theta Burn */}
+          <div className="p-2.5 rounded-lg bg-[#07090f] border border-violet-900/40 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-rose-400 uppercase">
+              <span>Daily Theta Burn</span>
+              <span className="text-zinc-500">ATM</span>
+            </div>
+            <div className="text-lg font-black font-mono text-rose-300 mt-1">
+              -₹{fmt(quant_greeks?.atm_daily_theta_burn_cr, 2)} Cr
+            </div>
+            <div className="text-[9px] font-mono text-zinc-500">Net straddle decay / day</div>
+          </div>
+
+          {/* Max Pain & Walls */}
+          <div className="p-2.5 rounded-lg bg-[#07090f] border border-violet-900/40 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-purple-400 uppercase">
+              <span>Walls &amp; Pain</span>
+              <span className="text-zinc-500">Range</span>
+            </div>
+            <div className="text-sm font-black font-mono text-purple-200 mt-1">
+              P:{put_wall.strike} | C:{call_wall.strike}
+            </div>
+            <div className="text-[9px] font-mono text-zinc-400">
+              Max Pain: <span className="text-white font-bold">{max_pain}</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -476,70 +649,100 @@ export default function NiftyQuantTerminal({
         </div>
       )}
 
-      {/* ── Actionable Best Trade Card ───────────────────────────────── */}
-      {best_trade && (
-        <div className="p-3.5 rounded-xl border border-violet-500/50 bg-gradient-to-r from-[#0f1422] via-[#131128] to-[#0d121c] flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div
-              className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-sm ${
-                best_trade.bias === "BULLISH"
-                  ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                  : "bg-rose-500/20 text-rose-400 border border-rose-500/40"
-              }`}
-            >
-              {best_trade.option_type}
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-mono font-bold uppercase tracking-wider text-violet-300">
-                  ⚡ HIGHEST CONVICTION QUANT TRADE
-                </span>
-                <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-violet-600 text-white">
-                  SCORE {best_trade.conviction_score}/100
-                </span>
-              </div>
-              <div className="text-base font-black text-white mt-0.5 flex items-center gap-2">
-                <span>{best_trade.symbol}</span>
-                <span className="text-xs font-normal text-zinc-400 font-mono">
-                  @ ₹{best_trade.entry_ltp}
-                </span>
-              </div>
-              <div className="text-[11px] text-zinc-300 mt-1 max-w-xl leading-relaxed">
-                {best_trade.rationale}
-              </div>
-            </div>
+      {/* ── 🎯 ACTIONABLE MULTI-STRATEGY QUANT DESK (3 PLAYBOOKS) ─────── */}
+      <div className="p-3.5 rounded-xl border border-violet-800/60 bg-gradient-to-r from-[#0f1422] via-[#131128] to-[#0d121c] space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-violet-900/40 pb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono font-bold uppercase tracking-wider text-violet-300">
+              ⚡ INSTITUTIONAL STRATEGY MATRIX (REFINED QUANT DESK)
+            </span>
+            <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-violet-600 text-white">
+              3 STRATEGIES AVAILABLE
+            </span>
           </div>
 
-          <div className="grid grid-cols-3 sm:flex sm:items-center gap-2 sm:gap-4 bg-[#080b11] p-2.5 sm:px-4 sm:py-2 rounded-lg border border-violet-800/40 self-stretch md:self-auto justify-between">
-            <div className="text-center">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase">Stop Loss</div>
-              <div className="text-xs font-mono font-bold text-rose-400">₹{best_trade.stop_loss}</div>
-            </div>
-            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
-            <div className="text-center">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase">Target 1</div>
-              <div className="text-xs font-mono font-bold text-emerald-400">₹{best_trade.target_1}</div>
-            </div>
-            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
-            <div className="text-center">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase">Target 2</div>
-              <div className="text-xs font-mono font-bold text-emerald-300">₹{best_trade.target_2}</div>
-            </div>
-            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
-            <div className="text-center">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase">R:R</div>
-              <div className="text-xs font-mono font-black text-violet-300">{best_trade.risk_reward}</div>
-            </div>
-            <div className="hidden sm:block h-6 w-px bg-zinc-800" />
-            <div className="text-center col-span-2 sm:col-span-1">
-              <div className="text-[9px] font-bold text-zinc-500 uppercase">Delta (Δ)</div>
-              <div className="text-xs font-mono font-bold text-white">{best_trade.greeks.delta}</div>
-            </div>
+          {/* Strategy Tabs */}
+          <div className="flex items-center gap-1 bg-[#090b12] p-1 rounded-lg border border-zinc-800">
+            {strategies?.map((strat) => (
+              <button
+                key={strat.id}
+                onClick={() => setActiveStrategyId(strat.id)}
+                className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-all flex items-center gap-1.5 ${
+                  activeStrategyId === strat.id
+                    ? "bg-violet-600 text-white shadow"
+                    : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
+                }`}
+              >
+                <span>{strat.tag === "TREND CAPTURE" ? "🚀" : strat.tag === "VOLATILITY EXPANSION" ? "⚡" : "🛡️"}</span>
+                <span>{strat.tag}</span>
+              </button>
+            ))}
           </div>
         </div>
-      )}
 
-      {/* ── ⚡ Heavyweight F&O Option Chain Radar & Nifty 50 Prediction Engine ── */}
+        {currentStrategy && (
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pt-1">
+            <div className="flex items-center gap-3">
+              <div
+                className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center font-black text-sm border ${
+                  currentStrategy.bias === "BULLISH"
+                    ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                    : currentStrategy.bias === "BEARISH"
+                    ? "bg-rose-500/20 text-rose-400 border-rose-500/40"
+                    : "bg-purple-500/20 text-purple-400 border-purple-500/40"
+                }`}
+              >
+                <span>{currentStrategy.type}</span>
+                <span className="text-[9px] font-normal">{currentStrategy.bias}</span>
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-black text-white">{currentStrategy.name}</span>
+                  <span className="px-1.5 py-0.2 rounded text-[10px] font-black bg-violet-600 text-white">
+                    CONVICTION {currentStrategy.conviction_score}/100
+                  </span>
+                </div>
+                <div className="text-xs font-mono font-bold text-zinc-300 mt-0.5 flex items-center gap-2">
+                  <span>Strike: <span className="text-violet-300 font-black">{currentStrategy.strike} {currentStrategy.type}</span></span>
+                  <span className="text-zinc-500">•</span>
+                  <span>Entry LTP: <span className="text-white font-bold">₹{currentStrategy.entry_ltp}</span></span>
+                </div>
+                <div className="text-[11px] text-zinc-300 mt-1 max-w-2xl leading-relaxed">
+                  {currentStrategy.rationale}
+                </div>
+              </div>
+            </div>
+
+            {/* Metrics pills */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 bg-[#080b11] p-3 rounded-lg border border-violet-800/40 w-full md:w-auto">
+              <div className="text-center">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase">Stop Loss</div>
+                <div className="text-xs font-mono font-bold text-rose-400">₹{currentStrategy.stop_loss}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase">Target 1</div>
+                <div className="text-xs font-mono font-bold text-emerald-400">₹{currentStrategy.target_1}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase">Target 2</div>
+                <div className="text-xs font-mono font-bold text-emerald-300">₹{currentStrategy.target_2}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase">R:R Ratio</div>
+                <div className="text-xs font-mono font-black text-violet-300">{currentStrategy.risk_reward}</div>
+              </div>
+              <div className="text-center col-span-2 sm:col-span-1">
+                <div className="text-[9px] font-bold text-zinc-500 uppercase">Delta (Δ) / Vanna</div>
+                <div className="text-xs font-mono font-bold text-white">
+                  Δ {currentStrategy.greeks.delta} | v {currentStrategy.greeks.vanna ?? 0}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── 📊 50 F&O CONSTITUENTS ANALYSIS & SECTOR TRANSMISSION ENGINE ── */}
       <div className="rounded-xl border border-violet-900/60 bg-gradient-to-b from-[#0e121e] to-[#07090e] p-4 shadow-2xl space-y-4">
         {/* Header Row */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-violet-900/40 pb-3">
@@ -550,16 +753,17 @@ export default function NiftyQuantTerminal({
             </div>
             <div>
               <h2 className="text-sm font-black uppercase tracking-wider text-white flex items-center gap-2">
-                <span>⚡ Heavyweight F&amp;O Option Chain Radar &amp; Nifty 50 Predictor</span>
+                <span>⚡ Nifty 50 F&amp;O Constituents &amp; Sector Point Transmission Engine</span>
                 <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-violet-950/80 text-violet-300 border border-violet-700/60">
-                  LIVE DYNAMIC
+                  ALL 50 STOCKS LIVE
                 </span>
               </h2>
               <p className="text-[11px] text-zinc-400 font-medium">
-                Live F&amp;O wall analysis of top heavyweights (48.7% Nifty weight) • Transmitted index point thrust • Predicted Nifty chain target
+                Real-time weight transmission, advances/declines, F&amp;O wall pressure, and index point attribution
               </p>
             </div>
           </div>
+
           <div className="flex items-center gap-2">
             <button
               onClick={handleForceRefresh}
@@ -567,303 +771,326 @@ export default function NiftyQuantTerminal({
               className={`px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] font-mono flex items-center gap-1.5 transition-all ${
                 isRefreshing ? "opacity-60 cursor-not-allowed" : ""
               }`}
-              title="Refresh live option chains & recompute thrust"
+              title="Refresh live option chains & recompute transmission"
             >
               <svg className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              {isRefreshing ? "Scanning F&O..." : "Re-Scan F&O"}
+              {isRefreshing ? "Syncing 50 Stocks..." : "Re-Scan 50 Stocks"}
             </button>
           </div>
         </div>
 
-        {/* Consensus Prediction Summary Banner (4 Stat Cards) */}
-        {heavyweight_fno && (
+        {/* 4 Summary Stat Cards for Breadth & Transmission */}
+        {constituents_report && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {/* 1. Net Transmitted Thrust */}
+            {/* 1. Net Point Impact */}
             <div
               className={`p-3 rounded-lg border flex flex-col justify-between ${
-                heavyweight_fno.net_transmitted_thrust_pts >= 0
+                constituents_report.net_point_contribution >= 0
                   ? "bg-emerald-950/30 border-emerald-800/50"
                   : "bg-rose-950/30 border-rose-800/50"
               }`}
             >
               <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
-                <span>Transmitted Thrust</span>
-                <span
-                  className={`font-bold ${
-                    heavyweight_fno.net_transmitted_thrust_pts >= 0 ? "text-emerald-400" : "text-rose-400"
-                  }`}
-                >
-                  {heavyweight_fno.consensus.replace(/_/g, " ")}
+                <span>Net Point Transmission</span>
+                <span className={`font-bold ${constituents_report.net_point_contribution >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {constituents_report.sentiment.replace(/_/g, " ")}
                 </span>
               </div>
               <div className="my-1.5 flex items-baseline gap-2">
                 <span
                   className={`text-2xl font-black font-mono tracking-tight ${
-                    heavyweight_fno.net_transmitted_thrust_pts >= 0 ? "text-emerald-400" : "text-rose-400"
+                    constituents_report.net_point_contribution >= 0 ? "text-emerald-400" : "text-rose-400"
                   }`}
                 >
-                  {heavyweight_fno.net_transmitted_thrust_pts >= 0 ? "+" : ""}
-                  {heavyweight_fno.net_transmitted_thrust_pts} pts
+                  {constituents_report.net_point_contribution >= 0 ? "+" : ""}
+                  {fmt(constituents_report.net_point_contribution, 1)} pts
                 </span>
                 <span className="text-[10px] text-zinc-500 font-mono">into Nifty 50</span>
               </div>
               <div className="text-[10px] font-mono text-zinc-400">
-                Basket F&amp;O breakout momentum
+                Sum of 50 constituent delta thrusts
               </div>
             </div>
 
-            {/* 2. Projected Nifty Target */}
-            <div className="p-3 rounded-lg border bg-[#0b0e17] border-violet-800/40 flex flex-col justify-between">
-              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
-                <span>Projected Nifty Level</span>
-                <span className="text-violet-400 font-bold">ATM {atm_strike}</span>
-              </div>
-              <div className="my-1.5 flex items-baseline gap-2">
-                <span className="text-2xl font-black font-mono tracking-tight text-white">
-                  {heavyweight_fno.projected_nifty_target.toFixed(1)}
-                </span>
-                <span className="text-[10px] text-zinc-400 font-mono">
-                  (Spot: {spot_price})
-                </span>
-              </div>
-              <div className="text-[10px] font-mono text-zinc-400">
-                Heavyweight delta-weighted settlement
-              </div>
-            </div>
-
-            {/* 3. Recommended Nifty Strike */}
-            <div className="p-3 rounded-lg border bg-gradient-to-br from-violet-950/40 to-[#0b0e17] border-violet-600/50 flex flex-col justify-between">
-              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
-                <span>Predicted Nifty Strike</span>
-                <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-600 text-white">
-                  {heavyweight_fno.target_opt_type}
-                </span>
-              </div>
-              <div className="my-1.5 flex items-baseline gap-2">
-                <span className="text-xl font-black font-mono tracking-tight text-violet-300">
-                  {heavyweight_fno.recommended_nifty_strike}
-                </span>
-              </div>
-              <div className="text-[10px] font-mono text-zinc-400">
-                Highest gamma &amp; sweet-spot strike
-              </div>
-            </div>
-
-            {/* 4. Heavyweight Alignment Breadth */}
+            {/* 2. Market Breadth */}
             <div className="p-3 rounded-lg border bg-[#0b0e17] border-zinc-800 flex flex-col justify-between">
               <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
-                <span>Institutional Breadth</span>
-                <span className="text-zinc-500 font-mono">8 Top Stocks</span>
+                <span>50 Stock Market Breadth</span>
+                <span className="text-zinc-500 font-mono">{constituents_report.total_stocks_tracked} Stocks</span>
               </div>
               <div className="my-1.5 flex items-baseline gap-3">
                 <span className="text-base font-black font-mono text-emerald-400">
-                  {heavyweight_fno.bull_heavyweights_count} Bulls 🟢
+                  {constituents_report.advances} Adv 🟢
                 </span>
                 <span className="text-base font-black font-mono text-rose-400">
-                  {heavyweight_fno.bear_heavyweights_count} Bears 🔴
+                  {constituents_report.declines} Dec 🔴
+                </span>
+                <span className="text-xs font-mono text-zinc-500">
+                  {constituents_report.neutral} Flat
                 </span>
               </div>
-              {/* Progress ratio bar */}
               <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden flex">
                 <div
                   className="bg-emerald-500 h-full"
                   style={{
-                    width: `${(heavyweight_fno.bull_heavyweights_count / 8) * 100}%`,
+                    width: `${(constituents_report.advances / Math.max(constituents_report.total_stocks_tracked, 1)) * 100}%`,
                   }}
                 />
                 <div
                   className="bg-rose-500 h-full"
                   style={{
-                    width: `${(heavyweight_fno.bear_heavyweights_count / 8) * 100}%`,
+                    width: `${(constituents_report.declines / Math.max(constituents_report.total_stocks_tracked, 1)) * 100}%`,
                   }}
                 />
               </div>
             </div>
-          </div>
-        )}
 
-        {/* Live Institutional Thesis Callout */}
-        {heavyweight_fno?.thesis && (
-          <div className="p-2.5 rounded-lg bg-violet-950/20 border border-violet-800/40 flex items-start gap-2.5">
-            <span className="text-base">💡</span>
-            <div className="text-[11px] leading-relaxed text-zinc-300">
-              <span className="font-bold text-violet-300 uppercase tracking-wide mr-1.5">
-                Market Reaction Thesis:
-              </span>
-              {heavyweight_fno.thesis}
+            {/* 3. Top Driver */}
+            <div className="p-3 rounded-lg border bg-[#0b0e17] border-emerald-900/40 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
+                <span>Top Positive Driver</span>
+                <span className="text-emerald-400 font-mono font-bold">LEADER</span>
+              </div>
+              {constituents_report.top_positive_drivers?.[0] ? (
+                <div className="my-1">
+                  <div className="text-base font-black font-mono text-white flex items-center justify-between">
+                    <span>{constituents_report.top_positive_drivers[0].name}</span>
+                    <span className="text-emerald-400 font-bold">
+                      +{constituents_report.top_positive_drivers[0].point_impact} pts
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-mono text-zinc-400">
+                    +{constituents_report.top_positive_drivers[0].change_pct}% • {constituents_report.top_positive_drivers[0].weight}% wt
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs text-zinc-500">No positive drivers</div>
+              )}
+              <div className="text-[10px] font-mono text-zinc-500">Primary index supporter</div>
+            </div>
+
+            {/* 4. Top Drag */}
+            <div className="p-3 rounded-lg border bg-[#0b0e17] border-rose-900/40 flex flex-col justify-between">
+              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
+                <span>Top Negative Drag</span>
+                <span className="text-rose-400 font-mono font-bold">LIFT DOWN</span>
+              </div>
+              {constituents_report.top_negative_drags?.[0] ? (
+                <div className="my-1">
+                  <div className="text-base font-black font-mono text-white flex items-center justify-between">
+                    <span>{constituents_report.top_negative_drags[0].name}</span>
+                    <span className="text-rose-400 font-bold">
+                      {constituents_report.top_negative_drags[0].point_impact} pts
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-mono text-zinc-400">
+                    {constituents_report.top_negative_drags[0].change_pct}% • {constituents_report.top_negative_drags[0].weight}% wt
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs text-zinc-500">No negative drags</div>
+              )}
+              <div className="text-[10px] font-mono text-zinc-500">Primary index resistance</div>
             </div>
           </div>
         )}
 
-        {/* Grid of Heavyweight F&O Option Chain Cards */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-zinc-300">
-            <span>📊 Heavyweight F&amp;O Option Chain Breakout Status &amp; Wall Pressures</span>
-            <span className="text-[10px] font-mono text-zinc-500 font-normal">
-              Click any stock to test custom breakout impact in simulator
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
-            {(heavyweight_fno?.stocks || []).map((stk) => {
-              const isSelected = simStock === stk.symbol;
-              const totalWallRange = Math.max(stk.call_wall - stk.put_wall, 1);
-              const spotPositionPct = Math.min(
-                Math.max(((stk.spot - stk.put_wall) / totalWallRange) * 100, 5),
-                95
-              );
-
-              return (
-                <div
-                  key={stk.symbol}
-                  onClick={() => {
-                    setSimStock(stk.symbol);
-                    setSimMove(stk.predicted_move_pct !== 0 ? stk.predicted_move_pct : 1.5);
-                  }}
-                  className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col justify-between space-y-2.5 ${
-                    isSelected
-                      ? "bg-[#101524] border-violet-500 shadow-lg shadow-violet-950/40 ring-1 ring-violet-500"
-                      : "bg-[#080b11] border-zinc-800 hover:border-zinc-700 hover:bg-[#0c1018]"
+        {/* ── Sector Breakdown Pills ──────────────────────────────────── */}
+        {constituents_report?.sectors && constituents_report.sectors.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400">
+              <span>Sector Point Aggregation (Click to filter):</span>
+              <span className="text-zinc-500">{constituents_report.sectors.length} Sectors Active</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => setSelectedSector("ALL")}
+                className={`px-2.5 py-1 rounded text-[11px] font-mono font-bold transition-all border ${
+                  selectedSector === "ALL"
+                    ? "bg-violet-600 border-violet-500 text-white shadow"
+                    : "bg-[#080b11] border-zinc-800 text-zinc-400 hover:text-white"
+                }`}
+              >
+                ALL SECTORS
+              </button>
+              {constituents_report.sectors.map((sec) => (
+                <button
+                  key={sec.sector}
+                  onClick={() => setSelectedSector(selectedSector === sec.sector ? "ALL" : sec.sector)}
+                  className={`px-2.5 py-1 rounded text-[11px] font-mono transition-all border flex items-center gap-1.5 ${
+                    selectedSector === sec.sector
+                      ? "bg-violet-600 border-violet-500 text-white font-bold shadow"
+                      : "bg-[#080b11] border-zinc-800/80 text-zinc-300 hover:border-zinc-700"
                   }`}
                 >
-                  {/* Header: Name, Weight, Spot & Badge */}
-                  <div>
-                    <div className="flex items-start justify-between gap-1">
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-xs text-white">{stk.name}</span>
-                          <span className="text-[9px] font-mono px-1 rounded bg-zinc-800 text-zinc-400">
-                            {stk.weight}% wt
-                          </span>
-                        </div>
-                        <div className="text-xs font-mono font-black text-zinc-200 mt-0.5">
-                          ₹{stk.spot.toFixed(1)}
-                        </div>
-                      </div>
-                      <span
-                        className="px-2 py-0.5 rounded text-[9px] font-mono font-bold tracking-tight border"
-                        style={{
-                          backgroundColor: `${stk.color}15`,
-                          borderColor: `${stk.color}60`,
-                          color: stk.color,
-                        }}
-                      >
-                        {stk.badge}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Option Chain Wall Visualizer Bar */}
-                  <div className="p-2 rounded-lg bg-[#05070a] border border-zinc-800/80 space-y-1.5">
-                    <div className="flex items-center justify-between text-[9px] font-mono">
-                      <div className="text-left">
-                        <span className="text-rose-400 font-bold">Put Wall</span>
-                        <div className="text-zinc-300 font-semibold">₹{stk.put_wall}</div>
-                        <span className="text-[8px] text-zinc-500">
-                          {(stk.put_wall_oi / 100000).toFixed(1)}L OI
-                        </span>
-                      </div>
-                      <div className="text-center">
-                        <span className="text-zinc-500">Distance</span>
-                        <div className="text-[10px] font-bold text-zinc-300">
-                          {stk.dist_to_put_wall_pct.toFixed(1)}% | {stk.dist_to_call_wall_pct.toFixed(1)}%
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-emerald-400 font-bold">Call Wall</span>
-                        <div className="text-zinc-300 font-semibold">₹{stk.call_wall}</div>
-                        <span className="text-[8px] text-zinc-500">
-                          {(stk.call_wall_oi / 100000).toFixed(1)}L OI
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Progress Channel with Spot Marker */}
-                    <div className="relative w-full h-2 bg-zinc-800 rounded-full overflow-visible">
-                      <div
-                        className="absolute top-0 bottom-0 bg-gradient-to-r from-rose-500/40 via-violet-500/40 to-emerald-500/40 rounded-full"
-                        style={{ width: "100%" }}
-                      />
-                      <div
-                        className="absolute -top-1 w-2 h-4 bg-white border-2 border-violet-500 rounded shadow-md transform -translate-x-1/2"
-                        style={{ left: `${spotPositionPct}%` }}
-                        title={`Spot ₹${stk.spot}`}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Key F&O Quant Metrics */}
-                  <div className="grid grid-cols-3 gap-1 pt-1 border-t border-zinc-800/60 text-center font-mono">
-                    <div>
-                      <span className="text-[8px] uppercase tracking-wider text-zinc-500 block">
-                        PCR
-                      </span>
-                      <span
-                        className={`text-[11px] font-bold ${
-                          stk.pcr > 1.15
-                            ? "text-emerald-400"
-                            : stk.pcr < 0.75
-                            ? "text-rose-400"
-                            : "text-zinc-300"
-                        }`}
-                      >
-                        {stk.pcr}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[8px] uppercase tracking-wider text-zinc-500 block">
-                        Stock Move
-                      </span>
-                      <span
-                        className={`text-[11px] font-bold ${
-                          stk.predicted_move_pct >= 0 ? "text-emerald-400" : "text-rose-400"
-                        }`}
-                      >
-                        {stk.predicted_move_pct >= 0 ? "+" : ""}
-                        {stk.predicted_move_pct}%
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-[8px] uppercase tracking-wider text-zinc-500 block">
-                        Nifty Thrust
-                      </span>
-                      <span
-                        className={`text-[11px] font-black ${
-                          stk.transmitted_nifty_points >= 0 ? "text-emerald-400" : "text-rose-400"
-                        }`}
-                      >
-                        {stk.transmitted_nifty_points >= 0 ? "+" : ""}
-                        {stk.transmitted_nifty_points} pts
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Microstructure Clue Callout */}
-                  <div className="p-1.5 rounded bg-zinc-900/60 border border-zinc-800 text-[10px] text-zinc-400 leading-tight">
-                    {stk.clue}
-                  </div>
-
-                  {/* Test in Simulator Button */}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSimStock(stk.symbol);
-                      setSimMove(stk.predicted_move_pct !== 0 ? stk.predicted_move_pct : 1.5);
-                      handleSimulate();
-                    }}
-                    className="w-full py-1 rounded bg-zinc-800/80 hover:bg-violet-600 hover:text-white text-zinc-300 text-[10px] font-mono font-bold transition-all"
+                  <span className="font-semibold">{sec.sector}</span>
+                  <span className="text-[9px] text-zinc-500">({sec.weight}%)</span>
+                  <span
+                    className={`font-black ${
+                      sec.net_point_contribution >= 0 ? "text-emerald-400" : "text-rose-400"
+                    }`}
                   >
-                    Simulate Stock Breakout →
-                  </button>
-                </div>
-              );
-            })}
+                    {sec.net_point_contribution >= 0 ? "+" : ""}
+                    {sec.net_point_contribution}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── 50 Constituents Filters & Search Bar ────────────────────── */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-zinc-800/80">
+          <div className="flex flex-wrap items-center gap-1.5 bg-[#080b11] p-1 rounded-lg border border-zinc-800">
+            <button
+              onClick={() => setConstituentTab("top10")}
+              className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-all ${
+                constituentTab === "top10" ? "bg-violet-600 text-white" : "text-zinc-400 hover:text-white"
+              }`}
+            >
+              Top 10 Heavyweights (48.7%)
+            </button>
+            <button
+              onClick={() => setConstituentTab("all")}
+              className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-all ${
+                constituentTab === "all" ? "bg-violet-600 text-white" : "text-zinc-400 hover:text-white"
+              }`}
+            >
+              All 50 Stocks ({constituents_report?.stocks?.length || 50})
+            </button>
+            <button
+              onClick={() => setConstituentTab("gainers")}
+              className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-all ${
+                constituentTab === "gainers" ? "bg-emerald-600 text-white" : "text-zinc-400 hover:text-emerald-300"
+              }`}
+            >
+              Gainers Only
+            </button>
+            <button
+              onClick={() => setConstituentTab("drags")}
+              className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-all ${
+                constituentTab === "drags" ? "bg-rose-600 text-white" : "text-zinc-400 hover:text-rose-300"
+              }`}
+            >
+              Drags Only
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <input
+              type="text"
+              placeholder="Search symbol, sector (e.g. RELIANCE, Banking)..."
+              value={searchStock}
+              onChange={(e) => setSearchStock(e.target.value)}
+              className="px-3 py-1.5 bg-[#080b11] border border-zinc-700 rounded-lg text-xs font-mono text-white placeholder-zinc-500 w-full sm:w-64 focus:outline-none focus:border-violet-500"
+            />
+            {searchStock && (
+              <button
+                onClick={() => setSearchStock("")}
+                className="text-xs text-zinc-400 hover:text-white"
+              >
+                Clear
+              </button>
+            )}
           </div>
         </div>
 
-        {/* What-If Breakout Simulator Bar */}
+        {/* ── 50 Constituents Grid ───────────────────────────────────── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-2.5 max-h-[520px] overflow-y-auto pr-1">
+          {filteredStocks.map((stk) => {
+            const isSelected = simStock === stk.symbol;
+            return (
+              <div
+                key={stk.symbol}
+                onClick={() => {
+                  setSimStock(stk.symbol);
+                  setSimMove(stk.change_pct !== 0 ? stk.change_pct : 1.5);
+                }}
+                className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
+                  isSelected
+                    ? "bg-[#101524] border-violet-500 shadow-md shadow-violet-950/40 ring-1 ring-violet-500"
+                    : "bg-[#080b11] border-zinc-800/80 hover:border-zinc-700 hover:bg-[#0c1018]"
+                }`}
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-1">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-xs text-white">{stk.name}</span>
+                        <span className="text-[9px] font-mono px-1 rounded bg-zinc-800 text-zinc-400">
+                          {stk.weight}% wt
+                        </span>
+                      </div>
+                      <div className="text-[10px] font-mono text-zinc-500">{stk.sector}</div>
+                    </div>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold tracking-tight border ${
+                        stk.bias === "BULLISH"
+                          ? "bg-emerald-950/60 text-emerald-300 border-emerald-700/60"
+                          : stk.bias === "BEARISH"
+                          ? "bg-rose-950/60 text-rose-300 border-rose-700/60"
+                          : "bg-zinc-900 text-zinc-400 border-zinc-800"
+                      }`}
+                    >
+                      {stk.bias}
+                    </span>
+                  </div>
+
+                  <div className="flex items-baseline justify-between mt-1">
+                    <span className="text-xs font-mono font-black text-zinc-200">
+                      ₹{stk.ltp.toFixed(1)}
+                    </span>
+                    <span
+                      className={`text-xs font-mono font-bold ${
+                        stk.change_pct >= 0 ? "text-emerald-400" : "text-rose-400"
+                      }`}
+                    >
+                      {stk.change_pct >= 0 ? "+" : ""}
+                      {stk.change_pct}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* Point Impact & Walls */}
+                <div className="p-1.5 rounded bg-[#05070a] border border-zinc-800/60 text-[10px] font-mono space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-zinc-500">Nifty Thrust:</span>
+                    <span
+                      className={`font-black ${
+                        stk.point_impact >= 0 ? "text-emerald-400" : "text-rose-400"
+                      }`}
+                    >
+                      {stk.point_impact >= 0 ? "+" : ""}
+                      {stk.point_impact} pts
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-zinc-400 text-[9px]">
+                    <span>P: {stk.put_wall || "—"}</span>
+                    <span>PCR: {stk.pcr || "—"}</span>
+                    <span>C: {stk.call_wall || "—"}</span>
+                  </div>
+                </div>
+
+                {/* Action button */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSimStock(stk.symbol);
+                    setSimMove(stk.change_pct !== 0 ? stk.change_pct : 1.5);
+                    handleSimulate();
+                  }}
+                  className="w-full py-1 rounded bg-zinc-800/80 hover:bg-violet-600 hover:text-white text-zinc-300 text-[9px] font-mono font-bold transition-all"
+                >
+                  Simulate Shock →
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ── What-If Breakout Simulator Bar ─────────────────────────── */}
         <div className="p-3 rounded-xl bg-[#090c13] border border-violet-900/40">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
             <div className="flex items-center gap-2">
@@ -871,7 +1098,7 @@ export default function NiftyQuantTerminal({
                 🔮 What-If Stock Breakout Shock Simulator
               </span>
               <span className="text-[10px] text-zinc-400">
-                Simulate an earnings shock or breakout on any heavyweight to calculate projected Nifty rally &amp; target strike.
+                Simulate an earnings shock or breakout on any of the 50 constituent stocks to compute projected Nifty rally &amp; target strike.
               </span>
             </div>
             <span className="text-[9px] font-mono text-zinc-500">
@@ -883,16 +1110,16 @@ export default function NiftyQuantTerminal({
             {/* Stock Select */}
             <div className="md:col-span-4">
               <label className="text-[9px] font-mono text-zinc-400 uppercase block mb-1">
-                Select Heavyweight
+                Select Constituent Stock (50 Available)
               </label>
               <select
                 value={simStock}
                 onChange={(e) => setSimStock(e.target.value)}
                 className="w-full bg-[#0c1017] border border-zinc-700 text-xs font-semibold rounded px-2.5 py-1.5 text-white"
               >
-                {heavyweights.map((s) => (
+                {(constituents_report?.stocks || heavyweights).map((s) => (
                   <option key={s.symbol} value={s.symbol}>
-                    {s.name} ({s.weight}% Weight)
+                    {s.name} ({s.weight}% Weight - {s.sector})
                   </option>
                 ))}
               </select>
@@ -1064,16 +1291,16 @@ export default function NiftyQuantTerminal({
             <thead className="sticky top-0 z-20 bg-[#0c1017] shadow-md border-b-2 border-violet-900">
               <tr>
                 <th
-                  colSpan={viewMode === "flow" ? 6 : 6}
+                  colSpan={viewMode === "flow" ? 6 : 7}
                   className="py-1 px-2 text-center font-black tracking-widest uppercase bg-emerald-950/40 text-emerald-300 border-r border-violet-900/60"
                 >
                   CALLS (CE)
                 </th>
                 <th className="py-1 px-3 text-center font-black tracking-widest uppercase bg-[#141824] text-violet-300 border-r border-violet-900/60">
-                  STRIKE
+                  STRIKE / GEX
                 </th>
                 <th
-                  colSpan={viewMode === "flow" ? 6 : 6}
+                  colSpan={viewMode === "flow" ? 6 : 7}
                   className="py-1 px-2 text-center font-black tracking-widest uppercase bg-rose-950/40 text-rose-300"
                 >
                   PUTS (PE)
@@ -1098,6 +1325,7 @@ export default function NiftyQuantTerminal({
                     <th className="py-1.5 px-2 text-right">Gamma (Γ)</th>
                     <th className="py-1.5 px-2 text-right">Theta (Θ)</th>
                     <th className="py-1.5 px-2 text-right">Vega (ν)</th>
+                    <th className="py-1.5 px-2 text-right text-violet-400">Vanna</th>
                     <th className="py-1.5 px-2 text-right">IV%</th>
                     <th className="py-1.5 px-2 text-right font-black text-white border-r border-violet-900/40">
                       LTP
@@ -1124,6 +1352,7 @@ export default function NiftyQuantTerminal({
                   <>
                     <th className="py-1.5 px-2 text-left font-black text-white">LTP</th>
                     <th className="py-1.5 px-2 text-left">IV%</th>
+                    <th className="py-1.5 px-2 text-left text-violet-400">Vanna</th>
                     <th className="py-1.5 px-2 text-left">Vega (ν)</th>
                     <th className="py-1.5 px-2 text-left">Theta (Θ)</th>
                     <th className="py-1.5 px-2 text-left">Gamma (Γ)</th>
@@ -1140,7 +1369,7 @@ export default function NiftyQuantTerminal({
                 const isMaxPain = k === max_pain;
                 const isAtm = r.is_atm;
 
-                // ⭐ BEST STRIKE DETECTION
+                // BEST STRIKE DETECTION
                 const isBestStrike = best_trade && best_trade.strike === k;
                 const isBestLegCall = isBestStrike && best_trade.option_type === "CE";
                 const isBestLegPut = isBestStrike && best_trade.option_type === "PE";
@@ -1235,6 +1464,9 @@ export default function NiftyQuantTerminal({
                         <td className="py-1.5 px-2 text-right text-zinc-400">
                           {r.call.greeks.vega}
                         </td>
+                        <td className="py-1.5 px-2 text-right text-violet-300">
+                          {r.call.greeks.vanna ?? 0}
+                        </td>
                         <td className="py-1.5 px-2 text-right text-zinc-300">
                           {r.call.iv.toFixed(1)}%
                         </td>
@@ -1282,6 +1514,17 @@ export default function NiftyQuantTerminal({
                             </span>
                           )}
                         </div>
+
+                        {/* Net GEX pill if present */}
+                        {r.net_gex_cr !== undefined && (
+                          <span
+                            className={`text-[8px] px-1 rounded font-mono ${
+                              r.net_gex_cr >= 0 ? "text-emerald-400" : "text-rose-400"
+                            }`}
+                          >
+                            {r.net_gex_cr >= 0 ? "+" : ""}{r.net_gex_cr} Cr
+                          </span>
+                        )}
 
                         {/* Prominent Best Strike Badge */}
                         {isBestStrike && (
@@ -1385,6 +1628,9 @@ export default function NiftyQuantTerminal({
                         </td>
                         <td className="py-1.5 px-2 text-left text-zinc-300">
                           {r.put.iv.toFixed(1)}%
+                        </td>
+                        <td className="py-1.5 px-2 text-left text-violet-300">
+                          {r.put.greeks.vanna ?? 0}
                         </td>
                         <td className="py-1.5 px-2 text-left text-zinc-400">
                           {r.put.greeks.vega}

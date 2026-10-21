@@ -22,19 +22,62 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Top 10 Nifty 50 Heavyweights with their approximate free-float index weights (%)
-NIFTY_HEAVYWEIGHTS = [
-    {"symbol": "NSE:HDFCBANK-EQ", "name": "HDFC Bank", "weight": 11.5, "sector": "Banking"},
-    {"symbol": "NSE:RELIANCE-EQ", "name": "Reliance Ind.", "weight": 9.2, "sector": "Energy/Telecom"},
-    {"symbol": "NSE:ICICIBANK-EQ", "name": "ICICI Bank", "weight": 8.1, "sector": "Banking"},
-    {"symbol": "NSE:INFY-EQ", "name": "Infosys", "weight": 5.8, "sector": "IT"},
-    {"symbol": "NSE:TCS-EQ", "name": "TCS", "weight": 4.1, "sector": "IT"},
-    {"symbol": "NSE:ITC-EQ", "name": "ITC", "weight": 3.9, "sector": "FMCG"},
-    {"symbol": "NSE:LT-EQ", "name": "Larsen & Toubro", "weight": 3.8, "sector": "Infra"},
-    {"symbol": "NSE:AXISBANK-EQ", "name": "Axis Bank", "weight": 3.3, "sector": "Banking"},
-    {"symbol": "NSE:SBIN-EQ", "name": "State Bank of India", "weight": 2.9, "sector": "Banking"},
-    {"symbol": "NSE:BHARTIARTL-EQ", "name": "Bharti Airtel", "weight": 2.8, "sector": "Telecom"},
+# Complete 50 Nifty 50 Constituent Stocks with Free-Float Market Weights & Sectors
+NIFTY_50_CONSTITUENTS = [
+    {"symbol": "NSE:HDFCBANK-EQ", "name": "HDFC Bank", "weight": 11.52, "sector": "Financial Services"},
+    {"symbol": "NSE:RELIANCE-EQ", "name": "Reliance Industries", "weight": 9.18, "sector": "Oil Gas & Fuels"},
+    {"symbol": "NSE:ICICIBANK-EQ", "name": "ICICI Bank", "weight": 8.08, "sector": "Financial Services"},
+    {"symbol": "NSE:INFY-EQ", "name": "Infosys", "weight": 5.76, "sector": "Information Technology"},
+    {"symbol": "NSE:TCS-EQ", "name": "TCS", "weight": 4.12, "sector": "Information Technology"},
+    {"symbol": "NSE:ITC-EQ", "name": "ITC", "weight": 3.94, "sector": "FMCG"},
+    {"symbol": "NSE:LT-EQ", "name": "Larsen & Toubro", "weight": 3.82, "sector": "Construction"},
+    {"symbol": "NSE:AXISBANK-EQ", "name": "Axis Bank", "weight": 3.28, "sector": "Financial Services"},
+    {"symbol": "NSE:SBIN-EQ", "name": "State Bank of India", "weight": 2.92, "sector": "Financial Services"},
+    {"symbol": "NSE:BHARTIARTL-EQ", "name": "Bharti Airtel", "weight": 2.84, "sector": "Telecommunication"},
+    {"symbol": "NSE:KOTAKBANK-EQ", "name": "Kotak Mahindra Bank", "weight": 2.68, "sector": "Financial Services"},
+    {"symbol": "NSE:HINDUNILVR-EQ", "name": "Hindustan Unilever", "weight": 2.45, "sector": "FMCG"},
+    {"symbol": "NSE:BAJFINANCE-EQ", "name": "Bajaj Finance", "weight": 2.14, "sector": "Financial Services"},
+    {"symbol": "NSE:M&M-EQ", "name": "Mahindra & Mahindra", "weight": 2.02, "sector": "Automobile"},
+    {"symbol": "NSE:MARUTI-EQ", "name": "Maruti Suzuki", "weight": 1.62, "sector": "Automobile"},
+    {"symbol": "NSE:HCLTECH-EQ", "name": "HCL Technologies", "weight": 1.54, "sector": "Information Technology"},
+    {"symbol": "NSE:SUNPHARMA-EQ", "name": "Sun Pharma", "weight": 1.48, "sector": "Healthcare"},
+    {"symbol": "NSE:TMPV-EQ", "name": "Tata Motors PV", "weight": 1.42, "sector": "Automobile"},
+    {"symbol": "NSE:NTPC-EQ", "name": "NTPC", "weight": 1.38, "sector": "Power"},
+    {"symbol": "NSE:TITAN-EQ", "name": "Titan Company", "weight": 1.32, "sector": "Consumer Durables"},
+    {"symbol": "NSE:POWERGRID-EQ", "name": "Power Grid Corp", "weight": 1.24, "sector": "Power"},
+    {"symbol": "NSE:TATASTEEL-EQ", "name": "Tata Steel", "weight": 1.15, "sector": "Metals & Mining"},
+    {"symbol": "NSE:ADANIENT-EQ", "name": "Adani Enterprises", "weight": 1.10, "sector": "Metals & Mining"},
+    {"symbol": "NSE:ADANIPORTS-EQ", "name": "Adani Ports & SEZ", "weight": 1.05, "sector": "Services"},
+    {"symbol": "NSE:COALINDIA-EQ", "name": "Coal India", "weight": 1.02, "sector": "Oil Gas & Fuels"},
+    {"symbol": "NSE:BAJAJFINSV-EQ", "name": "Bajaj Finserv", "weight": 0.94, "sector": "Financial Services"},
+    {"symbol": "NSE:ULTRACEMCO-EQ", "name": "UltraTech Cement", "weight": 0.92, "sector": "Construction Materials"},
+    {"symbol": "NSE:ONGC-EQ", "name": "ONGC", "weight": 0.88, "sector": "Oil Gas & Fuels"},
+    {"symbol": "NSE:ASIANPAINT-EQ", "name": "Asian Paints", "weight": 0.85, "sector": "Consumer Durables"},
+    {"symbol": "NSE:JSWSTEEL-EQ", "name": "JSW Steel", "weight": 0.84, "sector": "Metals & Mining"},
+    {"symbol": "NSE:GRASIM-EQ", "name": "Grasim Industries", "weight": 0.82, "sector": "Construction Materials"},
+    {"symbol": "NSE:TECHM-EQ", "name": "Tech Mahindra", "weight": 0.80, "sector": "Information Technology"},
+    {"symbol": "NSE:HINDALCO-EQ", "name": "Hindalco Industries", "weight": 0.78, "sector": "Metals & Mining"},
+    {"symbol": "NSE:CIPLA-EQ", "name": "Cipla", "weight": 0.72, "sector": "Healthcare"},
+    {"symbol": "NSE:DRREDDY-EQ", "name": "Dr. Reddy's Lab", "weight": 0.68, "sector": "Healthcare"},
+    {"symbol": "NSE:APOLLOHOSP-EQ", "name": "Apollo Hospitals", "weight": 0.66, "sector": "Healthcare"},
+    {"symbol": "NSE:NESTLEIND-EQ", "name": "Nestle India", "weight": 0.64, "sector": "FMCG"},
+    {"symbol": "NSE:EICHERMOT-EQ", "name": "Eicher Motors", "weight": 0.62, "sector": "Automobile"},
+    {"symbol": "NSE:HEROMOTOCO-EQ", "name": "Hero MotoCorp", "weight": 0.58, "sector": "Automobile"},
+    {"symbol": "NSE:BPCL-EQ", "name": "BPCL", "weight": 0.56, "sector": "Oil Gas & Fuels"},
+    {"symbol": "NSE:BRITANNIA-EQ", "name": "Britannia Industries", "weight": 0.54, "sector": "FMCG"},
+    {"symbol": "NSE:DIVISLAB-EQ", "name": "Divi's Laboratories", "weight": 0.52, "sector": "Healthcare"},
+    {"symbol": "NSE:TATACONSUM-EQ", "name": "Tata Consumer Products", "weight": 0.50, "sector": "FMCG"},
+    {"symbol": "NSE:SBILIFE-EQ", "name": "SBI Life Insurance", "weight": 0.48, "sector": "Financial Services"},
+    {"symbol": "NSE:HDFCLIFE-EQ", "name": "HDFC Life Insurance", "weight": 0.46, "sector": "Financial Services"},
+    {"symbol": "NSE:BAJAJ-AUTO-EQ", "name": "Bajaj Auto", "weight": 0.45, "sector": "Automobile"},
+    {"symbol": "NSE:BEL-EQ", "name": "Bharat Electronics", "weight": 0.45, "sector": "Capital Goods"},
+    {"symbol": "NSE:TRENT-EQ", "name": "Trent Ltd", "weight": 0.44, "sector": "Consumer Services"},
+    {"symbol": "NSE:SHRIRAMFIN-EQ", "name": "Shriram Finance", "weight": 0.43, "sector": "Financial Services"},
+    {"symbol": "NSE:WIPRO-EQ", "name": "Wipro", "weight": 0.42, "sector": "Information Technology"},
 ]
+
+# Legacy alias for backward compatibility
+NIFTY_HEAVYWEIGHTS = NIFTY_50_CONSTITUENTS[:10]
 
 def normal_cdf(x: float) -> float:
     """Cumulative standard normal distribution."""
@@ -89,31 +132,37 @@ def compute_bs_greeks(
     risk_free_rate: float = 0.07,
 ) -> Dict[str, float]:
     """
-    Computes Black-Scholes Greeks: Delta, Gamma, Theta, Vega.
+    Computes first-order and second-order Black-Scholes Greeks:
+    Delta, Gamma, Theta, Vega, Vanna, Charm.
     """
     T = max(days_to_expiry / 365.0, 0.0005)
     sigma = max(iv_pct / 100.0, 0.05) if iv_pct else 0.14
     
     if spot <= 0 or strike <= 0:
-        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "vanna": 0.0, "charm": 0.0}
 
-    d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * (sigma ** 2)) * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * (sigma ** 2)) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
 
     pdf_d1 = normal_pdf(d1)
-    gamma = pdf_d1 / (spot * sigma * math.sqrt(T))
-    vega = (spot * math.sqrt(T) * pdf_d1) / 100.0  # ₹ change per 1% IV change
+    gamma = pdf_d1 / (spot * sigma * sqrt_T)
+    vega = (spot * sqrt_T * pdf_d1) / 100.0  # ₹ change per 1% IV change
+    # Vanna: dDelta / dVol
+    vanna = (-pdf_d1 * d2 / sigma) / 100.0 if sigma > 0 else 0.0
+    # Charm: dDelta / dTime (delta decay per day)
+    charm = -(pdf_d1 * (risk_free_rate / (sigma * sqrt_T) - d2 / (2.0 * T))) / 365.0
 
     if option_type.upper() == "CE":
         delta = normal_cdf(d1)
         theta = (
-            -(spot * sigma * pdf_d1) / (2 * math.sqrt(T))
+            -(spot * sigma * pdf_d1) / (2.0 * sqrt_T)
             - risk_free_rate * strike * math.exp(-risk_free_rate * T) * normal_cdf(d2)
         ) / 365.0
     else:
         delta = normal_cdf(d1) - 1.0
         theta = (
-            -(spot * sigma * pdf_d1) / (2 * math.sqrt(T))
+            -(spot * sigma * pdf_d1) / (2.0 * sqrt_T)
             + risk_free_rate * strike * math.exp(-risk_free_rate * T) * normal_cdf(-d2)
         ) / 365.0
 
@@ -122,6 +171,8 @@ def compute_bs_greeks(
         "gamma": round(gamma, 5),
         "theta": round(theta, 2),
         "vega": round(vega, 2),
+        "vanna": round(vanna, 4),
+        "charm": round(charm, 4),
     }
 
 class NiftyQuantService:
@@ -189,31 +240,41 @@ class NiftyQuantService:
 
         raw_chain = chain_data.get("chain") or []
         
-        # 1. Process Strikes with Greeks, 4-Quadrant states, and Color Matrix
+        # 1. Process Strikes with Greeks, GEX, 4-Quadrant states, and Color Matrix
         analyzed_strikes, call_wall, put_wall, max_pain = self._process_strikes(
             raw_chain, spot_price, atm_strike, time_to_expiry_days
         )
 
-        # 2. ATM Straddle Fair Value & Skew
+        # 2. Institutional Greeks Profile (Net GEX, Gamma Flip, DEX, VEX, 25D Skew, Daily Theta Burn)
+        quant_greeks = self._calculate_quant_greeks_profile(analyzed_strikes, spot_price, atm_strike)
+
+        # 3. ATM Straddle Fair Value & Skew
         straddle_metrics = self._calculate_straddle_metrics(analyzed_strikes, atm_strike)
 
-        # 3. Concentrated PCR (ATM +- 3 strikes) & Aggregate PCR
+        # 4. Concentrated PCR (ATM +- 3 strikes) & Aggregate PCR
         pcr_metrics = self._calculate_pcr_metrics(analyzed_strikes, atm_strike)
 
-        # 4. Institutional Traps Detection
+        # 5. Institutional Traps Detection
         trap_alerts = self._detect_institutional_traps(analyzed_strikes, spot_price, atm_strike)
 
-        # 5. Heavyweight Point Contribution & Live F&O Breakout Transmission
-        heavyweight_contributions, net_stock_impact_pts = self._calculate_heavyweight_impact(spot_price, force_refresh)
+        # 6. Comprehensive 50 Nifty Constituent Stocks Analysis & Transmission
+        constituents_report, heavyweight_contributions, net_stock_impact_pts = self._analyze_50_constituents(spot_price, force_refresh)
         heavyweight_fno_report = self._analyze_heavyweight_fno_breakouts(spot_price, force_refresh)
 
-        # 6. Best Trade Recommendation Engine
+        # 7. Multi-Strategy Recommendation Matrix & Best Trade Selection
         effective_pts = (
-            heavyweight_fno_report.get("net_transmitted_thrust_pts", 0.0)
-            if abs(heavyweight_fno_report.get("net_transmitted_thrust_pts", 0.0)) > 5
-            else net_stock_impact_pts
+            constituents_report.get("net_transmitted_thrust_pts", 0.0)
+            if abs(constituents_report.get("net_transmitted_thrust_pts", 0.0)) > 3
+            else (
+                heavyweight_fno_report.get("net_transmitted_thrust_pts", 0.0)
+                if abs(heavyweight_fno_report.get("net_transmitted_thrust_pts", 0.0)) > 5
+                else net_stock_impact_pts
+            )
         )
-        best_trade = self._select_best_trade(
+        strategies = self._generate_strategies_matrix(
+            analyzed_strikes, spot_price, atm_strike, time_to_expiry_days, quant_greeks, constituents_report, trap_alerts, call_wall, put_wall
+        )
+        best_trade = strategies[0] if strategies else self._select_best_trade(
             analyzed_strikes, spot_price, atm_strike, time_to_expiry_days, effective_pts, trap_alerts
         )
 
@@ -226,13 +287,16 @@ class NiftyQuantService:
             "call_wall": call_wall,
             "put_wall": put_wall,
             "max_pain": max_pain,
+            "quant_greeks": quant_greeks,
             "straddle": straddle_metrics,
             "pcr": pcr_metrics,
             "traps": trap_alerts,
+            "constituents_report": constituents_report,
             "heavyweights": heavyweight_contributions,
             "heavyweight_fno": heavyweight_fno_report,
             "net_heavyweight_points": round(net_stock_impact_pts, 2),
             "best_trade": best_trade,
+            "strategies": strategies,
             "strikes": analyzed_strikes,
             "timestamp": datetime.now().isoformat(),
         }
@@ -304,6 +368,14 @@ class NiftyQuantService:
             c_greeks = compute_bs_greeks(spot_price, k, days_to_expiry, c_iv, "CE")
             p_greeks = compute_bs_greeks(spot_price, k, days_to_expiry, p_iv, "PE")
 
+            # Per-strike Dealer Gamma Exposure (in ₹ Crores per 1% spot move)
+            spot_mult = (spot_price ** 2) * 0.01 / 1e7
+            c_gex = round(c_oi * c_greeks["gamma"] * spot_mult, 2)
+            p_gex = round(-p_oi * p_greeks["gamma"] * spot_mult, 2)
+            net_gex = round(c_gex + p_gex, 2)
+            c_greeks["gex"] = c_gex
+            p_greeks["gex"] = p_gex
+
             # 4-Quadrant Buildup & UI Color Classification for Call
             c_state, c_color, c_badge = self._classify_quadrant(c_chg, c_oich, c_vol, c_oi, c_ltp)
 
@@ -317,6 +389,7 @@ class NiftyQuantService:
                 "strike": k,
                 "is_atm": abs(k - atm_strike) < 25,
                 "aar": aar,
+                "net_gex": net_gex,
                 "call": {
                     "ltp": c_ltp,
                     "chg": c_chg,
@@ -536,78 +609,313 @@ class NiftyQuantService:
 
         return traps
 
-    def _calculate_heavyweight_impact(self, nifty_spot: float, force_refresh: bool = False) -> Tuple[List[Dict[str, Any]], float]:
+    def _calculate_quant_greeks_profile(
+        self, analyzed_strikes: List[Dict[str, Any]], spot_price: float, atm_strike: float
+    ) -> Dict[str, Any]:
         """
-        Fetches live stock quotes of the Top 10 Nifty 50 constituents and calculates
-        the exact point contribution of each stock to the Nifty index:
-        delta_points = (weight / 100) * (pct_change / 100) * nifty_spot
+        Computes institutional dealer Greek exposures:
+        - Total Net GEX (Dealer Gamma Exposure in ₹ Crores per 1% move)
+        - Gamma Flip Level (zero-crossing strike)
+        - Gamma Regime: LONG_GAMMA_STABILIZING vs SHORT_GAMMA_VOLATILITY_EXPANSION
+        - Dealer Net DEX (Delta Exposure in ₹ Crores)
+        - Dealer Net VEX (Vega Exposure in ₹ Crores per 1% IV change)
+        - 25-Delta IV Skew (Institutional tail-risk hedging premium)
+        - ATM Cluster Daily Theta Burn (₹ Crores per day)
+        """
+        if not analyzed_strikes:
+            return {}
+
+        total_net_gex = sum(r.get("net_gex", 0.0) for r in analyzed_strikes)
+        call_gex = sum((r["call"]["greeks"].get("gex") or 0.0) for r in analyzed_strikes)
+        put_gex = sum((r["put"]["greeks"].get("gex") or 0.0) for r in analyzed_strikes)
+
+        # Gamma Flip Strike (level where cumulative net GEX crosses 0)
+        gamma_flip_strike = atm_strike
+        cum_gex = 0.0
+        for r in analyzed_strikes:
+            cum_gex += r.get("net_gex", 0.0)
+            if cum_gex >= 0:
+                gamma_flip_strike = r["strike"]
+                break
+
+        regime = (
+            "LONG_GAMMA_STABILIZING"
+            if total_net_gex > 0
+            else "SHORT_GAMMA_VOLATILITY_EXPANSION"
+        )
+
+        # Net DEX (₹ Crores)
+        total_dex = sum(
+            (r["call"]["oi"] * r["call"]["greeks"]["delta"] + r["put"]["oi"] * r["put"]["greeks"]["delta"])
+            * spot_price / 1e7
+            for r in analyzed_strikes
+        )
+
+        # Net VEX (₹ Crores per 1% IV change)
+        total_vex = sum(
+            (r["call"]["oi"] * r["call"]["greeks"]["vega"] + r["put"]["oi"] * r["put"]["greeks"]["vega"])
+            / 1e7
+            for r in analyzed_strikes
+        )
+
+        # 25-Delta IV Skew: find strike with CE delta closest to 0.25, and PE delta closest to -0.25
+        c_25 = min(analyzed_strikes, key=lambda x: abs(x["call"]["greeks"]["delta"] - 0.25), default=None)
+        p_25 = min(analyzed_strikes, key=lambda x: abs(x["put"]["greeks"]["delta"] - (-0.25)), default=None)
+        skew_25d = round((p_25["put"]["iv"] - c_25["call"]["iv"]), 2) if (c_25 and p_25) else 0.0
+
+        # Daily Theta Burn across ATM Cluster (± 150 points)
+        atm_cluster = [r for r in analyzed_strikes if abs(r["strike"] - atm_strike) <= 150]
+        daily_theta_burn_cr = round(
+            sum((r["call"]["oi"] * abs(r["call"]["greeks"]["theta"]) + r["put"]["oi"] * abs(r["put"]["greeks"]["theta"])) / 1e7 for r in atm_cluster),
+            2
+        )
+
+        return {
+            "net_gex_crores": round(total_net_gex, 1),
+            "call_gex_crores": round(call_gex, 1),
+            "put_gex_crores": round(put_gex, 1),
+            "gamma_flip_strike": gamma_flip_strike,
+            "gamma_regime": regime,
+            "gamma_thesis": (
+                f"Dealers Long Gamma (+₹{total_net_gex:.0f}Cr): Hedging dampens volatility. Market makers buy dips and sell rallies. High probability of mean-reversion inside walls."
+                if total_net_gex > 0
+                else f"Dealers Short Gamma ({total_net_gex:.0f}Cr): Hedging accelerates momentum. Market makers sell dips and buy breakouts. Explosive trend expansion active."
+            ),
+            "net_dex_crores": round(total_dex, 1),
+            "net_vex_crores": round(total_vex, 2),
+            "iv_skew_25d": skew_25d,
+            "skew_sentiment": (
+                "HIGH_PUT_DEMAND_DEFENSIVE"
+                if skew_25d > 2.5
+                else ("CALL_CHASE_SPECULATIVE" if skew_25d < -0.5 else "BALANCED_SKEW")
+            ),
+            "daily_theta_burn_cr": daily_theta_burn_cr,
+        }
+
+    def _analyze_50_constituents(
+        self, nifty_spot: float, force_refresh: bool = False
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], float]:
+        """
+        Analyzes the full 50 F&O constituent stocks of Nifty 50:
+        1. Exact point impact transmission: (weight / 100) * (chp / 100) * nifty_spot
+        2. Market Breadth: Advances vs Declines, Weight-Adjusted Breadth %
+        3. Sector-wise Transmission breakdown (Banking, IT, Oil/Gas, Auto, Metals, etc.)
+        4. Top 5 Positive Drivers & Top 5 Negative Drags
+        5. Live F&O Wall and PCR mapping from symbol_store
         """
         from app.services import symbol_store as store
         from app.services.fyers_market import get_market_service
 
         market_service = get_market_service()
-        contributions = []
-        net_impact_points = 0.0
-
-        # Check store first unless force_refresh
         spots_cache = {}
         missing_syms = []
-        for stock in NIFTY_HEAVYWEIGHTS:
-            sym = stock["symbol"]
-            quote = None if force_refresh else store.get_spot(sym) or {}
-            if quote and quote.get("ltp") and quote.get("ltp") > 0:
-                spots_cache[sym] = quote
+
+        all_syms = [s["symbol"] for s in NIFTY_50_CONSTITUENTS]
+        cached_spots = store.get_spots(all_syms) if not force_refresh else {}
+        for s in NIFTY_50_CONSTITUENTS:
+            sym = s["symbol"]
+            q = cached_spots.get(sym) or store.get_spot(sym)
+            if q and q.get("ltp") and q.get("ltp") > 0:
+                spots_cache[sym] = q
             else:
                 missing_syms.append(sym)
 
-        # If any missing in store or force_refresh, fetch batch quotes directly
+        # Batch fetch missing quotes via Fyers quotes endpoint in chunks of 50
         if missing_syms:
             try:
                 fyers = market_service._get_fyers()
                 if fyers:
-                    resp = market_service._invoke("quotes", lambda: fyers.quotes({"symbols": ",".join(missing_syms)}))
-                    if resp.get("s") == "ok":
-                        for item in resp.get("d", []):
-                            v = item.get("v", {})
-                            item_sym = item.get("n")
-                            if item_sym:
-                                q_obj = {
-                                    "ltp": v.get("lp", 0) or v.get("ltp", 0),
-                                    "chp": v.get("chp", 0),
-                                    "chg": v.get("ch", 0),
-                                }
-                                spots_cache[item_sym] = q_obj
-                                store.put_spot(item_sym, q_obj)
+                    for i in range(0, len(missing_syms), 50):
+                        batch = missing_syms[i:i + 50]
+                        resp = market_service._invoke("quotes", lambda: fyers.quotes({"symbols": ",".join(batch)}))
+                        if resp.get("s") == "ok":
+                            for item in resp.get("d", []):
+                                v = item.get("v", {})
+                                item_sym = item.get("n")
+                                if item_sym:
+                                    q_obj = {
+                                        "ltp": v.get("lp", 0) or v.get("ltp", 0),
+                                        "chp": v.get("chp", 0),
+                                        "chg": v.get("ch", 0),
+                                    }
+                                    spots_cache[item_sym] = q_obj
+                                    store.put_spot(item_sym, q_obj)
             except Exception as e:
-                logger.debug(f"Direct quote fetch fallback skipped: {e}")
+                logger.debug(f"Direct 50-stock batch quote fetch skipped: {e}")
 
-        for stock in NIFTY_HEAVYWEIGHTS:
+        detailed_constituents = []
+        net_impact_points = 0.0
+        advances = 0
+        declines = 0
+        unchanged = 0
+        adv_weight = 0.0
+        dec_weight = 0.0
+
+        sector_map: Dict[str, Dict[str, Any]] = {}
+
+        for stock in NIFTY_50_CONSTITUENTS:
             sym = stock["symbol"]
-            quote = spots_cache.get(sym) or store.get_spot(sym) or {}
+            name = stock["name"]
+            sector = stock["sector"]
+            weight = stock["weight"]
 
+            quote = spots_cache.get(sym) or store.get_spot(sym) or {}
             ltp = float(quote.get("ltp") or 0.0)
             chp = float(quote.get("chp") or quote.get("change_percent") or quote.get("change_pct") or 0.0)
             chg = float(quote.get("chg") or quote.get("change") or 0.0)
 
             # Mathematical Point Contribution formula
-            point_impact = (stock["weight"] / 100.0) * (chp / 100.0) * nifty_spot
+            point_impact = (weight / 100.0) * (chp / 100.0) * nifty_spot
             net_impact_points += point_impact
 
-            contributions.append({
+            # Breadth tally
+            if chp > 0.05:
+                advances += 1
+                adv_weight += weight
+                bias = "BULLISH"
+            elif chp < -0.05:
+                declines += 1
+                dec_weight += weight
+                bias = "BEARISH"
+            else:
+                unchanged += 1
+                bias = "NEUTRAL"
+
+            # Check if option chain / board metrics exist in store
+            snap = store.get(sym) or {}
+            derived = snap.get("derived") or {}
+            chain_doc = snap.get("chain") or {}
+            stock_pcr = derived.get("pcr") or chain_doc.get("pcr") or 1.0
+            call_wall = derived.get("call_wall") or 0
+            put_wall = derived.get("put_wall") or 0
+
+            # Determine wall state
+            if call_wall > 0 and ltp >= call_wall:
+                state = "CALL_WALL_BREACH"
+                badge = "🚀 CALL BREACH"
+                color = "#00E5FF"
+            elif put_wall > 0 and ltp <= put_wall:
+                state = "PUT_WALL_BREACH"
+                badge = "💥 PUT BREACH"
+                color = "#FF1744"
+            elif call_wall > 0 and (call_wall - ltp) / max(ltp, 1) < 0.012:
+                state = "CALL_WALL_SQUEEZE"
+                badge = "🔥 SQUEEZE"
+                color = "#00E5FF"
+            elif put_wall > 0 and (ltp - put_wall) / max(ltp, 1) < 0.012:
+                state = "PUT_FLOOR_SUPPORT"
+                badge = "🛡️ PUT FLOOR"
+                color = "#00E676"
+            elif point_impact > 1.0:
+                state = "BULL_EXPANSION"
+                badge = "🟢 ADVANCING"
+                color = "#00E676"
+            elif point_impact < -1.0:
+                state = "BEAR_DRAG"
+                badge = "🔴 DRAGGING"
+                color = "#FF1744"
+            else:
+                state = "NEUTRAL"
+                badge = "⚖️ NEUTRAL"
+                color = "#9CA3AF"
+
+            # Sector aggregation
+            if sector not in sector_map:
+                sector_map[sector] = {
+                    "sector": sector,
+                    "total_weight": 0.0,
+                    "net_points": 0.0,
+                    "advances": 0,
+                    "declines": 0,
+                    "stocks_count": 0,
+                    "leader": name,
+                    "leader_impact": point_impact,
+                }
+            s_entry = sector_map[sector]
+            s_entry["total_weight"] += weight
+            s_entry["net_points"] += point_impact
+            s_entry["stocks_count"] += 1
+            if chp > 0:
+                s_entry["advances"] += 1
+            elif chp < 0:
+                s_entry["declines"] += 1
+            if point_impact > s_entry["leader_impact"]:
+                s_entry["leader"] = name
+                s_entry["leader_impact"] = point_impact
+
+            detailed_constituents.append({
                 "symbol": sym,
-                "name": stock["name"],
-                "sector": stock["sector"],
-                "weight": stock["weight"],
-                "ltp": ltp,
+                "name": name,
+                "sector": sector,
+                "weight": round(weight, 2),
+                "ltp": round(ltp, 2),
                 "change_pct": round(chp, 2),
                 "change": round(chg, 2),
                 "point_impact": round(point_impact, 2),
-                "bias": "BULLISH" if point_impact > 1.0 else ("BEARISH" if point_impact < -1.0 else "NEUTRAL"),
+                "bias": bias,
+                "pcr": round(float(stock_pcr), 2) if stock_pcr else 1.0,
+                "call_wall": round(float(call_wall), 1) if call_wall else 0,
+                "put_wall": round(float(put_wall), 1) if put_wall else 0,
+                "state": state,
+                "badge": badge,
+                "color": color,
             })
 
-        # Sort by absolute point impact
-        contributions.sort(key=lambda x: abs(x["point_impact"]), reverse=True)
-        return contributions, net_impact_points
+        # Sort all constituents by absolute point impact
+        detailed_constituents.sort(key=lambda x: abs(x["point_impact"]), reverse=True)
+
+        # Top 5 Drivers & Top 5 Drags
+        top_drivers = [s for s in sorted(detailed_constituents, key=lambda x: x["point_impact"], reverse=True) if s["point_impact"] > 0][:5]
+        top_drags = [s for s in sorted(detailed_constituents, key=lambda x: x["point_impact"]) if s["point_impact"] < 0][:5]
+
+        # Sector breakdown sorted by net point impact
+        sector_breakdown = []
+        for s_name, s_data in sector_map.items():
+            sector_breakdown.append({
+                "sector": s_name,
+                "total_weight": round(s_data["total_weight"], 1),
+                "net_points": round(s_data["net_points"], 1),
+                "advances": s_data["advances"],
+                "declines": s_data["declines"],
+                "stocks_count": s_data["stocks_count"],
+                "leader": s_data["leader"],
+            })
+        sector_breakdown.sort(key=lambda x: abs(x["net_points"]), reverse=True)
+
+        # Breadth regime
+        adv_wt_pct = round((adv_weight / max(adv_weight + dec_weight, 1.0)) * 100.0, 1)
+        if adv_wt_pct >= 65.0:
+            breadth_regime = "BROAD_BASED_ACCUMULATION"
+        elif adv_wt_pct <= 35.0:
+            breadth_regime = "BROAD_BASED_DISTRIBUTION"
+        else:
+            breadth_regime = "SELECTIVE_CHOP_MIXED"
+
+        constituents_report = {
+            "net_transmitted_thrust_pts": round(net_impact_points, 1),
+            "market_breadth": {
+                "advances": advances,
+                "declines": declines,
+                "unchanged": unchanged,
+                "advance_weight_pct": adv_wt_pct,
+                "decline_weight_pct": round(100.0 - adv_wt_pct, 1),
+                "breadth_regime": breadth_regime,
+            },
+            "top_drivers": top_drivers,
+            "top_drags": top_drags,
+            "sector_breakdown": sector_breakdown,
+            "constituents": detailed_constituents,
+        }
+
+        # Top 10 heavyweights for backward compatibility
+        top_10 = detailed_constituents[:10]
+
+        return constituents_report, top_10, round(net_impact_points, 2)
+
+    def _calculate_heavyweight_impact(self, nifty_spot: float, force_refresh: bool = False) -> Tuple[List[Dict[str, Any]], float]:
+        """Backward-compatible wrapper around _analyze_50_constituents."""
+        report, top_10, net_impact = self._analyze_50_constituents(nifty_spot, force_refresh)
+        return top_10, net_impact
 
     def _analyze_heavyweight_fno_breakouts(self, nifty_spot: float, force_refresh: bool = False) -> Dict[str, Any]:
         """
@@ -836,8 +1144,9 @@ class NiftyQuantService:
         What-If Simulator:
         Given an expected stock breakout %, calculates the projected point rally on Nifty,
         target Nifty level, and the optimal strike price to execute.
+        Supports all 50 Nifty constituent stocks.
         """
-        stock_meta = next((s for s in NIFTY_HEAVYWEIGHTS if s["symbol"] == stock_symbol or s["name"].lower() in stock_symbol.lower()), None)
+        stock_meta = next((s for s in NIFTY_50_CONSTITUENTS if s["symbol"] == stock_symbol or s["name"].lower() in stock_symbol.lower() or stock_symbol.lower() in s["symbol"].lower()), None)
         weight = stock_meta["weight"] if stock_meta else 5.0
         stock_name = stock_meta["name"] if stock_meta else stock_symbol
 
@@ -868,6 +1177,110 @@ class NiftyQuantService:
                 f"contributes {delta_nifty:+.1f} points to Nifty, driving index toward {projected_nifty:.0f}."
             ),
         }
+
+    def _generate_strategies_matrix(
+        self,
+        analyzed_strikes: List[Dict[str, Any]],
+        spot_price: float,
+        atm_strike: float,
+        days_to_expiry: float,
+        quant_greeks: Dict[str, Any],
+        constituents_report: Dict[str, Any],
+        traps: List[Dict[str, Any]],
+        call_wall: Dict[str, Any],
+        put_wall: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Generates 3 institutional strategies:
+        1. Delta Sweet-Spot Momentum (Optimal CE or PE Buy, Delta 0.38 - 0.52)
+        2. Gamma Squeeze Breakout (Aggressive near Call Wall / Put Wall)
+        3. Volatility Mean Reversion / Iron Condor Pinning (Selling walls in Long Gamma regime)
+        """
+        strategies = []
+        has_call_trap = any(t["type"] == "CALL_WRITER_TRAP" for t in traps)
+        net_thrust = constituents_report.get("net_transmitted_thrust_pts", 0.0)
+        net_gex = quant_greeks.get("net_gex_crores", 0.0)
+
+        # 1. Delta Sweet Spot Strategy
+        primary_bias = "BULLISH" if net_thrust > 0 and not has_call_trap else "BEARISH"
+        best_delta = self._select_best_trade(
+            analyzed_strikes, spot_price, atm_strike, days_to_expiry, net_thrust, traps
+        )
+        if best_delta:
+            best_delta["strategy_name"] = "Delta Sweet-Spot Directional Trade"
+            best_delta["strategy_type"] = "DIRECTIONAL_MOMENTUM"
+            strategies.append(best_delta)
+
+        # 2. Gamma Squeeze Breakout Strategy
+        gamma_strike = call_wall.get("strike", atm_strike + 100) if primary_bias == "BULLISH" else put_wall.get("strike", atm_strike - 100)
+        opt_type = "CE" if primary_bias == "BULLISH" else "PE"
+        sq_row = next((r for r in analyzed_strikes if r["strike"] == gamma_strike), None)
+        if sq_row:
+            leg = sq_row["call"] if opt_type == "CE" else sq_row["put"]
+            ltp = leg["ltp"]
+            if ltp > 10.0:
+                d_mag = abs(leg["greeks"]["delta"])
+                sl = round(ltp * 0.65, 1)
+                t1 = round(ltp + d_mag * 75.0, 1)
+                t2 = round(ltp + d_mag * 140.0, 1)
+                rr = round((t1 - ltp) / max(ltp - sl, 1.0), 2)
+                strategies.append({
+                    "strategy_name": f"Wall Breakout & Gamma Squeeze ({opt_type})",
+                    "strategy_type": "GAMMA_SQUEEZE",
+                    "symbol": f"NIFTY {int(gamma_strike)} {opt_type}",
+                    "strike": gamma_strike,
+                    "option_type": opt_type,
+                    "bias": primary_bias,
+                    "entry_ltp": ltp,
+                    "stop_loss": sl,
+                    "target_1": t1,
+                    "target_2": t2,
+                    "risk_reward": f"1:{rr}",
+                    "conviction_score": 88.0 if net_gex < 0 else 76.0,
+                    "greeks": leg["greeks"],
+                    "state": leg["state"],
+                    "rationale": (
+                        f"Targeting a gamma breakout at {gamma_strike:.0f} {opt_type}. "
+                        f"If spot crosses this wall, short covering triggers an explosive runner."
+                    ),
+                })
+
+        # 3. Mean Reversion Pinning / Range Strategy
+        if call_wall.get("strike") and put_wall.get("strike"):
+            cw = call_wall["strike"]
+            pw = put_wall["strike"]
+            c_row = next((r for r in analyzed_strikes if r["strike"] == cw), None)
+            p_row = next((r for r in analyzed_strikes if r["strike"] == pw), None)
+            c_prem = c_row["call"]["ltp"] if c_row else 25.0
+            p_prem = p_row["put"]["ltp"] if p_row else 25.0
+            tot_prem = round(c_prem + p_prem, 1)
+            strategies.append({
+                "strategy_name": "Iron Corridor / Wall Pinning Play",
+                "strategy_type": "RANGE_PINNING",
+                "symbol": f"NIFTY {int(pw)} PE / {int(cw)} CE",
+                "strike": (cw + pw) / 2.0,
+                "option_type": "STRANGLE_SELL",
+                "bias": "RANGE_BOUND",
+                "entry_ltp": tot_prem,
+                "stop_loss": round(tot_prem * 1.5, 1),
+                "target_1": round(tot_prem * 0.45, 1),
+                "target_2": round(tot_prem * 0.20, 1),
+                "risk_reward": "1:1.80",
+                "conviction_score": 85.0 if net_gex > 0 else 60.0,
+                "greeks": {
+                    "delta": 0.05,
+                    "gamma": -0.0003,
+                    "theta": round(abs((c_row["call"]["greeks"]["theta"] if c_row else 0) + (p_row["put"]["greeks"]["theta"] if p_row else 0)), 1),
+                    "vega": round((c_row["call"]["greeks"]["vega"] if c_row else 0) + (p_row["put"]["greeks"]["vega"] if p_row else 0), 1),
+                },
+                "state": "POSITIVE_GAMMA_PINNING",
+                "rationale": (
+                    f"Dealers Long Gamma (+₹{net_gex:.0f}Cr). Market pinned between Put Floor ₹{pw:.0f} "
+                    f"and Call Cap ₹{cw:.0f}. High probability of premium decay into expiry."
+                ),
+            })
+
+        return strategies
 
     def _select_best_trade(
         self,
