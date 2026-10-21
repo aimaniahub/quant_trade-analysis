@@ -134,12 +134,22 @@ export interface StrategyItem {
   strategy_type?: string;
   strike: number;
   entry_ltp: number;
+  net_credit?: number;
+  max_risk?: number;
   stop_loss: number;
   target_1: number;
   target_2: number;
   risk_reward: string;
   conviction_score: number;
   rationale: string;
+  legs?: Array<{
+    action: string;
+    strike: number;
+    type: string;
+    ltp: number;
+    oi?: number;
+    role?: string;
+  }>;
   greeks: {
     delta: number;
     gamma: number;
@@ -770,14 +780,42 @@ const DEFAULT_FALLBACK_STOCKS: ConstituentStockItem[] = [
                     CONVICTION {currentStrategy.conviction_score}/100
                   </span>
                 </div>
-                <div className="text-xs font-mono font-bold text-zinc-300 mt-0.5 flex items-center gap-2">
+                <div className="text-xs font-mono font-bold text-zinc-300 mt-0.5 flex flex-wrap items-center gap-2">
                   <span>Strike: <span className="text-violet-300 font-black">{currentStrategy.strike} {currentStrategy.type || currentStrategy.option_type}</span></span>
                   <span className="text-zinc-500">•</span>
-                  <span>Entry LTP: <span className="text-white font-bold">₹{currentStrategy.entry_ltp}</span></span>
+                  <span>{currentStrategy.net_credit ? "Net Credit" : "Entry LTP"}: <span className="text-white font-bold">₹{currentStrategy.entry_ltp}</span></span>
+                  {currentStrategy.max_risk && (
+                    <>
+                      <span className="text-zinc-500">•</span>
+                      <span>Max Risk: <span className="text-rose-400 font-bold">₹{currentStrategy.max_risk}</span></span>
+                    </>
+                  )}
                 </div>
                 <div className="text-[11px] text-zinc-300 mt-1 max-w-2xl leading-relaxed">
                   {currentStrategy.rationale}
                 </div>
+                {/* Structured Execution Legs */}
+                {currentStrategy.legs && currentStrategy.legs.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 mt-2 pt-2 border-t border-violet-900/30">
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 font-bold">
+                      Institutional Execution Legs:
+                    </span>
+                    {currentStrategy.legs.map((leg: any, lIdx: number) => (
+                      <span
+                        key={lIdx}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border flex items-center gap-1.5 ${
+                          leg.action === "SELL"
+                            ? "bg-rose-950/60 text-rose-300 border-rose-800/80"
+                            : "bg-emerald-950/60 text-emerald-300 border-emerald-800/80"
+                        }`}
+                      >
+                        <span className="font-black">{leg.action}</span>
+                        <span>{leg.strike} {leg.type}</span>
+                        <span className="text-zinc-400">@ ₹{leg.ltp}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
